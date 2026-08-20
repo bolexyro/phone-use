@@ -1,0 +1,136 @@
+import { randomBytes } from "node:crypto";
+
+import { PhoneControlError } from "./errors.js";
+import type {
+  Observation,
+  ObservationBinding,
+  ObservationCapture,
+  ObservationSummary,
+  UiElement
+} from "./types.js";
+
+export interface ObservationComparison {
+  matches: boolean;
+  changed: readonly string[];
+}
+
+type IdFactory = () => string;
+
+function createOpaqueObservationId(): string {
+  return `obs_${randomBytes(18).toString("base64url")}`;
+}
+
+function bindingFromCapture(capture: ObservationCapture): ObservationBinding {
+  return {
+    serial: capture.serial,
+    packageName: capture.packageName,
+    activity: capture.activity,
+    display: { ...capture.display },
+    rotation: capture.rotation,
+    uiHash: capture.uiHash,
+    screenshotDimensions: { ...capture.screenshotDimensions },
+    observedAt: capture.observedAt
+  };
+}
+
+export class ObservationBuilder {
+  public constructor(private readonly idFactory: IdFactory = createOpaqueObservationId) {}
+
+  public build(capture: ObservationCapture): Observation {
+    const observationId = this.idFactory();
+    return {
+      observationId,
+      binding: bindingFromCapture(capture),
+      elements: capture.elements.map((element) => ({
+        ...element,
+        states: { ...element.states },
+        bounds: element.bounds ? { ...element.bounds } : null
+      })),
+      screenshot: Uint8Array.from(capture.screenshot)
+    };
+  }
+}
+
+export class ObservationStore {
+  readonly #observations = new Map<string, Observation>();
+  readonly #builder: ObservationBuilder;
+
+  public constructor(idFactory?: IdFactory) {
+    this.#builder = new ObservationBuilder(idFactory);
+  }
+
+  public create(capture: ObservationCapture): Observation {
+    const observation = this.#builder.build(capture);
+    this.#observations.set(observation.observationId, observation);
+    return observation;
+  }
+
+  public get(observationId: string): Observation | undefined {
+    return this.#observations.get(observationId);
+  }
+
+  public require(observationId: string): Observation {
+    const observation = this.get(observationId);
+    if (!observation) {
+      throw new PhoneControlError(
+        "INVALID_OBSERVATION",
+        "The observation ID is unknown or has already been invalidated.",
+        { observationId }
+      );
+    }
+    return observation;
+  }
+
+  public invalidate(observationId: string): void {
+    this.#observations.delete(observationId);
+  }
+
+  public compare(
+    observation: Observation,
+    current: ObservationCapture
+  ): ObservationComparison {
+    const changed: string[] = [];
+    const binding = observation.binding;
+    if (binding.serial !== current.serial) changed.push("serial");
+    if (binding.packageName !== current.packageName) changed.push("packageName");
+    if (binding.activity !== current.activity) changed.push("activity");
+    if (
+      binding.display.width !== current.display.width ||
+      binding.display.height !== current.display.height
+    ) {
+      changed.push("display");
+    }
+    if (binding.rotation !== current.rotation) changed.push("rotation");
+    if (binding.uiHash !== current.uiHash) changed.push("uiHash");
+    if (
+      binding.screenshotDimensions.width !== current.screenshotDimensions.width ||
+      binding.screenshotDimensions.height !== current.screenshotDimensions.height
+    ) {
+      changed.push("screenshotDimensions");
+    }
+    return { matches: changed.length === 0, changed };
+  }
+
+  public summary(observation: Observation): ObservationSummary {
+    return {
+      observationId: observation.observationId,
+      serial: observation.binding.serial,
+      packageName: observation.binding.packageName,
+      activity: observation.binding.activity,
+      display: { ...observation.binding.display },
+      rotation: observation.binding.rotation,
+      uiHash: observation.binding.uiHash,
+      screenshot: {
+        mimeType: "image/png",
+        width: observation.binding.screenshotDimensions.width,
+        height: observation.binding.screenshotDimensions.height
+      },
+      elements: observation.elements.map((element: UiElement) => ({
+        ...element,
+        states: { ...element.states },
+        bounds: element.bounds ? { ...element.bounds } : null
+      })),
+      observedAt: observation.binding.observedAt
+    };
+  }
+}

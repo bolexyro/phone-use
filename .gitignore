@@ -1,0 +1,12 @@
+/node_modules/
+/dist/
+/coverage/
+/logs/
+/config/phone-control.json
+/scrcpy-win64-v4.1/
+*.log
+.env
+.env.*
+!.env.example
+
+!/config/phone-control.example.json

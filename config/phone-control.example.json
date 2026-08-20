@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "local": {
+      "allowedApps": [
+        "com.sec.android.app.popupcalculator"
+      ]
+    }
+  }
+}
