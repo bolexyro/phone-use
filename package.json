@@ -11,7 +11,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "viewer": "electron dist/viewer/main.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "22.15.21",
+    "electron": "36.4.0",
     "typescript": "5.8.3",
     "vitest": "3.2.4"
   }

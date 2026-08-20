@@ -85,6 +85,30 @@ The server does not require scrcpy. To watch or manually take over the selected 
 .\scrcpy-win64-v4.1\scrcpy.exe -s R5CT...
 ```
 
+## Visible cursor viewer
+
+The Windows-only Electron viewer manages a borderless scrcpy window and a transparent, always-on-top, click-through overlay. It never moves the real Windows mouse and never sends input. The overlay tails successful click records from the NDJSON audit log and renders a black/white/cyan cursor at the device coordinate recorded in each pointer event.
+
+Build and run it from PowerShell:
+
+```powershell
+pnpm build
+pnpm viewer
+```
+
+The default S23-friendly geometry is `x=60`, `y=60`, `width=432`, `height=936`. Both scrcpy and the overlay use that fixed rectangle, and scrcpy is launched with `--render-fit=stretched` for stable v1 mapping. Override it with:
+
+- `PHONE_CONTROL_VIEWER_X`
+- `PHONE_CONTROL_VIEWER_Y`
+- `PHONE_CONTROL_VIEWER_WIDTH`
+- `PHONE_CONTROL_VIEWER_HEIGHT`
+- `PHONE_CONTROL_VIEWER_CURSOR_DURATION_MS` (default `700`)
+- `PHONE_CONTROL_VIEWER_AUDIT_POLL_INTERVAL_MS` (default `100`)
+- `PHONE_CONTROL_AUDIT_LOG_PATH` (shared audit path)
+- `PHONE_CONTROL_SCRCPY_PATH`
+
+scrcpy resolution is `PHONE_CONTROL_SCRCPY_PATH`, then `scrcpy-win64-v4.1\scrcpy.exe`, then PATH. The viewer validates the configured serial with the same authorized-device selection used by MCP; without a configured serial it requires exactly one authorized device. Windows display scaling or manually moved/resized scrcpy windows can require matching the viewer geometry overrides.
+
 ## Checks
 
 ```powershell

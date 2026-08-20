@@ -1,0 +1,138 @@
+import { open, stat } from "node:fs/promises";
+
+import type { PointerEvent } from "../types.js";
+
+export interface SuccessfulClickAuditEvent {
+  at: number;
+  serial: string;
+  packageName: string | null;
+  pointerEvent: PointerEvent;
+}
+
+interface JsonRecord {
+  [key: string]: unknown;
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isPointerEvent(value: unknown): value is PointerEvent {
+  if (!isRecord(value)) return false;
+  return (
+    value.type === "pointer" &&
+    value.action === "click" &&
+    isNumber(value.x) &&
+    isNumber(value.y) &&
+    value.coordinateSpace === "display" &&
+    typeof value.observationId === "string" &&
+    typeof value.serial === "string" &&
+    (typeof value.packageName === "string" || value.packageName === null) &&
+    isNumber(value.displayWidth) &&
+    isNumber(value.displayHeight) &&
+    isNumber(value.timestamp)
+  );
+}
+
+export function parseAuditLine(line: string): SuccessfulClickAuditEvent | null {
+  if (!line.trim()) return null;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(line) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isRecord(value) || value.outcome !== "success" || !isPointerEvent(value.pointerEvent)) {
+    return null;
+  }
+
+  const action = value.action;
+  if (!isRecord(action) || (action.type !== "click" && action.type !== "click_coordinate")) {
+    return null;
+  }
+
+  const packageName =
+    typeof value.packageName === "string" || value.packageName === null
+      ? value.packageName
+      : value.pointerEvent.packageName;
+  return {
+    at: isNumber(value.at) ? value.at : value.pointerEvent.timestamp,
+    serial: value.pointerEvent.serial,
+    packageName,
+    pointerEvent: value.pointerEvent
+  };
+}
+
+export function parseAuditText(text: string): SuccessfulClickAuditEvent[] {
+  return text
+    .split(/\r?\n/)
+    .map(parseAuditLine)
+    .filter((event): event is SuccessfulClickAuditEvent => event !== null);
+}
+
+export interface NdjsonTailerOptions {
+  startAtEnd?: boolean;
+}
+
+export class NdjsonTailer {
+  readonly #filePath: string;
+  readonly #startAtEnd: boolean;
+  #offset = 0;
+  #partial = "";
+  #initialized = false;
+
+  public constructor(filePath: string, options: NdjsonTailerOptions = {}) {
+    this.#filePath = filePath;
+    this.#startAtEnd = options.startAtEnd ?? true;
+  }
+
+  public async poll(): Promise<SuccessfulClickAuditEvent[]> {
+    let fileSize: number;
+    try {
+      fileSize = (await stat(this.#filePath)).size;
+    } catch (error) {
+      if (isMissingFile(error)) {
+        this.#initialized = true;
+        return [];
+      }
+      throw error;
+    }
+
+    if (!this.#initialized) {
+      this.#initialized = true;
+      this.#offset = this.#startAtEnd ? fileSize : 0;
+      if (this.#startAtEnd) return [];
+    }
+
+    if (fileSize < this.#offset) {
+      this.#offset = 0;
+      this.#partial = "";
+    }
+    if (fileSize === this.#offset) return [];
+
+    const length = fileSize - this.#offset;
+    const buffer = Buffer.alloc(length);
+    const handle = await open(this.#filePath, "r");
+    try {
+      await handle.read(buffer, 0, length, this.#offset);
+    } finally {
+      await handle.close();
+    }
+    this.#offset = fileSize;
+
+    const lines = `${this.#partial}${buffer.toString("utf8")}`.split(/\r?\n/);
+    this.#partial = lines.pop() ?? "";
+    return lines
+      .map(parseAuditLine)
+      .filter((event): event is SuccessfulClickAuditEvent => event !== null);
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
+}

@@ -32,6 +32,7 @@ import type {
   PhoneExecuteRequest,
   PhoneStatusData,
   PolicyProfile,
+  PointerEvent,
   ToolSuccessResult,
   UiElement,
   WaitCondition,
@@ -193,7 +194,7 @@ export class PhoneControlService {
     this.#observations.invalidate(request.observationId);
     const resolved = this.#resolveAction(request.action, observation, current);
     const auditBase = {
-      at: this.#now(),
+      at: resolved.pointerEvent?.timestamp ?? this.#now(),
       serial: device.serial,
       packageName: current.packageName,
       action: sanitizeAction(request.action, resolved.pointerEvent),
@@ -354,7 +355,7 @@ export class PhoneControlService {
     current: ObservationCapture
   ): {
     perform: () => Promise<void>;
-    pointerEvent?: { type: "pointer"; action: "click"; x: number; y: number; coordinateSpace: "display" };
+    pointerEvent?: PointerEvent;
   } {
     if (action.type === "click") {
       const element = observation.elements.find(
@@ -381,7 +382,13 @@ export class PhoneControlService {
         action: "click" as const,
         x: center.x,
         y: center.y,
-        coordinateSpace: "display" as const
+        coordinateSpace: "display" as const,
+        observationId: observation.observationId,
+        serial: current.serial,
+        packageName: current.packageName,
+        displayWidth: current.display.width,
+        displayHeight: current.display.height,
+        timestamp: this.#now()
       };
       return {
         pointerEvent,
@@ -397,7 +404,13 @@ export class PhoneControlService {
           action: "click",
           x: action.x,
           y: action.y,
-          coordinateSpace: "display"
+          coordinateSpace: "display",
+          observationId: observation.observationId,
+          serial: current.serial,
+          packageName: current.packageName,
+          displayWidth: current.display.width,
+          displayHeight: current.display.height,
+          timestamp: this.#now()
         },
         perform: () => this.#adb.tap(current.serial, action.x, action.y)
       };

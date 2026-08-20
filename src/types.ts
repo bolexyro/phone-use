@@ -114,6 +114,12 @@ export interface PointerEvent {
   x: number;
   y: number;
   coordinateSpace: "display";
+  observationId: string;
+  serial: string;
+  packageName: string | null;
+  displayWidth: number;
+  displayHeight: number;
+  timestamp: number;
 }
 
 export type WaitCondition =

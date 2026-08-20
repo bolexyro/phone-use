@@ -203,7 +203,16 @@ describe("phone-control service safety", () => {
     });
 
     expect(adb.taps).toEqual([{ x: 60, y: 50 }]);
-    expect(result.data.pointerEvent).toMatchObject({ x: 60, y: 50 });
+    expect(result.data.pointerEvent).toMatchObject({
+      x: 60,
+      y: 50,
+      observationId,
+      serial: "phone-1",
+      packageName: POLICY.allowedApps[0],
+      displayWidth: 1080,
+      displayHeight: 2400,
+      timestamp: expect.any(Number)
+    });
     expect(logger.entries[0]).toMatchObject({
       outcome: "success",
       pointerEvent: { x: 60, y: 50 }
