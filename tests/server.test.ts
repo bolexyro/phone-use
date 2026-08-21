@@ -100,4 +100,47 @@ describe("MCP boundary schemas and result conversion", () => {
     expect(registered).toEqual([...PHONE_CONTROL_TOOL_NAMES]);
     expect(createMcpServer).toBeTypeOf("function");
   });
+
+  it("defaults to returning screenshot when elements are empty in phone_observe", async () => {
+    const tools = new Map<string, (input: unknown) => Promise<any>>();
+    const fakeServer = {
+      registerTool(name: string, _schema: unknown, handler: (input: unknown) => Promise<any>): void {
+        tools.set(name, handler);
+      }
+    } as unknown as McpServer;
+
+    const store = new ObservationStore();
+    const capture = {
+      serial: "RFCW40B3G7X",
+      packageName: "com.spotify.music",
+      activity: "com.spotify.music/.MainActivity",
+      display: { width: 1080, height: 2340 },
+      rotation: 0,
+      uiHash: "hash123",
+      screenshotDimensions: { width: 1080, height: 2340 },
+      observedAt: Date.now(),
+      elements: [],
+      screenshot: Uint8Array.from([10, 20, 30])
+    };
+    const obs = store.create(capture);
+
+    const fakeService = {
+      observationStore: store,
+      observe: async () => ({
+        ok: true,
+        data: { observation: store.summary(obs) }
+      })
+    } as unknown as PhoneControlToolService;
+
+    registerPhoneControlTools(fakeServer, fakeService);
+    const observeHandler = tools.get("phone_observe")!;
+
+    // Call without includeScreenshot
+    const response = await observeHandler({});
+    expect(response.content).toHaveLength(2);
+    expect(response.content[1]).toMatchObject({
+      type: "image",
+      mimeType: "image/png"
+    });
+  });
 });

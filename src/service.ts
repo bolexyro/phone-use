@@ -20,6 +20,7 @@ import {
   isAllowedPackage
 } from "./policy-guard.js";
 import { hashUiTree, parseUiAutomatorXml, boundsCenter } from "./ui-automator.js";
+import { loadPolicy } from "./config.js";
 import { resolve } from "node:path";
 import type {
   ActionData,
@@ -92,18 +93,27 @@ export class PhoneControlService {
     return this.#observations;
   }
 
+  #getPolicy(): PolicyProfile {
+    try {
+      return loadPolicy({ env: this.#environment });
+    } catch {
+      return this.#policy;
+    }
+  }
+
   public async status(): Promise<ToolSuccessResult<PhoneStatusData>> {
+    const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
     const foreground = await this.#adb.getForeground(device.serial);
     return {
       ok: true,
       data: {
-        profile: this.#policy.profile,
-        allowedApps: this.#policy.allowedApps,
+        profile: policy.profile,
+        allowedApps: policy.allowedApps,
         device,
         foreground,
         foregroundAllowed: isAllowedPackage(
-          this.#policy,
+          policy,
           foreground.packageName
         )
       }
@@ -111,11 +121,12 @@ export class PhoneControlService {
   }
 
   public allowedApps(): ToolSuccessResult<AllowedAppsData> {
+    const policy = this.#getPolicy();
     return {
       ok: true,
       data: {
-        profile: this.#policy.profile,
-        allowedApps: this.#policy.allowedApps
+        profile: policy.profile,
+        allowedApps: policy.allowedApps
       }
     };
   }
@@ -123,7 +134,8 @@ export class PhoneControlService {
   public async openApp(
     packageName: string
   ): Promise<ToolSuccessResult<{ observation: ReturnType<ObservationStore["summary"]> }>> {
-    assertAllowedTarget(this.#policy, packageName);
+    const policy = this.#getPolicy();
+    assertAllowedTarget(policy, packageName);
     const device = await this.#selectedDevice();
 
     try {
@@ -160,7 +172,7 @@ export class PhoneControlService {
       capture = await this.#capture(device.serial);
     }
 
-    assertAllowedForeground(this.#policy, capture);
+    assertAllowedForeground(policy, capture);
     if (capture.packageName !== packageName) {
       throw new PhoneControlError(
         "APP_LAUNCH_FAILED",
@@ -176,13 +188,14 @@ export class PhoneControlService {
   public async observe(): Promise<
     ToolSuccessResult<{ observation: ReturnType<ObservationStore["summary"]> }>
   > {
+    const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
     assertAllowedForeground(
-      this.#policy,
+      policy,
       await this.#adb.getForeground(device.serial)
     );
     const capture = await this.#capture(device.serial);
-    assertAllowedForeground(this.#policy, capture);
+    assertAllowedForeground(policy, capture);
     const observation = this.#observations.create(capture);
     return { ok: true, data: { observation: this.#observations.summary(observation) } };
   }
@@ -190,9 +203,10 @@ export class PhoneControlService {
   public async execute(
     request: PhoneExecuteRequest
   ): Promise<ToolSuccessResult<ActionData>> {
+    const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
     assertAllowedForeground(
-      this.#policy,
+      policy,
       await this.#adb.getForeground(device.serial)
     );
 
@@ -248,7 +262,7 @@ export class PhoneControlService {
 
     await this.#appendAudit({ ...auditBase, phase: "result", outcome: "success" });
     const after = await this.#capture(device.serial);
-    assertAllowedForeground(this.#policy, after);
+    assertAllowedForeground(policy, after);
     const freshObservation = this.#observations.create(after);
     return {
       ok: true,
@@ -268,6 +282,7 @@ export class PhoneControlService {
     condition: WaitCondition,
     options: WaitOptions = {}
   ): Promise<ToolSuccessResult<{ observation: ReturnType<ObservationStore["summary"]> }>> {
+    const policy = this.#getPolicy();
     const requestedTimeout = options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
     const requestedPollInterval =
       options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
@@ -299,9 +314,9 @@ export class PhoneControlService {
         { observationId }
       );
     }
-    assertAllowedTarget(this.#policy, baseline.binding.packageName);
+    assertAllowedTarget(policy, baseline.binding.packageName);
     const initialForeground = await this.#adb.getForeground(device.serial);
-    assertAllowedForeground(this.#policy, initialForeground);
+    assertAllowedForeground(policy, initialForeground);
     if (initialForeground.packageName !== baseline.binding.packageName) {
       throw new PhoneControlError(
         "STALE_OBSERVATION",
@@ -317,7 +332,7 @@ export class PhoneControlService {
 
     while (true) {
       const capture = await this.#capture(device.serial);
-      assertAllowedForeground(this.#policy, capture);
+      assertAllowedForeground(policy, capture);
       const matched = this.#waitConditionMatches(condition, capture, baseline);
       if (matched) {
         const observation = this.#observations.create(capture);

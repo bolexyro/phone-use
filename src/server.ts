@@ -199,6 +199,19 @@ async function safely<T extends object>(
   }
 }
 
+function resolveScreenshot(
+  service: PhoneControlToolService,
+  result: unknown,
+  includeScreenshot = false
+): Uint8Array | undefined {
+  const summary = (result as { data?: { observation?: ObservationSummary } })?.data?.observation;
+  if (!summary) return undefined;
+  if (includeScreenshot || summary.elements.length === 0) {
+    return service.observationStore.get(summary.observationId)?.screenshot;
+  }
+  return undefined;
+}
+
 export function registerPhoneControlTools(
   server: McpServer,
   service: PhoneControlToolService
@@ -233,7 +246,7 @@ export function registerPhoneControlTools(
           const parsed = parseInput(phoneOpenAppInputSchema, input);
           return service.openApp(parsed.packageName);
         },
-        (result) => observationBytes(service, result as { data: { observation: ObservationSummary } })
+        (result) => resolveScreenshot(service, result)
       );
     }
   );
@@ -252,13 +265,7 @@ export function registerPhoneControlTools(
           includeScreenshot = parsed.includeScreenshot === true;
           return service.observe();
         },
-        (result) =>
-          includeScreenshot
-            ? observationBytes(
-                service,
-                result as { data: { observation: ObservationSummary } }
-              )
-            : undefined
+        (result) => resolveScreenshot(service, result, includeScreenshot)
       );
     }
   );
@@ -270,10 +277,13 @@ export function registerPhoneControlTools(
       inputSchema: phoneExecuteInputSchema.shape
     },
     async (input) => {
-      return safely(() => {
-        const parsed = parseInput(phoneExecuteInputSchema, input);
-        return service.execute(parsed);
-      }, (result) => observationBytes(service, result as { data: { observation: ObservationSummary } }));
+      return safely(
+        () => {
+          const parsed = parseInput(phoneExecuteInputSchema, input);
+          return service.execute(parsed);
+        },
+        (result) => resolveScreenshot(service, result)
+      );
     }
   );
 
@@ -284,12 +294,15 @@ export function registerPhoneControlTools(
       inputSchema: phoneWaitForInputSchema.shape
     },
     async (input) => {
-      return safely(() => {
-        const parsed = parseInput(phoneWaitForInputSchema, input);
-        return service.waitFor(parsed.observationId, parsed.condition, {
-          timeoutMs: parsed.timeoutMs
-        });
-      }, (result) => observationBytes(service, result as { data: { observation: ObservationSummary } }));
+      return safely(
+        () => {
+          const parsed = parseInput(phoneWaitForInputSchema, input);
+          return service.waitFor(parsed.observationId, parsed.condition, {
+            timeoutMs: parsed.timeoutMs
+          });
+        },
+        (result) => resolveScreenshot(service, result)
+      );
     }
   );
 }
