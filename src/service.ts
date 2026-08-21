@@ -143,12 +143,28 @@ export class PhoneControlService {
       );
     }
 
-    const capture = await this.#capture(device.serial);
+    const startMs = this.#now();
+    const timeoutMs = 6000;
+    let capture: ObservationCapture | undefined;
+
+    while (this.#now() - startMs <= timeoutMs) {
+      const fg = await this.#adb.getForeground(device.serial);
+      if (fg.packageName === packageName) {
+        capture = await this.#capture(device.serial);
+        break;
+      }
+      await this.#sleep(DEFAULT_POLL_INTERVAL_MS);
+    }
+
+    if (!capture) {
+      capture = await this.#capture(device.serial);
+    }
+
     assertAllowedForeground(this.#policy, capture);
     if (capture.packageName !== packageName) {
       throw new PhoneControlError(
         "APP_LAUNCH_FAILED",
-        `Android did not bring '${packageName}' to the foreground.`,
+        `Android did not bring '${packageName}' to the foreground (current foreground is '${capture.packageName}').`,
         { packageName, foregroundPackage: capture.packageName }
       );
     }
