@@ -365,9 +365,9 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
           else if (scroll.direction === "right") scrollWheel.className = "wheel-right";
         }
 
-        // Keep capsule mouse centered on screen
-        const centerX = Math.max(0, Math.floor((window.innerWidth - cursor.offsetWidth) / 2));
-        const centerY = Math.max(0, Math.floor((window.innerHeight - cursor.offsetHeight) / 2));
+        // Keep capsule mouse centered on the scrolled container area
+        const centerX = Math.max(0, Math.floor(((scroll.startX + scroll.endX) / 2) - HOTSPOT_X));
+        const centerY = Math.max(0, Math.floor(((scroll.startY + scroll.endY) / 2) - HOTSPOT_Y));
         cursor.style.transition = "left 200ms cubic-bezier(.2, .9, .3, 1), top 200ms cubic-bezier(.2, .9, .3, 1)";
         cursor.style.left = String(centerX) + "px";
         cursor.style.top = String(centerY) + "px";

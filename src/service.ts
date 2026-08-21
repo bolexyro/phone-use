@@ -24,6 +24,7 @@ import { resolve } from "node:path";
 import type {
   ActionData,
   AllowedAppsData,
+  Bounds,
   DeviceInfo,
   ForegroundState,
   Observation,
@@ -433,16 +434,40 @@ export class PhoneControlService {
     }
 
     if (action.type === "scroll") {
+      let bounds: Bounds | null | undefined = undefined;
+      if (action.elementRef) {
+        const element = observation.elements.find(
+          (candidate) => candidate.elementRef === action.elementRef
+        );
+        if (!element) {
+          throw new PhoneControlError(
+            "ELEMENT_NOT_FOUND",
+            `Element with ref "${action.elementRef}" was not found in observation ${observation.observationId}.`,
+            { elementRef: action.elementRef }
+          );
+        }
+        if (!element.bounds) {
+          throw new PhoneControlError(
+            "ELEMENT_NO_BOUNDS",
+            `Element "${action.elementRef}" does not have valid bounds for scrolling.`,
+            { elementRef: action.elementRef }
+          );
+        }
+        bounds = element.bounds;
+      }
+
       const gesture = calculateScrollGesture(
         current.display,
         action.direction,
-        action.amount
+        action.amount,
+        bounds
       );
       const pointerEvent: PointerEvent = {
         type: "pointer",
         action: "scroll",
         direction: action.direction,
         amount: action.amount,
+        ...(action.elementRef ? { elementRef: action.elementRef } : {}),
         startX: gesture.x1,
         startY: gesture.y1,
         endX: gesture.x2,

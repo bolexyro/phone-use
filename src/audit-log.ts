@@ -15,7 +15,12 @@ export type AuditPhase = "start" | "result";
 export type SanitizedAuditAction =
   | { type: "click"; x: number; y: number }
   | { type: "click_coordinate"; x: number; y: number }
-  | { type: "scroll"; direction: ScrollDirection; amount: ScrollAmount }
+  | {
+      type: "scroll";
+      direction: ScrollDirection;
+      amount: ScrollAmount;
+      elementRef?: string;
+    }
   | { type: "type"; textLength: number }
   | { type: "keypress"; key: Keypress };
 
@@ -51,7 +56,8 @@ export function sanitizeAction(
       return {
         type: "scroll",
         direction: action.direction,
-        amount: action.amount
+        amount: action.amount,
+        ...(action.elementRef ? { elementRef: action.elementRef } : {})
       };
     case "type":
       return { type: "type", textLength: action.text.length };

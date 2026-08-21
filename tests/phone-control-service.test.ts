@@ -400,6 +400,19 @@ describe("phone-control service safety", () => {
     });
     expect(adb.swipes[0]).toMatchObject({ durationMs: 280 });
 
+    const elementScrollObservation = await service.observe();
+    const targetElement = elementScrollObservation.data.observation.elements[0];
+    await service.execute({
+      observationId: elementScrollObservation.data.observation.observationId,
+      action: {
+        type: "scroll",
+        direction: "right",
+        amount: "small",
+        elementRef: targetElement.elementRef
+      }
+    });
+    expect(adb.swipes[1]).toMatchObject({ durationMs: 200 });
+
     const typeObservation = await service.observe();
     const typedResult = await service.execute({
       observationId: typeObservation.data.observation.observationId,

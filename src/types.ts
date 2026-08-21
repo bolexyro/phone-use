@@ -99,7 +99,12 @@ export type Keypress = "BACK" | "HOME" | "ENTER" | "DELETE";
 export type PhoneAction =
   | { type: "click"; elementRef: string }
   | { type: "click_coordinate"; x: number; y: number }
-  | { type: "scroll"; direction: ScrollDirection; amount: ScrollAmount }
+  | {
+      type: "scroll";
+      direction: ScrollDirection;
+      amount: ScrollAmount;
+      elementRef?: string;
+    }
   | { type: "type"; text: string }
   | { type: "keypress"; key: Keypress };
 
@@ -127,6 +132,7 @@ export interface ScrollPointerEvent {
   action: "scroll";
   direction: ScrollDirection;
   amount: ScrollAmount;
+  elementRef?: string;
   startX: number;
   startY: number;
   endX: number;

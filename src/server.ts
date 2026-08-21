@@ -44,7 +44,8 @@ export const phoneActionSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("scroll"),
       direction: z.enum(["up", "down", "left", "right"]),
-      amount: z.enum(["small", "medium", "large"])
+      amount: z.enum(["small", "medium", "large"]),
+      elementRef: z.string().min(1).optional()
     })
     .strict(),
   z
