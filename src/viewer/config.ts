@@ -61,7 +61,7 @@ export function loadViewerConfig(
     cursorDurationMs: integerEnv(
       env,
       "PHONE_CONTROL_VIEWER_CURSOR_DURATION_MS",
-      700,
+      80,
       1
     ),
     auditLogPath: resolveViewerAuditLogPath(env, cwd),

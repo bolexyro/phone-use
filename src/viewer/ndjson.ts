@@ -7,6 +7,7 @@ export interface SuccessfulClickAuditEvent {
   serial: string;
   packageName: string | null;
   pointerEvent: PointerEvent;
+  phase: "start" | "result";
 }
 
 interface JsonRecord {
@@ -47,9 +48,15 @@ export function parseAuditLine(line: string): SuccessfulClickAuditEvent | null {
   } catch {
     return null;
   }
-  if (!isRecord(value) || value.outcome !== "success" || !isPointerEvent(value.pointerEvent)) {
+  if (!isRecord(value) || !isPointerEvent(value.pointerEvent)) {
     return null;
   }
+
+  const isStart = value.phase === "start" && value.outcome === "pending";
+  const isSuccessfulResult =
+    (value.phase === "result" || value.phase === undefined) &&
+    value.outcome === "success";
+  if (!isStart && !isSuccessfulResult) return null;
 
   const action = value.action;
   if (!isRecord(action) || (action.type !== "click" && action.type !== "click_coordinate")) {
@@ -64,7 +71,8 @@ export function parseAuditLine(line: string): SuccessfulClickAuditEvent | null {
     at: isNumber(value.at) ? value.at : value.pointerEvent.timestamp,
     serial: value.pointerEvent.serial,
     packageName,
-    pointerEvent: value.pointerEvent
+    pointerEvent: value.pointerEvent,
+    phase: isStart ? "start" : "result"
   };
 }
 
@@ -85,6 +93,7 @@ export class NdjsonTailer {
   #offset = 0;
   #partial = "";
   #initialized = false;
+  #startedObservationIds = new Set<string>();
 
   public constructor(filePath: string, options: NdjsonTailerOptions = {}) {
     this.#filePath = filePath;
@@ -112,6 +121,7 @@ export class NdjsonTailer {
     if (fileSize < this.#offset) {
       this.#offset = 0;
       this.#partial = "";
+      this.#startedObservationIds.clear();
     }
     if (fileSize === this.#offset) return [];
 
@@ -129,7 +139,18 @@ export class NdjsonTailer {
     this.#partial = lines.pop() ?? "";
     return lines
       .map(parseAuditLine)
-      .filter((event): event is SuccessfulClickAuditEvent => event !== null);
+      .filter((event): event is SuccessfulClickAuditEvent => event !== null)
+      .filter((event) => {
+        const observationId = event.pointerEvent.observationId;
+        if (event.phase === "start") {
+          this.#startedObservationIds.add(observationId);
+          return true;
+        }
+        if (this.#startedObservationIds.has(observationId)) {
+          return false;
+        }
+        return true;
+      });
   }
 }
 

@@ -7,8 +7,18 @@ import { describe, expect, it } from "vitest";
 import { loadViewerConfig } from "../src/viewer/config.js";
 import { mapDevicePointToOverlay } from "../src/viewer/coordinate-mapping.js";
 import { NdjsonTailer, parseAuditLine, parseAuditText } from "../src/viewer/ndjson.js";
+import { buildOverlayHtml } from "../src/viewer/overlay-html.js";
 import { buildScrcpyArgs } from "../src/viewer/scrcpy-args.js";
 import { resolveScrcpyPath } from "../src/viewer/scrcpy-path.js";
+import { fitDipRectToWorkArea } from "../src/viewer/window-geometry.js";
+import {
+  createGeometryRecoveryState,
+  updateGeometryRecovery
+} from "../src/viewer/geometry-recovery.js";
+import {
+  parseClientWindowRect,
+  parseWindowChangedEvent
+} from "../src/viewer/win32-window.js";
 
 const clickLine = JSON.stringify({
   at: 123,
@@ -30,6 +40,14 @@ const clickLine = JSON.stringify({
     timestamp: 123
   }
 });
+const pendingClickLine = clickLine.replace(
+  '"outcome":"success"',
+  '"outcome":"pending","phase":"start"'
+);
+const completedClickLine = clickLine.replace(
+  '"outcome":"success"',
+  '"outcome":"success","phase":"result"'
+);
 
 describe("visible cursor viewer helpers", () => {
   it("maps device coordinates using event display dimensions", () => {
@@ -54,6 +72,25 @@ describe("visible cursor viewer helpers", () => {
     });
     expect(parseAuditLine(clickLine.replace('"outcome":"success"', '"outcome":"failed"'))).toBeNull();
     expect(parseAuditText(`${clickLine}\nnot-json\n`)).toHaveLength(1);
+  });
+
+  it("parses pointer-start entries before their completed result", () => {
+    expect(parseAuditLine(pendingClickLine)).toMatchObject({ phase: "start" });
+    expect(parseAuditLine(completedClickLine)).toMatchObject({ phase: "result" });
+  });
+
+  it("does not replay a completed result after a pointer-start entry", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "phone-control-viewer-start-"));
+    const logPath = join(directory, "actions.ndjson");
+    try {
+      await writeFile(logPath, `${pendingClickLine}\n${completedClickLine}\n`, "utf8");
+      const tailer = new NdjsonTailer(logPath, { startAtEnd: false });
+      const events = await tailer.poll();
+      expect(events).toHaveLength(1);
+      expect(events[0].phase).toBe("start");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("tails complete and split NDJSON lines without replaying old entries", async () => {
@@ -89,10 +126,10 @@ describe("visible cursor viewer helpers", () => {
     const config = loadViewerConfig({});
     expect(config.width).toBe(432);
     expect(config.height).toBe(936);
-    expect(config.cursorDurationMs).toBe(700);
+    expect(config.cursorDurationMs).toBe(80);
   });
 
-  it("keeps scrcpy visual-only and aligned to the configured rectangle", () => {
+  it("keeps scrcpy aligned while passing normal input through", () => {
     expect(buildScrcpyArgs("phone-1", {
       x: 60,
       y: 60,
@@ -102,14 +139,90 @@ describe("visible cursor viewer helpers", () => {
       auditLogPath: "logs/actions.ndjson",
       auditPollIntervalMs: 100
     })).toEqual(expect.arrayContaining([
-      "--window-borderless",
       "--render-fit=stretched",
       "--window-x=60",
       "--window-y=60",
       "--window-width=432",
       "--window-height=936",
-      "--always-on-top",
-      "--mouse=disabled"
+      "--keyboard=sdk",
+      "--mouse=sdk"
     ]));
+  });
+
+  it("keeps the cursor visible and animates it instead of fading it out", () => {
+    const html = buildOverlayHtml(220);
+    expect(html).toContain("opacity: 1");
+    expect(html).toContain("left 220ms");
+    expect(html).toContain("window.innerWidth");
+    expect(html).toContain("window.innerHeight");
+    expect(html).toContain("HOTSPOT_X");
+    expect(html).toContain("HOTSPOT_Y");
+    expect(html).not.toContain("Math.random()");
+    expect(html).toContain("cursor-click");
+    expect(html).not.toContain("hideTimer");
+    expect(html).not.toContain("cursor-pop");
+  });
+
+  it("fits the requested mirror into a smaller work area without changing its aspect ratio", () => {
+    expect(
+      fitDipRectToWorkArea(
+        { x: 40, y: 40, width: 288, height: 624 },
+        { x: 0, y: 0, width: 853, height: 533 },
+        8
+      )
+    ).toEqual({ x: 40, y: 40, width: 223, height: 485 });
+  });
+
+  it("parses the native scrcpy client rectangle and rejects invalid responses", () => {
+    expect(parseClientWindowRect('{"ok":true,"x":100,"y":200,"width":432,"height":900}')).toEqual({
+      x: 100,
+      y: 200,
+      width: 432,
+      height: 900
+    });
+    expect(parseClientWindowRect('{"ok":false}')).toBeNull();
+  });
+
+  it("parses native window movement notifications", () => {
+    expect(
+      parseWindowChangedEvent('{"event":"window-changed","processId":4321}')
+    ).toEqual({ processId: 4321 });
+    expect(parseWindowChangedEvent('{"ok":true,"x":100}')).toBeNull();
+    expect(
+      parseWindowChangedEvent('{"event":"window-changed","processId":0}')
+    ).toBeNull();
+  });
+
+  it("hides the overlay while geometry is moving and reattaches after stable samples", () => {
+    const first = { x: 100, y: 200, width: 288, height: 624 };
+    const second = { x: 140, y: 240, width: 288, height: 624 };
+    let state = createGeometryRecoveryState();
+
+    const firstSample = updateGeometryRecovery(state, first, 2);
+    state = firstSample.state;
+    expect(firstSample.attached).toBe(false);
+
+    const stableSample = updateGeometryRecovery(state, first, 2);
+    state = stableSample.state;
+    expect(stableSample.attached).toBe(true);
+
+    const movedSample = updateGeometryRecovery(state, second, 2);
+    state = movedSample.state;
+    expect(movedSample.changed).toBe(true);
+    expect(movedSample.attached).toBe(false);
+
+    const recoveredSample = updateGeometryRecovery(state, second, 2);
+    expect(recoveredSample.attached).toBe(true);
+  });
+
+  it("resets recovery when the native window is unavailable", () => {
+    const attached = updateGeometryRecovery(
+      createGeometryRecoveryState(),
+      { x: 1, y: 2, width: 3, height: 4 },
+      1
+    ).state;
+    const unavailable = updateGeometryRecovery(attached, undefined);
+    expect(unavailable.attached).toBe(false);
+    expect(unavailable.state.stableSamples).toBe(0);
   });
 });

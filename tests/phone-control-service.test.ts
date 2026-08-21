@@ -214,10 +214,39 @@ describe("phone-control service safety", () => {
       timestamp: expect.any(Number)
     });
     expect(logger.entries[0]).toMatchObject({
+      outcome: "pending",
+      phase: "start",
+      pointerEvent: { x: 60, y: 50 }
+    });
+    expect(logger.entries[1]).toMatchObject({
       outcome: "success",
+      phase: "result",
       pointerEvent: { x: 60, y: 50 }
     });
     expect(service.observationStore.get(observationId)).toBeUndefined();
+  });
+
+  it("logs the pointer start before sending the tap", async () => {
+    const adb = new FakeAdb();
+    const logger = new MemoryAuditLogger();
+    const order: string[] = [];
+    const append = logger.append.bind(logger);
+    logger.append = async (entry) => {
+      order.push(`audit:${entry.phase ?? "result"}`);
+      await append(entry);
+    };
+    adb.tap = async () => {
+      order.push("tap");
+    };
+    const service = createService(adb, logger);
+    const observed = await service.observe();
+
+    await service.execute({
+      observationId: observed.data.observation.observationId,
+      action: { type: "click", elementRef: observed.data.observation.elements[0].elementRef }
+    });
+
+    expect(order.slice(0, 2)).toEqual(["audit:start", "tap"]);
   });
 
   it("rejects coordinates outside the current display", async () => {

@@ -52,6 +52,7 @@ export interface PhoneControlServiceOptions {
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
 const MAX_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 250;
+const POINTER_START_DELAY_MS = 150;
 const DEFAULT_ACTION_LOG_PATH = resolve(
   process.cwd(),
   "logs",
@@ -201,19 +202,29 @@ export class PhoneControlService {
       ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {})
     } satisfies Omit<AuditLogEntry, "outcome">;
 
+    if (resolved.pointerEvent) {
+      await this.#appendAudit({
+        ...auditBase,
+        outcome: "pending",
+        phase: "start"
+      });
+      await this.#sleep(POINTER_START_DELAY_MS);
+    }
+
     try {
       await resolved.perform();
     } catch (error) {
       const normalized = asPhoneControlError(error);
       await this.#appendAudit({
         ...auditBase,
+        phase: "result",
         outcome: isTimeout(normalized) ? "unknown" : "failed",
         errorCode: normalized.code
       });
       throw normalized;
     }
 
-    await this.#appendAudit({ ...auditBase, outcome: "success" });
+    await this.#appendAudit({ ...auditBase, phase: "result", outcome: "success" });
     const after = await this.#capture(device.serial);
     assertAllowedForeground(this.#policy, after);
     const freshObservation = this.#observations.create(after);

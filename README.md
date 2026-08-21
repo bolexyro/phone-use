@@ -87,7 +87,7 @@ The server does not require scrcpy. To watch or manually take over the selected 
 
 ## Visible cursor viewer
 
-The Windows-only Electron viewer manages a borderless scrcpy window and a transparent, always-on-top, click-through overlay. It never moves the real Windows mouse and never sends input. The overlay tails successful click records from the NDJSON audit log and renders a black/white/cyan cursor at the device coordinate recorded in each pointer event.
+The Windows-only Electron viewer manages a movable scrcpy window and a transparent, always-on-top, click-through overlay. The overlay never moves the real Windows mouse or sends input itself; normal mouse and keyboard input can still go to scrcpy and the phone. The overlay tails pointer-start records from the NDJSON audit log and keeps a small black/white/cyan cursor visible, animating it to each device coordinate before the corresponding tap is sent. The action result is logged separately after the tap completes.
 
 Build and run it from PowerShell:
 
@@ -96,7 +96,7 @@ pnpm build
 pnpm viewer
 ```
 
-The default S23-friendly geometry is `x=60`, `y=60`, `width=432`, `height=936`. Both scrcpy and the overlay use that fixed rectangle, and scrcpy is launched with `--render-fit=stretched` for stable v1 mapping. Override it with:
+The requested default S23-friendly geometry is `x=60`, `y=60`, `width=432`, `height=936` in physical screen pixels. If that rectangle does not fit the current display work area, the viewer scales it down while preserving the phone aspect ratio. scrcpy uses the fitted rectangle, while the overlay converts it to Electron DIP coordinates so Windows display scaling does not offset the cursor. scrcpy is launched with `--render-fit=stretched` for stable v1 mapping. Override it with:
 
 - `PHONE_CONTROL_VIEWER_X`
 - `PHONE_CONTROL_VIEWER_Y`
@@ -107,7 +107,7 @@ The default S23-friendly geometry is `x=60`, `y=60`, `width=432`, `height=936`. 
 - `PHONE_CONTROL_AUDIT_LOG_PATH` (shared audit path)
 - `PHONE_CONTROL_SCRCPY_PATH`
 
-scrcpy resolution is `PHONE_CONTROL_SCRCPY_PATH`, then `scrcpy-win64-v4.1\scrcpy.exe`, then PATH. The viewer validates the configured serial with the same authorized-device selection used by MCP; without a configured serial it requires exactly one authorized device. Windows display scaling or manually moved/resized scrcpy windows can require matching the viewer geometry overrides.
+scrcpy resolution is `PHONE_CONTROL_SCRCPY_PATH`, then `scrcpy-win64-v4.1\scrcpy.exe`, then PATH. The viewer validates the configured serial with the same authorized-device selection used by MCP; without a configured serial it requires exactly one authorized device. The native scrcpy title bar can be dragged normally. The viewer listens for native Win32 move/resize notifications and keeps a 250 ms watchdog as a recovery path. While scrcpy is moving, minimized, unavailable, or has not produced two stable client-rectangle samples, the transparent cursor layer is hidden; it becomes visible again after the overlay catches up. This prevents a stale cursor from remaining on the desktop after a fast drag. The viewer tracks scrcpy's native client rectangle while it runs, so moving or resizing the window moves the transparent cursor layer with it.
 
 ## Checks
 

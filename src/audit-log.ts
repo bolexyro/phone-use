@@ -9,7 +9,8 @@ import type {
   ScrollDirection
 } from "./types.js";
 
-export type AuditOutcome = "success" | "failed" | "unknown";
+export type AuditOutcome = "pending" | "success" | "failed" | "unknown";
+export type AuditPhase = "start" | "result";
 
 export type SanitizedAuditAction =
   | { type: "click"; x: number; y: number }
@@ -23,6 +24,7 @@ export interface AuditLogEntry {
   serial: string;
   packageName: string | null;
   outcome: AuditOutcome;
+  phase?: AuditPhase;
   action: SanitizedAuditAction;
   pointerEvent?: PointerEvent;
   errorCode?: string;

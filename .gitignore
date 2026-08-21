@@ -2,6 +2,8 @@
 /dist/
 /coverage/
 /logs/
+/\.firecrawl/
+/\.runtime/
 /config/phone-control.json
 /scrcpy-win64-v4.1/
 *.log
