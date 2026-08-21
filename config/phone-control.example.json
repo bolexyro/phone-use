@@ -2,7 +2,8 @@
   "profiles": {
     "local": {
       "allowedApps": [
-        "com.sec.android.app.popupcalculator"
+        "com.sec.android.app.popupcalculator",
+        "com.spotify.music"
       ]
     }
   }

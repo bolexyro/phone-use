@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { PhoneControlError } from "../errors.js";
+
+const PACKAGE_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 
 export interface AdbPathResolutionOptions {
   env?: NodeJS.ProcessEnv;
@@ -49,6 +52,12 @@ export function resolveAdbPath(
   const bundled = check(bundledPath);
   if (bundled) {
     return bundled;
+  }
+
+  const bundledInPkg = join(PACKAGE_ROOT, "scrcpy-win64-v4.1", "adb.exe");
+  const bundledPkg = check(bundledInPkg);
+  if (bundledPkg) {
+    return bundledPkg;
   }
 
   const configuredPathValue = env.Path ?? env.PATH ?? "";

@@ -349,10 +349,10 @@ export class PhoneControlService {
       const [foreground, display, xml, screenshot] = await Promise.all([
         this.#adb.getForeground(serial),
         this.#adb.getDisplay(serial),
-        this.#adb.dumpUiAutomatorXml(serial),
+        this.#adb.dumpUiAutomatorXml(serial).catch(() => null),
         this.#adb.captureScreenshot(serial)
       ]);
-      const elements = parseUiAutomatorXml(xml);
+      const elements = xml ? parseUiAutomatorXml(xml) : [];
       const screenshotDimensions = parsePngDimensions(screenshot);
       return {
         serial,

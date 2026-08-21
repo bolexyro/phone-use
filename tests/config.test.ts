@@ -19,7 +19,10 @@ describe("policy configuration", () => {
     });
 
     expect(policy.profile).toBe("local");
-    expect(policy.allowedApps).toEqual(["com.sec.android.app.popupcalculator"]);
+    expect(policy.allowedApps).toEqual([
+      "com.sec.android.app.popupcalculator",
+      "com.spotify.music"
+    ]);
   });
 
   it("uses PHONE_CONTROL_PROFILE and rejects unknown profiles with a stable code", () => {

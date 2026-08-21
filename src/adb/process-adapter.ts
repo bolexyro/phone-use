@@ -154,6 +154,11 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
   }
 
   public async dumpUiAutomatorXml(serial: string): Promise<string> {
+    try {
+      await this.#runText(["-s", serial, "shell", "rm", "-f", UI_AUTOMATOR_DUMP_PATH]);
+    } catch {
+      // Ignore failure to remove prior file
+    }
     const output = await this.#runText(buildUiDumpArgs(serial));
     if (/error|exception|failed/i.test(output)) {
       throw new PhoneControlError(

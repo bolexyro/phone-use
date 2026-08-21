@@ -1,11 +1,14 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { PhoneControlError } from "./errors.js";
 import type { PolicyProfile } from "./types.js";
 
 export const DEFAULT_PROFILE = "local";
 export const DEFAULT_CONFIG_PATH = ["config", "phone-control.json"];
+
+const PACKAGE_ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 
 export interface LoadedPolicy extends PolicyProfile {
   configPath: string;
@@ -33,7 +36,14 @@ export function resolveConfigPath(
   const cwd = options.cwd ?? process.cwd();
   const configured = options.configPath ?? options.env?.PHONE_CONTROL_CONFIG_PATH;
   const candidate = configured || DEFAULT_CONFIG_PATH.join("/");
-  return isAbsolute(candidate) ? candidate : resolve(cwd, candidate);
+  if (isAbsolute(candidate)) {
+    return candidate;
+  }
+  const inCwd = resolve(cwd, candidate);
+  if (existsSync(inCwd)) {
+    return inCwd;
+  }
+  return resolve(PACKAGE_ROOT, candidate);
 }
 
 function invalidPolicy(message: string, details: Record<string, unknown> = {}): never {

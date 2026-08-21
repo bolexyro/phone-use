@@ -11,13 +11,18 @@ import { asPhoneControlError } from "./errors.js";
 import { createMcpServer } from "./server.js";
 import { PhoneControlService } from "./service.js";
 
+const PACKAGE_ROOT = resolve(fileURLToPath(import.meta.url), "../..");
+
 export function resolveAuditLogPath(
   env: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd()
 ): string {
   const configured = env.PHONE_CONTROL_AUDIT_LOG_PATH?.trim();
   const candidate = configured || "logs/phone-control.actions.ndjson";
-  return isAbsolute(candidate) ? candidate : resolve(cwd, candidate);
+  if (isAbsolute(candidate)) {
+    return candidate;
+  }
+  return resolve(PACKAGE_ROOT, candidate);
 }
 
 export async function startPhoneControlServer(
