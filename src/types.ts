@@ -108,7 +108,7 @@ export interface PhoneExecuteRequest {
   action: PhoneAction;
 }
 
-export interface PointerEvent {
+export interface ClickPointerEvent {
   type: "pointer";
   action: "click";
   x: number;
@@ -121,6 +121,27 @@ export interface PointerEvent {
   displayHeight: number;
   timestamp: number;
 }
+
+export interface ScrollPointerEvent {
+  type: "pointer";
+  action: "scroll";
+  direction: ScrollDirection;
+  amount: ScrollAmount;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  durationMs: number;
+  coordinateSpace: "display";
+  observationId: string;
+  serial: string;
+  packageName: string | null;
+  displayWidth: number;
+  displayHeight: number;
+  timestamp: number;
+}
+
+export type PointerEvent = ClickPointerEvent | ScrollPointerEvent;
 
 export type WaitCondition =
   | { type: "foreground_package"; packageName: string }

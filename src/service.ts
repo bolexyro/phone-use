@@ -198,7 +198,12 @@ export class PhoneControlService {
       at: resolved.pointerEvent?.timestamp ?? this.#now(),
       serial: device.serial,
       packageName: current.packageName,
-      action: sanitizeAction(request.action, resolved.pointerEvent),
+      action: sanitizeAction(
+        request.action,
+        resolved.pointerEvent && resolved.pointerEvent.action === "click"
+          ? resolved.pointerEvent
+          : undefined
+      ),
       ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {})
     } satisfies Omit<AuditLogEntry, "outcome">;
 
@@ -433,7 +438,28 @@ export class PhoneControlService {
         action.direction,
         action.amount
       );
-      return { perform: () => this.#adb.swipe(current.serial, gesture) };
+      const pointerEvent: PointerEvent = {
+        type: "pointer",
+        action: "scroll",
+        direction: action.direction,
+        amount: action.amount,
+        startX: gesture.x1,
+        startY: gesture.y1,
+        endX: gesture.x2,
+        endY: gesture.y2,
+        durationMs: gesture.durationMs,
+        coordinateSpace: "display",
+        observationId: observation.observationId,
+        serial: current.serial,
+        packageName: current.packageName,
+        displayWidth: current.display.width,
+        displayHeight: current.display.height,
+        timestamp: this.#now()
+      };
+      return {
+        pointerEvent,
+        perform: () => this.#adb.swipe(current.serial, gesture)
+      };
     }
 
     if (action.type === "type") {

@@ -24,19 +24,26 @@ function isNumber(value: unknown): value is number {
 
 function isPointerEvent(value: unknown): value is PointerEvent {
   if (!isRecord(value)) return false;
-  return (
-    value.type === "pointer" &&
-    value.action === "click" &&
-    isNumber(value.x) &&
-    isNumber(value.y) &&
-    value.coordinateSpace === "display" &&
-    typeof value.observationId === "string" &&
-    typeof value.serial === "string" &&
-    (typeof value.packageName === "string" || value.packageName === null) &&
-    isNumber(value.displayWidth) &&
-    isNumber(value.displayHeight) &&
-    isNumber(value.timestamp)
-  );
+  if (value.type !== "pointer" || value.coordinateSpace !== "display") return false;
+  if (typeof value.observationId !== "string" || typeof value.serial !== "string") return false;
+  if (typeof value.packageName !== "string" && value.packageName !== null) return false;
+  if (!isNumber(value.displayWidth) || !isNumber(value.displayHeight) || !isNumber(value.timestamp)) return false;
+
+  if (value.action === "click") {
+    return isNumber(value.x) && isNumber(value.y);
+  }
+  if (value.action === "scroll") {
+    return (
+      typeof value.direction === "string" &&
+      typeof value.amount === "string" &&
+      isNumber(value.startX) &&
+      isNumber(value.startY) &&
+      isNumber(value.endX) &&
+      isNumber(value.endY) &&
+      isNumber(value.durationMs)
+    );
+  }
+  return false;
 }
 
 export function parseAuditLine(line: string): SuccessfulClickAuditEvent | null {
@@ -59,7 +66,7 @@ export function parseAuditLine(line: string): SuccessfulClickAuditEvent | null {
   if (!isStart && !isSuccessfulResult) return null;
 
   const action = value.action;
-  if (!isRecord(action) || (action.type !== "click" && action.type !== "click_coordinate")) {
+  if (!isRecord(action) || (action.type !== "click" && action.type !== "click_coordinate" && action.type !== "scroll")) {
     return null;
   }
 

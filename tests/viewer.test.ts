@@ -74,9 +74,51 @@ describe("visible cursor viewer helpers", () => {
     expect(parseAuditText(`${clickLine}\nnot-json\n`)).toHaveLength(1);
   });
 
+const scrollLine = JSON.stringify({
+  at: 124,
+  serial: "phone-1",
+  packageName: "com.chowdeck.com",
+  outcome: "success",
+  action: { type: "scroll", direction: "down", amount: "medium" },
+  pointerEvent: {
+    type: "pointer",
+    action: "scroll",
+    direction: "down",
+    amount: "medium",
+    startX: 540,
+    startY: 1872,
+    endX: 540,
+    endY: 468,
+    durationMs: 300,
+    coordinateSpace: "display",
+    observationId: "obs_2",
+    serial: "phone-1",
+    packageName: "com.chowdeck.com",
+    displayWidth: 1080,
+    displayHeight: 2340,
+    timestamp: 124
+  }
+});
+
   it("parses pointer-start entries before their completed result", () => {
     expect(parseAuditLine(pendingClickLine)).toMatchObject({ phase: "start" });
     expect(parseAuditLine(completedClickLine)).toMatchObject({ phase: "result" });
+  });
+
+  it("parses scroll audit events with complete swipe gesture metadata", () => {
+    const event = parseAuditLine(scrollLine);
+    expect(event).toMatchObject({
+      at: 124,
+      serial: "phone-1",
+      pointerEvent: {
+        action: "scroll",
+        direction: "down",
+        startX: 540,
+        startY: 1872,
+        endX: 540,
+        endY: 468
+      }
+    });
   });
 
   it("does not replay a completed result after a pointer-start entry", async () => {

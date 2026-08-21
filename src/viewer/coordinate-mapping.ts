@@ -19,7 +19,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
 }
 
 export function mapDevicePointToOverlay(
-  pointer: Pick<PointerEvent, "x" | "y" | "displayWidth" | "displayHeight">,
+  pointer: { x: number; y: number; displayWidth: number; displayHeight: number },
   geometry: ViewerGeometry
 ): MappedCursorPosition {
   if (

@@ -106,6 +106,47 @@ function showCursor(
   event: SuccessfulClickAuditEvent,
   geometry: ViewerGeometry
 ): void {
+  if (event.pointerEvent.action === "scroll") {
+    const startMapped = mapDevicePointToOverlay(
+      {
+        x: event.pointerEvent.startX,
+        y: event.pointerEvent.startY,
+        displayWidth: event.pointerEvent.displayWidth,
+        displayHeight: event.pointerEvent.displayHeight
+      },
+      geometry
+    );
+    const endMapped = mapDevicePointToOverlay(
+      {
+        x: event.pointerEvent.endX,
+        y: event.pointerEvent.endY,
+        displayWidth: event.pointerEvent.displayWidth,
+        displayHeight: event.pointerEvent.displayHeight
+      },
+      geometry
+    );
+    overlay.moveTop();
+    const payload = JSON.stringify({
+      startX: startMapped.localX,
+      startY: startMapped.localY,
+      endX: endMapped.localX,
+      endY: endMapped.localY,
+      direction: event.pointerEvent.direction,
+      amount: event.pointerEvent.amount,
+      durationMs: event.pointerEvent.durationMs
+    });
+    void overlay.webContents
+      .executeJavaScript(`window.phoneControlShowScroll && window.phoneControlShowScroll(${payload})`, true)
+      .catch((error: unknown) => {
+        console.error(
+          `[phone-control-viewer] scroll render failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      });
+    return;
+  }
+
   const mapped = mapDevicePointToOverlay(event.pointerEvent, geometry);
   overlay.moveTop();
   const payload = JSON.stringify({
@@ -113,7 +154,7 @@ function showCursor(
     localY: mapped.localY
   });
   void overlay.webContents
-    .executeJavaScript(`window.phoneControlShowCursor(${payload})`, true)
+    .executeJavaScript(`window.phoneControlShowCursor && window.phoneControlShowCursor(${payload})`, true)
     .catch((error: unknown) => {
       console.error(
         `[phone-control-viewer] cursor render failed: ${
