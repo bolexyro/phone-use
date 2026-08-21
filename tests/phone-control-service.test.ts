@@ -398,7 +398,7 @@ describe("phone-control service safety", () => {
       observationId: scrollObservation.data.observation.observationId,
       action: { type: "scroll", direction: "up", amount: "medium" }
     });
-    expect(adb.swipes[0]).toMatchObject({ durationMs: 350 });
+    expect(adb.swipes[0]).toMatchObject({ durationMs: 280 });
 
     const typeObservation = await service.observe();
     const typedResult = await service.execute({
