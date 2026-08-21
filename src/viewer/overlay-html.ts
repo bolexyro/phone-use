@@ -33,14 +33,93 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
   #cursor.swiping {
     filter:
       drop-shadow(0 0 10px rgba(0, 230, 255, 1))
-      drop-shadow(0 0 20px rgba(43, 140, 219, 0.95))
-      drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+      drop-shadow(0 0 22px rgba(43, 140, 219, 0.95))
+      drop-shadow(0 3px 8px rgba(0, 0, 0, 0.6));
   }
-  #cursor svg {
+
+  #pointer-icon {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 22px;
+    height: 22px;
+    opacity: 1;
+    transform: scale(1);
+    transition: opacity 160ms ease, transform 160ms cubic-bezier(.2, .9, .3, 1);
+  }
+  #pointer-icon svg {
     display: block;
     width: 22px;
     height: 22px;
   }
+
+  #mouse-icon {
+    position: absolute;
+    top: -2px;
+    left: 1px;
+    width: 20px;
+    height: 26px;
+    opacity: 0;
+    transform: scale(0.5);
+    transition: opacity 160ms ease, transform 160ms cubic-bezier(.2, .9, .3, 1);
+  }
+  #mouse-icon svg {
+    display: block;
+    width: 20px;
+    height: 26px;
+  }
+
+  /* When in scroll mode (after a scroll action), show the capsule mouse */
+  #cursor.mode-scroll #pointer-icon {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  #cursor.mode-scroll #mouse-icon {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  .wheel-down {
+    animation: wheel-down 450ms infinite ease-in-out;
+  }
+  .wheel-up {
+    animation: wheel-up 450ms infinite ease-in-out;
+  }
+  .wheel-right {
+    animation: wheel-right 450ms infinite ease-in-out;
+  }
+  .wheel-left {
+    animation: wheel-left 450ms infinite ease-in-out;
+  }
+
+  @keyframes wheel-down {
+    0% { transform: translateY(-2px); opacity: 0.4; }
+    50% { transform: translateY(2.5px); opacity: 1; }
+    100% { transform: translateY(5px); opacity: 0.1; }
+  }
+  @keyframes wheel-up {
+    0% { transform: translateY(5px); opacity: 0.1; }
+    50% { transform: translateY(2.5px); opacity: 1; }
+    100% { transform: translateY(-2px); opacity: 0.4; }
+  }
+  @keyframes wheel-right {
+    0% { transform: translateX(-2px); opacity: 0.4; }
+    50% { transform: translateX(2.5px); opacity: 1; }
+    100% { transform: translateX(5px); opacity: 0.1; }
+  }
+  @keyframes wheel-left {
+    0% { transform: translateX(5px); opacity: 0.1; }
+    50% { transform: translateX(2.5px); opacity: 1; }
+    100% { transform: translateX(-2px); opacity: 0.4; }
+  }
+
+  #cursor.swiping.swipe-right {
+    transform: rotate(10deg);
+  }
+  #cursor.swiping.swipe-left {
+    transform: rotate(-10deg);
+  }
+
   #cursor.click {
     animation: cursor-click 480ms cubic-bezier(.16, .84, .32, 1.25);
   }
@@ -146,19 +225,73 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
   </div>
 
   <div id="cursor" aria-hidden="true">
-    <svg viewBox="0 0 48 48" role="presentation">
-      <path
-        d="M 4 4 L 38 16 L 24 24 L 16 38 Z"
-        fill="#2b8cdb"
-        stroke="#ffffff"
-        stroke-width="2.5"
-        stroke-linejoin="round"
-      />
-    </svg>
+    <div id="pointer-icon">
+      <svg viewBox="0 0 48 48" role="presentation">
+        <path
+          d="M 4 4 L 38 16 L 24 24 L 16 38 Z"
+          fill="#2b8cdb"
+          stroke="#ffffff"
+          stroke-width="2.5"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </div>
+    <div id="mouse-icon">
+      <svg viewBox="0 0 24 32" role="presentation">
+        <!-- Outer mouse capsule body -->
+        <rect
+          x="2"
+          y="2"
+          width="20"
+          height="28"
+          rx="10"
+          ry="10"
+          fill="#2b8cdb"
+          stroke="#ffffff"
+          stroke-width="2"
+        />
+        <!-- Bottom palm rest subtle shading -->
+        <path
+          d="M 2 15 C 2 15 2 29 12 29 C 22 29 22 15 22 15 Z"
+          fill="rgba(0, 0, 0, 0.15)"
+        />
+        <!-- Horizontal divider separating buttons from palm rest -->
+        <line
+          x1="2"
+          y1="15"
+          x2="22"
+          y2="15"
+          stroke="#ffffff"
+          stroke-width="1.8"
+        />
+        <!-- Vertical divider between left and right buttons -->
+        <line
+          x1="12"
+          y1="2"
+          x2="12"
+          y2="15"
+          stroke="#ffffff"
+          stroke-width="1.5"
+        />
+        <!-- Center scroll wheel -->
+        <rect
+          id="scroll-wheel"
+          x="10"
+          y="5"
+          width="4"
+          height="7"
+          rx="2"
+          fill="#ffffff"
+          stroke="#2b8cdb"
+          stroke-width="0.8"
+        />
+      </svg>
+    </div>
   </div>
   <script>
     (() => {
       const cursor = document.getElementById("cursor");
+      const scrollWheel = document.getElementById("scroll-wheel");
       const swipeGroup = document.getElementById("swipe-group");
       const swipeLine = document.getElementById("swipe-line");
       const swipeStartDot = document.getElementById("swipe-start-dot");
@@ -178,10 +311,15 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
       cursor.style.left = String(initial.x) + "px";
       cursor.style.top = String(initial.y) + "px";
 
+      // Non-scroll action (click / tap): switches back to normal arrow cursor
       window.phoneControlShowCursor = (point) => {
         if (!cursor || !point) return;
-        cursor.style.transition = "left ${duration}ms cubic-bezier(.2, .9, .3, 1), top ${duration}ms cubic-bezier(.2, .9, .3, 1)";
+        cursor.classList.remove("mode-scroll");
         cursor.classList.remove("swiping");
+        if (scrollWheel) {
+          scrollWheel.className = "";
+        }
+        cursor.style.transition = "left ${duration}ms cubic-bezier(.2, .9, .3, 1), top ${duration}ms cubic-bezier(.2, .9, .3, 1)";
         cursor.style.left = String(point.localX - HOTSPOT_X) + "px";
         cursor.style.top = String(point.localY - HOTSPOT_Y) + "px";
         window.clearTimeout(clickTimer);
@@ -200,6 +338,7 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
         right: { icon: "⇥", text: "Scroll Right" }
       };
 
+      // Scroll action: switches to capsule mouse cursor, keeps it centered, and REMAINS in capsule mode
       window.phoneControlShowScroll = (scroll) => {
         if (!cursor || !scroll) return;
         const dur = Math.max(150, scroll.durationMs || 300);
@@ -212,13 +351,26 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
         window.clearTimeout(badgeTimer);
         badgeTimer = window.setTimeout(() => scrollBadge.classList.remove("show"), dur + 400);
 
-        // Position cursor instantly at swipe start
-        cursor.style.transition = "none";
-        cursor.classList.remove("click");
+        // Switch to capsule mouse and animate scroll wheel
+        cursor.classList.add("mode-scroll");
+        cursor.classList.remove("click", "swipe-left", "swipe-right");
         cursor.classList.add("swiping");
-        cursor.style.left = String(scroll.startX - HOTSPOT_X) + "px";
-        cursor.style.top = String(scroll.startY - HOTSPOT_Y) + "px";
-        void cursor.offsetWidth;
+        if (scroll.direction === "left") cursor.classList.add("swipe-left");
+        if (scroll.direction === "right") cursor.classList.add("swipe-right");
+
+        if (scrollWheel) {
+          if (scroll.direction === "up") scrollWheel.className = "wheel-up";
+          else if (scroll.direction === "down") scrollWheel.className = "wheel-down";
+          else if (scroll.direction === "left") scrollWheel.className = "wheel-left";
+          else if (scroll.direction === "right") scrollWheel.className = "wheel-right";
+        }
+
+        // Keep capsule mouse centered on screen
+        const centerX = Math.max(0, Math.floor((window.innerWidth - cursor.offsetWidth) / 2));
+        const centerY = Math.max(0, Math.floor((window.innerHeight - cursor.offsetHeight) / 2));
+        cursor.style.transition = "left 200ms cubic-bezier(.2, .9, .3, 1), top 200ms cubic-bezier(.2, .9, .3, 1)";
+        cursor.style.left = String(centerX) + "px";
+        cursor.style.top = String(centerY) + "px";
 
         // Draw swipe path line
         swipeLine.setAttribute("x1", String(scroll.startX));
@@ -231,16 +383,14 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
         swipeEndDot.setAttribute("cy", String(scroll.endY));
         swipeGroup.classList.add("active");
 
-        // Animate cursor along swipe trajectory
-        cursor.style.transition = "left " + dur + "ms cubic-bezier(.25, .8, .25, 1), top " + dur + "ms cubic-bezier(.25, .8, .25, 1)";
-        cursor.style.left = String(scroll.endX - HOTSPOT_X) + "px";
-        cursor.style.top = String(scroll.endY - HOTSPOT_Y) + "px";
-
-        // Fade out track & swiping state after gesture
+        // Stop active swipe line and wheel spin, but RETAIN capsule mouse centered!
         window.setTimeout(() => {
           swipeGroup.classList.remove("active");
-          cursor.classList.remove("swiping");
-        }, dur + 80);
+          cursor.classList.remove("swiping", "swipe-left", "swipe-right");
+          if (scrollWheel) {
+            scrollWheel.className = "";
+          }
+        }, dur + 100);
       };
     })();
   </script>
