@@ -25,11 +25,11 @@ import { resolveScrcpyPath } from "./scrcpy-path.js";
 import { fitDipRectToWorkArea } from "./window-geometry.js";
 import { Win32ClientWindowRectProvider } from "./win32-window.js";
 
-if (process.platform === "win32") {
+if (process.platform === "win32" && typeof app !== "undefined") {
   try {
-    app.disableHardwareAcceleration();
+    app.disableHardwareAcceleration?.();
   } catch {
-    app.commandLine.appendSwitch("disable-gpu");
+    app.commandLine?.appendSwitch?.("disable-gpu");
   }
 }
 
@@ -106,6 +106,8 @@ function showCursor(
   event: SuccessfulClickAuditEvent,
   geometry: ViewerGeometry
 ): void {
+  if (overlay.isDestroyed() || !overlay.isVisible()) return;
+
   if (event.pointerEvent.action === "scroll") {
     const startMapped = mapDevicePointToOverlay(
       {
@@ -164,6 +166,20 @@ function showCursor(
     });
 }
 
+export function parsePackageFromWindowTitle(title: string): string | undefined {
+  const match = title.match(/^Phone Control:\s*([a-zA-Z0-9_.-]+)$/i);
+  return match ? match[1].trim() : undefined;
+}
+
+export interface OverlaySession {
+  processId: number;
+  title: string;
+  packageName?: string;
+  overlay: BrowserWindow;
+  recoveryState: ReturnType<typeof createGeometryRecoveryState>;
+  geometry: ViewerGeometry;
+}
+
 export async function startViewer(
   env: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd()
@@ -195,62 +211,47 @@ export async function startViewer(
       },${runtimeConfig.y} ${runtimeConfig.width}x${runtimeConfig.height}`
     );
   }
-  const physicalBounds = {
-    x: runtimeConfig.x,
-    y: runtimeConfig.y,
-    width: runtimeConfig.width,
-    height: runtimeConfig.height
-  };
-  const initialOverlayBounds = screen.screenToDipRect(null, physicalBounds);
-  let overlayGeometry: ViewerGeometry = {
-    x: initialOverlayBounds.x,
-    y: initialOverlayBounds.y,
-    width: initialOverlayBounds.width,
-    height: initialOverlayBounds.height
-  };
-  const overlay = new BrowserWindow({
-    x: initialOverlayBounds.x,
-    y: initialOverlayBounds.y,
-    width: initialOverlayBounds.width,
-    height: initialOverlayBounds.height,
-    show: false,
-    transparent: true,
-    backgroundColor: "#00000000",
-    frame: false,
-    alwaysOnTop: true,
-    focusable: false,
-    skipTaskbar: true,
-    resizable: false,
-    hasShadow: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
-    }
-  });
-  overlay.setAlwaysOnTop(true, "floating");
-  overlay.setVisibleOnAllWorkspaces(false);
-  overlay.setIgnoreMouseEvents(true, { forward: true });
-  overlay.setMenuBarVisibility(false);
-  // Start scrcpy before loading the transparent renderer. If Electron's
-  // renderer is slow or unavailable, the user must still get a usable phone
-  // window instead of a silent background process.
-  const scrcpy = spawnScrcpy(scrcpyPath, serial, runtimeConfig);
-  try {
-    await overlay.loadFile(overlayPagePath);
-  } catch (error) {
-    if (!scrcpy.killed) scrcpy.kill();
-    throw error;
+
+  function createOverlay(initialBounds: ViewerGeometry): BrowserWindow {
+    const overlay = new BrowserWindow({
+      x: initialBounds.x,
+      y: initialBounds.y,
+      width: initialBounds.width,
+      height: initialBounds.height,
+      show: false,
+      transparent: true,
+      backgroundColor: "#00000000",
+      frame: false,
+      alwaysOnTop: true,
+      focusable: false,
+      skipTaskbar: true,
+      resizable: false,
+      hasShadow: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true
+      }
+    });
+    overlay.setAlwaysOnTop(true, "floating");
+    overlay.setVisibleOnAllWorkspaces(false);
+    overlay.setIgnoreMouseEvents(true, { forward: true });
+    overlay.setMenuBarVisibility(false);
+    void overlay.loadFile(overlayPagePath);
+    return overlay;
   }
+
+  const scrcpy = spawnScrcpy(scrcpyPath, serial, runtimeConfig);
 
   let stopping = false;
   const windowRectProvider = new Win32ClientWindowRectProvider();
+  const sessions = new Map<number, OverlaySession>();
+  const watchedProcesses = new Set<number>();
   let auditInterval: NodeJS.Timeout | undefined;
   let geometryInterval: NodeJS.Timeout | undefined;
   let geometrySyncPromise: Promise<boolean> | undefined;
   let removeWindowChangedListener: (() => void) | undefined;
-  let recoveryState = createGeometryRecoveryState();
-  let pendingCursorEvent: SuccessfulClickAuditEvent | undefined;
+
   const stop = (): void => {
     if (stopping) return;
     stopping = true;
@@ -258,6 +259,12 @@ export async function startViewer(
     if (geometryInterval) clearInterval(geometryInterval);
     removeWindowChangedListener?.();
     windowRectProvider.close();
+    for (const session of sessions.values()) {
+      if (!session.overlay.isDestroyed()) {
+        session.overlay.close();
+      }
+    }
+    sessions.clear();
     if (!scrcpy.killed) scrcpy.kill();
   };
   app.on("before-quit", stop);
@@ -267,55 +274,90 @@ export async function startViewer(
     await tailer.poll();
   } catch (error) {
     stop();
-    if (!overlay.isDestroyed()) overlay.close();
     throw error;
   }
 
   const runGeometrySync = async (): Promise<boolean> => {
-    if (stopping || scrcpy.pid === undefined) return false;
+    if (stopping) return false;
     try {
-      const clientRect = await windowRectProvider.getClientRect(scrcpy.pid);
-      if (!clientRect || overlay.isDestroyed()) {
-        recoveryState = updateGeometryRecovery(recoveryState, undefined).state;
-        if (!overlay.isDestroyed() && overlay.isVisible()) overlay.hide();
-        return false;
+      const windows = await windowRectProvider.listWindows();
+      const discoveredPids = new Set<number>();
+
+      for (const win of windows) {
+        discoveredPids.add(win.processId);
+        const nextBounds = screen.screenToDipRect(null, {
+          x: win.x,
+          y: win.y,
+          width: win.width,
+          height: win.height
+        });
+
+        let session = sessions.get(win.processId);
+        if (!session) {
+          const overlay = createOverlay(nextBounds);
+          const pkg = parsePackageFromWindowTitle(win.title);
+          session = {
+            processId: win.processId,
+            title: win.title,
+            packageName: pkg,
+            overlay,
+            recoveryState: createGeometryRecoveryState(),
+            geometry: {
+              x: nextBounds.x,
+              y: nextBounds.y,
+              width: nextBounds.width,
+              height: nextBounds.height
+            }
+          };
+          sessions.set(win.processId, session);
+        }
+
+        if (!watchedProcesses.has(win.processId)) {
+          watchedProcesses.add(win.processId);
+          void windowRectProvider.watchProcess(win.processId);
+        }
+
+        const recovery = updateGeometryRecovery(session.recoveryState, nextBounds, 2);
+        session.recoveryState = recovery.state;
+
+        const changed =
+          session.geometry.x !== nextBounds.x ||
+          session.geometry.y !== nextBounds.y ||
+          session.geometry.width !== nextBounds.width ||
+          session.geometry.height !== nextBounds.height;
+
+        if (changed) {
+          session.geometry = {
+            x: nextBounds.x,
+            y: nextBounds.y,
+            width: nextBounds.width,
+            height: nextBounds.height
+          };
+          if (!session.overlay.isDestroyed()) {
+            session.overlay.setBounds(nextBounds);
+          }
+        }
+
+        if (!recovery.attached) {
+          if (!session.overlay.isDestroyed() && session.overlay.isVisible()) {
+            session.overlay.hide();
+          }
+        } else {
+          if (!session.overlay.isDestroyed() && !session.overlay.isVisible()) {
+            session.overlay.showInactive();
+          }
+        }
       }
-      const nextBounds = screen.screenToDipRect(null, clientRect);
-      const wasAttached = recoveryState.attached;
-      const recovery = updateGeometryRecovery(recoveryState, nextBounds, 2);
-      recoveryState = recovery.state;
-      const changed =
-        overlayGeometry.x !== nextBounds.x ||
-        overlayGeometry.y !== nextBounds.y ||
-        overlayGeometry.width !== nextBounds.width ||
-        overlayGeometry.height !== nextBounds.height;
-      if (changed) {
-        overlayGeometry = {
-          x: nextBounds.x,
-          y: nextBounds.y,
-          width: nextBounds.width,
-          height: nextBounds.height
-        };
-        overlay.setBounds(nextBounds);
-        console.error(
-          `[phone-control-viewer] overlay synced to scrcpy client: ${
-            nextBounds.x
-          },${nextBounds.y} ${nextBounds.width}x${nextBounds.height}`
-        );
+
+      for (const [pid, session] of sessions.entries()) {
+        if (!discoveredPids.has(pid)) {
+          if (!session.overlay.isDestroyed()) {
+            session.overlay.close();
+          }
+          sessions.delete(pid);
+        }
       }
-      if (recovery.changed) {
-        console.error(
-          `[phone-control-viewer] scrcpy geometry changed; waiting for a stable window position.`
-        );
-      }
-      if (!recovery.attached) {
-        if (!overlay.isDestroyed() && overlay.isVisible()) overlay.hide();
-        return false;
-      }
-      if (!overlay.isVisible()) overlay.showInactive();
-      if (!wasAttached) {
-        console.error(`[phone-control-viewer] cursor overlay recovered and is visible.`);
-      }
+
       return true;
     } catch (error) {
       console.error(
@@ -327,7 +369,7 @@ export async function startViewer(
     }
   };
 
-  const syncOverlayToScrcpy = (): Promise<boolean> => {
+  const syncOverlays = (): Promise<boolean> => {
     if (!geometrySyncPromise) {
       geometrySyncPromise = runGeometrySync().finally(() => {
         geometrySyncPromise = undefined;
@@ -336,46 +378,47 @@ export async function startViewer(
     return geometrySyncPromise;
   };
 
-  const renderPendingCursor = (): void => {
-    if (
-      !pendingCursorEvent ||
-      overlay.isDestroyed() ||
-      !recoveryState.attached
-    ) {
-      return;
-    }
-    const event = pendingCursorEvent;
-    pendingCursorEvent = undefined;
-    showCursor(overlay, event, overlayGeometry);
-  };
+  const dispatchCursorEvent = (event: SuccessfulClickAuditEvent): void => {
+    let targetSession: OverlaySession | undefined;
 
-  const reconcileAndRender = async (): Promise<void> => {
-    if (await syncOverlayToScrcpy()) renderPendingCursor();
-  };
-
-  removeWindowChangedListener = windowRectProvider.onWindowChanged((event) => {
-    if (event.processId === scrcpy.pid || scrcpy.pid === undefined || event.processId > 0) {
-      void reconcileAndRender();
-    }
-  });
-  if (scrcpy.pid !== undefined) {
-    try {
-      const watching = await windowRectProvider.watchProcess(scrcpy.pid);
-      if (!watching) {
-        console.error(
-          `[phone-control-viewer] native window movement tracking did not start; watchdog polling remains active.`
-        );
+    if (event.packageName) {
+      for (const session of sessions.values()) {
+        if (session.packageName === event.packageName) {
+          targetSession = session;
+          break;
+        }
       }
-    } catch (error) {
-      console.error(
-        `[phone-control-viewer] native window movement tracking failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
     }
-  }
-  await reconcileAndRender();
-  geometryInterval = setInterval(() => void reconcileAndRender(), 250);
+
+    if (!targetSession) {
+      if (scrcpy.pid !== undefined && sessions.has(scrcpy.pid)) {
+        targetSession = sessions.get(scrcpy.pid);
+      } else {
+        targetSession = sessions.values().next().value;
+      }
+    }
+
+    if (
+      targetSession &&
+      !targetSession.overlay.isDestroyed()
+    ) {
+      if (!targetSession.overlay.isVisible()) {
+        targetSession.overlay.showInactive();
+      }
+      showCursor(targetSession.overlay, event, targetSession.geometry);
+    }
+  };
+
+  const reconcile = async (): Promise<void> => {
+    await syncOverlays();
+  };
+
+  removeWindowChangedListener = windowRectProvider.onWindowChanged(() => {
+    void reconcile();
+  });
+
+  await reconcile();
+  geometryInterval = setInterval(() => void reconcile(), 250);
 
   let polling = false;
   const poll = async (): Promise<void> => {
@@ -383,8 +426,8 @@ export async function startViewer(
     polling = true;
     try {
       for (const event of await tailer.poll()) {
-        pendingCursorEvent = event;
-        await reconcileAndRender();
+        await syncOverlays();
+        dispatchCursorEvent(event);
       }
     } catch (error) {
       console.error(
@@ -397,21 +440,15 @@ export async function startViewer(
     }
   };
   auditInterval = setInterval(() => void poll(), config.auditPollIntervalMs);
-  overlay.on("closed", () => {
-    if (!stopping) app.quit();
-  });
+
   scrcpy.once("error", (error) => {
     console.error(`[phone-control-viewer] scrcpy failed: ${error.message}`);
-    if (!stopping) app.quit();
   });
   scrcpy.once("exit", (code, signal) => {
-    if (!stopping) {
-      console.error(`[phone-control-viewer] scrcpy exited (${code ?? signal ?? "unknown"}).`);
-      app.quit();
-    }
+    console.error(`[phone-control-viewer] primary scrcpy exited (${code ?? signal ?? "unknown"}).`);
   });
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") app.quit();
+    // Keep viewer daemon running even if all current overlay windows close
   });
 }
 

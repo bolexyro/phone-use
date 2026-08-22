@@ -25,15 +25,31 @@ function parseComponent(line: string): ForegroundState | null {
   return { packageName, activity };
 }
 
-export function parseForegroundOutput(output: string): ForegroundState {
+export function parseForegroundForDisplay(
+  output: string,
+  displayId = 0
+): ForegroundState {
   const priority = [
     /mResumedActivity/i,
     /mCurrentFocus/i,
     /mFocusedApp/i,
-    /ActivityRecord/i
+    /ActivityRecord/i,
+    /topResumedActivity/i
   ];
 
-  const lines = output.split(/\r?\n/);
+  // Try to find display-specific block if multi-display output exists
+  let scopedOutput = output;
+  const displayBlockMatch = output.match(
+    new RegExp(
+      `(?:Display\\s*#${displayId}\\b|mDisplayId=${displayId}\\b|displayId=${displayId}\\b)([\\s\\S]*?)(?:(?:Display\\s*#\\d+\\b|mDisplayId=\\d+\\b|displayId=\\d+\\b)|$)`,
+      "i"
+    )
+  );
+  if (displayBlockMatch && displayBlockMatch[1]) {
+    scopedOutput = displayBlockMatch[1];
+  }
+
+  const lines = scopedOutput.split(/\r?\n/);
   for (const pattern of priority) {
     for (const line of lines) {
       if (!pattern.test(line)) {
@@ -41,12 +57,32 @@ export function parseForegroundOutput(output: string): ForegroundState {
       }
       const component = parseComponent(line);
       if (component) {
-        return component;
+        return { ...component, displayId };
       }
     }
   }
 
-  return { packageName: null, activity: null };
+  // Fallback to searching entire output if display-specific block was empty and displayId is 0
+  if (displayId === 0 && scopedOutput !== output) {
+    const allLines = output.split(/\r?\n/);
+    for (const pattern of priority) {
+      for (const line of allLines) {
+        if (!pattern.test(line)) {
+          continue;
+        }
+        const component = parseComponent(line);
+        if (component) {
+          return { ...component, displayId: 0 };
+        }
+      }
+    }
+  }
+
+  return { packageName: null, activity: null, displayId };
+}
+
+export function parseForegroundOutput(output: string): ForegroundState {
+  return parseForegroundForDisplay(output, 0);
 }
 
 function findSize(text: string, labels: readonly string[]): DisplayInfo | null {
@@ -89,6 +125,57 @@ export function parseRotation(output: string): number {
   return Number(match[1]);
 }
 
+export interface ParsedDisplayEntry {
+  displayId: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
+
+export function parseDisplaysList(output: string): ParsedDisplayEntry[] {
+  const displays: ParsedDisplayEntry[] = [];
+  const displayBlocks = output.split(
+    /(?=Display:\s*mDisplayId=\d+|Display\s+id\s+\d+:|DisplayDeviceInfo\{)/i
+  );
+
+  for (const block of displayBlocks) {
+    const idMatch = block.match(
+      /(?:mDisplayId=|Display\s+id\s+|uniqueId="[^"]*:)(\d+)/i
+    );
+    if (!idMatch) continue;
+    const displayId = Number(idMatch[1]);
+
+    const size =
+      findSize(block, ["cur=", "app=", "real=", "init=", "Override size:", "Physical size:"]) ??
+      (() => {
+        const genericMatch = block.match(/(\d+)\s*[x×]\s*(\d+)/i);
+        return genericMatch
+          ? { width: Number(genericMatch[1]), height: Number(genericMatch[2]) }
+          : null;
+      })();
+
+    if (!size || size.width <= 0 || size.height <= 0) continue;
+
+    let rotation = 0;
+    try {
+      rotation = parseRotation(block);
+    } catch {
+      rotation = 0;
+    }
+
+    if (!displays.some((d) => d.displayId === displayId)) {
+      displays.push({
+        displayId,
+        width: size.width,
+        height: size.height,
+        rotation
+      });
+    }
+  }
+
+  return displays;
+}
+
 export function parseDisplaySnapshot(
   sizeOutput: string,
   windowOutput: string
@@ -96,6 +183,35 @@ export function parseDisplaySnapshot(
   return {
     display: parseDisplayMetrics(sizeOutput, windowOutput),
     rotation: parseRotation(windowOutput)
+  };
+}
+
+export function parseDisplaySnapshotForId(
+  sizeOutput: string,
+  windowOutput: string,
+  displayId = 0
+): DisplaySnapshot {
+  if (displayId === 0) {
+    const snapshot = parseDisplaySnapshot(sizeOutput, windowOutput);
+    return {
+      display: { ...snapshot.display, displayId: 0 },
+      rotation: snapshot.rotation,
+      displayId: 0
+    };
+  }
+  const displays = parseDisplaysList(windowOutput);
+  const found = displays.find((d) => d.displayId === displayId);
+  if (found) {
+    return {
+      display: { width: found.width, height: found.height, displayId },
+      rotation: found.rotation,
+      displayId
+    };
+  }
+  return {
+    display: { ...parseDisplayMetrics(sizeOutput, windowOutput), displayId },
+    rotation: parseRotation(windowOutput),
+    displayId
   };
 }
 

@@ -8,6 +8,7 @@ import { ObservationStore } from "./observation-store.js";
 import type {
   ActionData,
   AllowedAppsData,
+  CloseAppData,
   ObservationSummary,
   PhoneExecuteRequest,
   PhoneStatusData,
@@ -19,6 +20,7 @@ export const PHONE_CONTROL_TOOL_NAMES = [
   "phone_status",
   "phone_list_allowed_apps",
   "phone_open_app",
+  "phone_close_app",
   "phone_observe",
   "phone_execute",
   "phone_wait_for"
@@ -71,6 +73,8 @@ export const phoneExecuteInputSchema = z
 
 export const phoneObserveInputSchema = z
   .object({
+    displayId: z.number().int().min(0).optional(),
+    packageName: packageNameSchema.optional(),
     includeScreenshot: z.boolean().optional()
   })
   .strict();
@@ -110,7 +114,17 @@ export const phoneWaitForInputSchema = z
   .strict();
 
 export const phoneOpenAppInputSchema = z
-  .object({ packageName: packageNameSchema })
+  .object({
+    packageName: packageNameSchema,
+    useVirtualDisplay: z.boolean().optional()
+  })
+  .strict();
+
+export const phoneCloseAppInputSchema = z
+  .object({
+    packageName: packageNameSchema.optional(),
+    displayId: z.number().int().min(0).optional()
+  })
   .strict();
 
 export interface PhoneControlToolService {
@@ -118,9 +132,17 @@ export interface PhoneControlToolService {
   status(): Promise<ToolSuccessResult<PhoneStatusData>>;
   allowedApps(): ToolSuccessResult<AllowedAppsData>;
   openApp(
-    packageName: string
+    packageName: string,
+    options?: { useVirtualDisplay?: boolean }
   ): Promise<ToolSuccessResult<{ observation: ObservationSummary }>>;
-  observe(): Promise<ToolSuccessResult<{ observation: ObservationSummary }>>;
+  closeApp(target: {
+    packageName?: string;
+    displayId?: number;
+  }): Promise<ToolSuccessResult<CloseAppData>>;
+  observe(options?: {
+    displayId?: number;
+    packageName?: string;
+  }): Promise<ToolSuccessResult<{ observation: ObservationSummary }>>;
   execute(request: PhoneExecuteRequest): Promise<ToolSuccessResult<ActionData>>;
   waitFor(
     observationId: string,
@@ -237,14 +259,17 @@ export function registerPhoneControlTools(
   server.registerTool(
     "phone_open_app",
     {
-      description: "Launch one package from the server-side allowlist.",
+      description:
+        "Launch one package from the server-side allowlist. Defaults to running in an isolated virtual display (Android 10+). If virtual display creation fails or is unsupported, returns a descriptive error; confirm with the user before calling with useVirtualDisplay: false to run on the primary screen.",
       inputSchema: phoneOpenAppInputSchema.shape
     },
     async (input) => {
       return safely(
         () => {
           const parsed = parseInput(phoneOpenAppInputSchema, input);
-          return service.openApp(parsed.packageName);
+          return service.openApp(parsed.packageName, {
+            useVirtualDisplay: parsed.useVirtualDisplay
+          });
         },
         (result) => resolveScreenshot(service, result)
       );
@@ -252,9 +277,24 @@ export function registerPhoneControlTools(
   );
 
   server.registerTool(
+    "phone_close_app",
+    {
+      description: "Close an active virtual display session or running app.",
+      inputSchema: phoneCloseAppInputSchema.shape
+    },
+    async (input) => {
+      return safely(() => {
+        const parsed = parseInput(phoneCloseAppInputSchema, input);
+        return service.closeApp(parsed);
+      });
+    }
+  );
+
+  server.registerTool(
     "phone_observe",
     {
-      description: "Capture a fresh UI observation and native PNG screenshot.",
+      description:
+        "Capture a fresh UI observation and native PNG screenshot from a virtual display or primary screen.",
       inputSchema: phoneObserveInputSchema.shape
     },
     async (input) => {
@@ -263,7 +303,10 @@ export function registerPhoneControlTools(
         () => {
           const parsed = parseInput(phoneObserveInputSchema, input);
           includeScreenshot = parsed.includeScreenshot === true;
-          return service.observe();
+          return service.observe({
+            displayId: parsed.displayId,
+            packageName: parsed.packageName
+          });
         },
         (result) => resolveScreenshot(service, result, includeScreenshot)
       );

@@ -42,11 +42,13 @@ export interface UiElement {
 export interface DisplayInfo {
   width: number;
   height: number;
+  displayId?: number;
 }
 
 export interface DisplaySnapshot {
   display: DisplayInfo;
   rotation: number;
+  displayId?: number;
 }
 
 export interface ScreenshotDimensions {
@@ -57,10 +59,12 @@ export interface ScreenshotDimensions {
 export interface ForegroundState {
   packageName: string | null;
   activity: string | null;
+  displayId?: number;
 }
 
 export interface ObservationBinding {
   serial: string;
+  displayId?: number;
   packageName: string | null;
   activity: string | null;
   display: DisplayInfo;
@@ -79,6 +83,7 @@ export interface Observation {
 
 export interface ObservationCapture {
   serial: string;
+  displayId?: number;
   packageName: string | null;
   activity: string | null;
   display: DisplayInfo;
@@ -121,6 +126,7 @@ export interface ClickPointerEvent {
   coordinateSpace: "display";
   observationId: string;
   serial: string;
+  displayId?: number;
   packageName: string | null;
   displayWidth: number;
   displayHeight: number;
@@ -141,6 +147,7 @@ export interface ScrollPointerEvent {
   coordinateSpace: "display";
   observationId: string;
   serial: string;
+  displayId?: number;
   packageName: string | null;
   displayWidth: number;
   displayHeight: number;
@@ -163,6 +170,7 @@ export interface WaitOptions {
 export interface ObservationSummary {
   observationId: string;
   serial: string;
+  displayId?: number;
   packageName: string | null;
   activity: string | null;
   display: DisplayInfo;
@@ -177,12 +185,33 @@ export interface ObservationSummary {
   observedAt: number;
 }
 
+export interface VirtualDisplaySession {
+  displayId: number;
+  packageName: string;
+  activity: string | null;
+  width: number;
+  height: number;
+  startedAt: number;
+}
+
+export interface CloseAppData {
+  closed: boolean;
+  packageName?: string;
+  displayId?: number;
+  message: string;
+}
+
+export interface OpenAppOptions {
+  useVirtualDisplay?: boolean;
+}
+
 export interface PhoneStatusData {
   profile: string;
   allowedApps: readonly string[];
   device: DeviceInfo;
   foreground: ForegroundState;
   foregroundAllowed: boolean;
+  virtualDisplays?: readonly VirtualDisplaySession[];
 }
 
 export interface AllowedAppsData {

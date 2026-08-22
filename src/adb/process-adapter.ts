@@ -10,7 +10,10 @@ import type {
 } from "../types.js";
 import {
   parseAdbDevicesOutput,
-  parseDisplaySnapshot,
+  parseDisplayMetrics,
+  parseDisplaysList,
+  parseDisplaySnapshotForId,
+  parseForegroundForDisplay,
   parseForegroundOutput,
   parsePngDimensions
 } from "./process-parsers.js";
@@ -61,13 +64,15 @@ export function buildLaunchArgs(
 
 export function buildTypeTextArgs(
   serial: string,
-  text: string
+  text: string,
+  displayId = 0
 ): readonly string[] {
   return [
     "-s",
     serial,
     "shell",
     "input",
+    ...(displayId > 0 ? ["-d", String(displayId)] : []),
     "text",
     encodeAndroidInputText(text)
   ];
@@ -109,7 +114,62 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
     return parseAdbDevicesOutput(result.stdout.toString("utf8"));
   }
 
-  public async getForeground(serial: string): Promise<ForegroundState> {
+  public async getApiLevel(serial: string): Promise<number> {
+    const output = await this.#runText([
+      "-s",
+      serial,
+      "shell",
+      "getprop",
+      "ro.build.version.sdk"
+    ]);
+    const level = parseInt(output.trim(), 10);
+    return Number.isFinite(level) ? level : 0;
+  }
+
+  public async listDisplays(
+    serial: string
+  ): Promise<
+    readonly {
+      displayId: number;
+      width: number;
+      height: number;
+      rotation: number;
+    }[]
+  > {
+    const windowOutput = await this.#runText([
+      "-s",
+      serial,
+      "shell",
+      "dumpsys",
+      "window",
+      "displays"
+    ]);
+    const displays = parseDisplaysList(windowOutput);
+    if (displays.length === 0) {
+      const sizeOutput = await this.#runText([
+        "-s",
+        serial,
+        "shell",
+        "wm",
+        "size"
+      ]);
+      const display = parseDisplayMetrics(sizeOutput);
+      return [
+        {
+          displayId: 0,
+          width: display.width,
+          height: display.height,
+          rotation: 0
+        }
+      ];
+    }
+    return displays;
+  }
+
+  public async getForeground(
+    serial: string,
+    displayId = 0
+  ): Promise<ForegroundState> {
     const activityOutput = await this.#runText([
       "-s",
       serial,
@@ -118,7 +178,10 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
       "activity",
       "activities"
     ]);
-    const activityForeground = parseForegroundOutput(activityOutput);
+    const activityForeground = parseForegroundForDisplay(
+      activityOutput,
+      displayId
+    );
     if (activityForeground.packageName) {
       return activityForeground;
     }
@@ -131,10 +194,13 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
       "window",
       "windows"
     ]);
-    return parseForegroundOutput(windowOutput);
+    return parseForegroundForDisplay(windowOutput, displayId);
   }
 
-  public async getDisplay(serial: string): Promise<DisplaySnapshot> {
+  public async getDisplay(
+    serial: string,
+    displayId = 0
+  ): Promise<DisplaySnapshot> {
     const sizeOutput = await this.#runText([
       "-s",
       serial,
@@ -150,7 +216,7 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
       "window",
       "displays"
     ]);
-    return parseDisplaySnapshot(sizeOutput, windowOutput);
+    return parseDisplaySnapshotForId(sizeOutput, windowOutput, displayId);
   }
 
   public async dumpUiAutomatorXml(serial: string): Promise<string> {
@@ -180,14 +246,45 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
     return xml.slice(xmlStart);
   }
 
-  public async captureScreenshot(serial: string): Promise<Uint8Array> {
-    const result = await this.#run([
+  public async captureScreenshot(
+    serial: string,
+    displayId = 0
+  ): Promise<Uint8Array> {
+    let sfDisplayId: string | undefined;
+    if (displayId > 0) {
+      try {
+        const sfOutput = await this.#runText([
+          "-s",
+          serial,
+          "shell",
+          "dumpsys",
+          "SurfaceFlinger",
+          "--display-id"
+        ]);
+        const lines = sfOutput.split("\n");
+        const virtualLine = lines.find(
+          (l) => l.includes("Virtual display") || l.includes("scrcpy")
+        );
+        if (virtualLine) {
+          const match = virtualLine.match(/Display\s+(\d+)/i);
+          if (match) {
+            sfDisplayId = match[1];
+          }
+        }
+      } catch {
+        // Ignore failure and fallback to logical displayId
+      }
+    }
+
+    const args = [
       "-s",
       serial,
       "exec-out",
       "screencap",
+      ...(displayId > 0 ? ["-d", sfDisplayId ?? String(displayId)] : []),
       "-p"
-    ]);
+    ];
+    const result = await this.#run(args);
     parsePngDimensions(result.stdout);
     return Uint8Array.from(result.stdout);
   }
@@ -203,46 +300,69 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
     }
   }
 
-  public async tap(serial: string, x: number, y: number): Promise<void> {
-    await this.#runText([
+  public async tap(
+    serial: string,
+    x: number,
+    y: number,
+    displayId = 0
+  ): Promise<void> {
+    const args = [
       "-s",
       serial,
       "shell",
       "input",
+      ...(displayId > 0 ? ["-d", String(displayId)] : []),
       "tap",
       String(x),
       String(y)
-    ]);
+    ];
+    await this.#runText(args);
   }
 
-  public async swipe(serial: string, gesture: SwipeGesture): Promise<void> {
-    await this.#runText([
+  public async swipe(
+    serial: string,
+    gesture: SwipeGesture,
+    displayId = 0
+  ): Promise<void> {
+    const args = [
       "-s",
       serial,
       "shell",
       "input",
+      ...(displayId > 0 ? ["-d", String(displayId)] : []),
       "swipe",
       String(gesture.x1),
       String(gesture.y1),
       String(gesture.x2),
       String(gesture.y2),
       String(gesture.durationMs)
-    ]);
+    ];
+    await this.#runText(args);
   }
 
-  public async typeText(serial: string, text: string): Promise<void> {
-    await this.#runText(buildTypeTextArgs(serial, text));
+  public async typeText(
+    serial: string,
+    text: string,
+    displayId = 0
+  ): Promise<void> {
+    await this.#runText(buildTypeTextArgs(serial, text, displayId));
   }
 
-  public async keypress(serial: string, key: Keypress): Promise<void> {
-    await this.#runText([
+  public async keypress(
+    serial: string,
+    key: Keypress,
+    displayId = 0
+  ): Promise<void> {
+    const args = [
       "-s",
       serial,
       "shell",
       "input",
+      ...(displayId > 0 ? ["-d", String(displayId)] : []),
       "keyevent",
       String(KEYCODES[key])
-    ]);
+    ];
+    await this.#runText(args);
   }
 
   async #runText(args: readonly string[]): Promise<string> {

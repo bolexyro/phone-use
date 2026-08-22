@@ -252,16 +252,19 @@ public static class PhoneControlWindowApi
 
         uint processId;
         GetWindowThreadProcessId(window, out processId);
-        if (WatchedProcessId > 0 && processId == (uint)WatchedProcessId)
+        if (WatchedProcessId > 0)
         {
-            EmitWindowChanged(WatchedProcessId);
+            if (processId == (uint)WatchedProcessId)
+            {
+                EmitWindowChanged(WatchedProcessId);
+            }
             return;
         }
 
         string title = GetWindowTitle(window);
         if (title.IndexOf("Phone Control scrcpy", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            EmitWindowChanged(WatchedProcessId > 0 ? WatchedProcessId : (int)processId);
+            EmitWindowChanged((int)processId);
         }
     }
 
@@ -366,6 +369,51 @@ public static class PhoneControlWindowApi
         }
     }
 
+    public struct WindowInfo
+    {
+        public int ProcessId;
+        public string Title;
+        public int X;
+        public int Y;
+        public int Width;
+        public int Height;
+    }
+
+    public static WindowInfo[] ListWindows()
+    {
+        var list = new System.Collections.Generic.List<WindowInfo>();
+        EnumWindows((handle, _) =>
+        {
+            if (!IsWindowVisible(handle) || IsIconic(handle) || IsWindowCloaked(handle)) return true;
+
+            uint candidateProcessId;
+            GetWindowThreadProcessId(handle, out candidateProcessId);
+
+            Rect client;
+            if (!GetClientRect(handle, out client)) return true;
+            int width = client.Right - client.Left;
+            int height = client.Bottom - client.Top;
+            if (width < 1 || height < 1) return true;
+
+            string title = GetWindowTitle(handle);
+            if (title.IndexOf("Phone Control", StringComparison.OrdinalIgnoreCase) < 0 && title.IndexOf("scrcpy", StringComparison.OrdinalIgnoreCase) < 0) return true;
+
+            Point origin = new Point { X = client.Left, Y = client.Top };
+            if (!ClientToScreen(handle, ref origin)) return true;
+
+            list.Add(new WindowInfo {
+                ProcessId = (int)candidateProcessId,
+                Title = title,
+                X = origin.X,
+                Y = origin.Y,
+                Width = width,
+                Height = height
+            });
+            return true;
+        }, IntPtr.Zero);
+        return list.ToArray();
+    }
+
     private static IntPtr FindVisibleWindow(int processId)
     {
         IntPtr bestHandle = IntPtr.Zero;
@@ -375,6 +423,11 @@ public static class PhoneControlWindowApi
         EnumWindows((handle, _) =>
         {
             if (!IsWindowVisible(handle) || IsIconic(handle) || IsWindowCloaked(handle)) return true;
+
+            uint candidateProcessId;
+            GetWindowThreadProcessId(handle, out candidateProcessId);
+            if (processId > 0 && candidateProcessId != (uint)processId) return true;
+
             Rect client;
             if (!GetClientRect(handle, out client)) return true;
             long width = client.Right - client.Left;
@@ -382,17 +435,19 @@ public static class PhoneControlWindowApi
             if (width < 1 || height < 1) return true;
             long area = width * height;
 
-            uint candidateProcessId;
-            GetWindowThreadProcessId(handle, out candidateProcessId);
-            bool pidMatches = (processId > 0 && candidateProcessId == (uint)processId);
-
             string title = GetWindowTitle(handle);
-            bool titleMatches = title.IndexOf("Phone Control scrcpy", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool titleMatches = title.IndexOf("Phone Control", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("scrcpy", StringComparison.OrdinalIgnoreCase) >= 0;
 
             int priority = 0;
-            if (titleMatches && pidMatches) priority = 3;
-            else if (titleMatches) priority = 2;
-            else if (pidMatches) priority = 1;
+            if (processId > 0)
+            {
+                priority = titleMatches ? 2 : 1;
+            }
+            else
+            {
+                if (!titleMatches) return true;
+                priority = 1;
+            }
 
             if (priority > bestMatchPriority || (priority == bestMatchPriority && area > largestArea))
             {
@@ -437,6 +492,23 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     try {
         $command = $line.Trim()
+        if ($command -eq 'list') {
+            $windows = [PhoneControlWindowApi]::ListWindows()
+            Write-JsonLine([ordered]@{
+                ok = $true
+                windows = @($windows | ForEach-Object {
+                    [ordered]@{
+                        processId = $_.ProcessId
+                        title = $_.Title
+                        x = $_.X
+                        y = $_.Y
+                        width = $_.Width
+                        height = $_.Height
+                    }
+                })
+            })
+            continue
+        }
         if ($command -match '^watch\s+(\d+)$') {
             $processId = [int]$Matches[1]
             $watchStarted = [PhoneControlWindowApi]::WatchProcess($processId)
@@ -483,6 +555,55 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+export interface ScrcpyWindowInfo {
+  processId: number;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function parseListWindowsResponse(line: string): readonly ScrcpyWindowInfo[] {
+  let value: { ok?: unknown; windows?: unknown };
+  try {
+    value = JSON.parse(line) as { ok?: unknown; windows?: unknown };
+  } catch {
+    return [];
+  }
+  if (value.ok !== true || !Array.isArray(value.windows)) {
+    return [];
+  }
+  const result: ScrcpyWindowInfo[] = [];
+  for (const item of value.windows) {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      isPositiveInteger((item as Record<string, unknown>).processId) &&
+      typeof (item as Record<string, unknown>).title === "string" &&
+      isFiniteNumber((item as Record<string, unknown>).x) &&
+      isFiniteNumber((item as Record<string, unknown>).y) &&
+      isFiniteNumber((item as Record<string, unknown>).width) &&
+      isFiniteNumber((item as Record<string, unknown>).height)
+    ) {
+      const record = item as Record<string, unknown>;
+      const width = record.width as number;
+      const height = record.height as number;
+      if (width > 0 && height > 0) {
+        result.push({
+          processId: record.processId as number,
+          title: record.title as string,
+          x: record.x as number,
+          y: record.y as number,
+          width,
+          height
+        });
+      }
+    }
+  }
+  return result;
 }
 
 export function parseClientWindowRect(line: string): ClientWindowRect | null {
@@ -590,6 +711,10 @@ export class Win32ClientWindowRectProvider {
 
   public getClientRect(processId: number): Promise<ClientWindowRect | null> {
     return this.#enqueue(`rect ${processId}`, (line) => parseClientWindowRect(line));
+  }
+
+  public listWindows(): Promise<readonly ScrcpyWindowInfo[]> {
+    return this.#enqueue("list", (line) => parseListWindowsResponse(line));
   }
 
   public watchProcess(processId: number): Promise<boolean> {

@@ -9,13 +9,15 @@ import { hashUiTree, parseUiAutomatorXml, parseBounds, boundsCenter } from "../s
 import { ObservationStore } from "../src/observation-store.js";
 import { PhoneControlService } from "../src/service.js";
 import { assertAllowedTarget } from "../src/policy-guard.js";
+import { VirtualDisplayManager } from "../src/virtual-display.js";
 import type {
   DeviceInfo,
   DisplaySnapshot,
   ForegroundState,
   Keypress,
   ObservationCapture,
-  PolicyProfile
+  PolicyProfile,
+  VirtualDisplaySession
 } from "../src/types.js";
 
 const PNG_2X3 = Buffer.from(
@@ -42,6 +44,8 @@ class FakeAdb implements FixedAdbAdapter {
   readonly devices: DeviceInfo[] = [
     { serial: "phone-1", state: "device", authorized: true }
   ];
+  apiLevel = 33;
+  displays = [{ displayId: 0, width: 1080, height: 2400, rotation: 0 }];
   foreground: ForegroundState = {
     packageName: "com.sec.android.app.popupcalculator",
     activity: "com.sec.android.app.popupcalculator/.MainActivity"
@@ -52,10 +56,10 @@ class FakeAdb implements FixedAdbAdapter {
   };
   xml = XML;
   screenshot = Uint8Array.from(PNG_2X3);
-  taps: Array<{ x: number; y: number }> = [];
-  swipes: SwipeGesture[] = [];
-  typed: string[] = [];
-  keys: Keypress[] = [];
+  taps: Array<{ x: number; y: number; displayId: number }> = [];
+  swipes: Array<SwipeGesture & { displayId: number }> = [];
+  typed: Array<{ text: string; displayId: number }> = [];
+  keys: Array<{ key: Keypress; displayId: number }> = [];
   launches: string[] = [];
   failNextAction: PhoneControlError | undefined;
   failLaunch: PhoneControlError | undefined;
@@ -64,12 +68,31 @@ class FakeAdb implements FixedAdbAdapter {
     return this.devices;
   }
 
-  async getForeground(): Promise<ForegroundState> {
-    return this.foreground;
+  async getApiLevel(): Promise<number> {
+    return this.apiLevel;
   }
 
-  async getDisplay(): Promise<DisplaySnapshot> {
-    return this.display;
+  async listDisplays(): Promise<
+    readonly {
+      displayId: number;
+      width: number;
+      height: number;
+      rotation: number;
+    }[]
+  > {
+    return this.displays;
+  }
+
+  async getForeground(_serial: string, displayId = 0): Promise<ForegroundState> {
+    return { ...this.foreground, displayId };
+  }
+
+  async getDisplay(_serial: string, displayId = 0): Promise<DisplaySnapshot> {
+    return {
+      display: { ...this.display.display, displayId },
+      rotation: this.display.rotation,
+      displayId
+    };
   }
 
   async dumpUiAutomatorXml(): Promise<string> {
@@ -89,36 +112,115 @@ class FakeAdb implements FixedAdbAdapter {
     };
   }
 
-  async tap(_serial: string, x: number, y: number): Promise<void> {
+  async tap(_serial: string, x: number, y: number, displayId = 0): Promise<void> {
     if (this.failNextAction) throw this.failNextAction;
-    this.taps.push({ x, y });
+    this.taps.push({ x, y, displayId });
   }
 
-  async swipe(_serial: string, gesture: SwipeGesture): Promise<void> {
+  async swipe(_serial: string, gesture: SwipeGesture, displayId = 0): Promise<void> {
     if (this.failNextAction) throw this.failNextAction;
-    this.swipes.push(gesture);
+    this.swipes.push({ ...gesture, displayId });
   }
 
-  async typeText(_serial: string, text: string): Promise<void> {
+  async typeText(_serial: string, text: string, displayId = 0): Promise<void> {
     if (this.failNextAction) throw this.failNextAction;
-    this.typed.push(text);
+    this.typed.push({ text, displayId });
   }
 
-  async keypress(_serial: string, key: Keypress): Promise<void> {
+  async keypress(_serial: string, key: Keypress, displayId = 0): Promise<void> {
     if (this.failNextAction) throw this.failNextAction;
-    this.keys.push(key);
+    this.keys.push({ key, displayId });
+  }
+}
+
+class FakeVirtualDisplayManager extends VirtualDisplayManager {
+  readonly launchedPackages: string[] = [];
+  failLaunch = false;
+  nextDisplayId = 2;
+  private readonly fakeAdb?: FakeAdb;
+  private fakeSessions = new Map<number, VirtualDisplaySession>();
+
+  constructor(adb: FakeAdb) {
+    super(adb);
+    this.fakeAdb = adb;
+  }
+
+  override get sessions(): readonly VirtualDisplaySession[] {
+    return Array.from(this.fakeSessions.values());
+  }
+
+  override getSessionByPackage(
+    packageName: string
+  ): VirtualDisplaySession | undefined {
+    for (const s of this.fakeSessions.values()) {
+      if (s.packageName === packageName) return s;
+    }
+    return undefined;
+  }
+
+  override async launch(
+    _serial: string,
+    packageName: string
+  ): Promise<VirtualDisplaySession> {
+    if (this.failLaunch) {
+      throw new PhoneControlError(
+        "VIRTUAL_DISPLAY_FAILED",
+        "Failed to create virtual display"
+      );
+    }
+    this.launchedPackages.push(packageName);
+    if (this.fakeAdb) {
+      this.fakeAdb.foreground = {
+        packageName,
+        activity: `${packageName}/.MainActivity`
+      };
+    }
+    const session: VirtualDisplaySession = {
+      displayId: this.nextDisplayId,
+      packageName,
+      activity: `${packageName}/.MainActivity`,
+      width: 1080,
+      height: 2400,
+      startedAt: Date.now()
+    };
+    this.fakeSessions.set(this.nextDisplayId, session);
+    return session;
+  }
+
+  override close(target: {
+    displayId?: number;
+    packageName?: string;
+  }): boolean {
+    if (target.displayId !== undefined) {
+      return this.fakeSessions.delete(target.displayId);
+    }
+    if (target.packageName !== undefined) {
+      for (const [id, s] of this.fakeSessions.entries()) {
+        if (s.packageName === target.packageName) {
+          this.fakeSessions.delete(id);
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }
 
 function createService(
   adb: FakeAdb,
   logger?: MemoryAuditLogger,
-  options: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}
+  options: {
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    virtualDisplayManager?: VirtualDisplayManager;
+  } = {}
 ): PhoneControlService {
   return new PhoneControlService({
     adb,
     policy: POLICY,
     environment: {},
+    virtualDisplayManager:
+      options.virtualDisplayManager ?? new FakeVirtualDisplayManager(adb),
     auditLogger: logger,
     ...options
   });
@@ -164,18 +266,94 @@ describe("UI Automator and observation core", () => {
 });
 
 describe("phone-control service safety", () => {
-  it("opens an approved app from an unapproved foreground package", async () => {
+  it("opens an approved app in a virtual display by default on Android 10+", async () => {
     const adb = new FakeAdb();
     adb.foreground = {
       packageName: "com.sec.android.app.launcher",
       activity: "com.sec.android.app.launcher/.Launcher"
     };
-    const service = createService(adb);
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
 
     const result = await service.openApp(POLICY.allowedApps[0]);
 
+    expect(vdManager.launchedPackages).toEqual([POLICY.allowedApps[0]]);
+    expect(result.data.observation.packageName).toBe(POLICY.allowedApps[0]);
+    expect(result.data.observation.displayId).toBe(2);
+  });
+
+  it("fails with VIRTUAL_DISPLAY_UNSUPPORTED when useVirtualDisplay is true and Android API < 29", async () => {
+    const adb = new FakeAdb();
+    adb.apiLevel = 28; // Android 9 Pie
+    const service = createService(adb);
+
+    await expect(
+      service.openApp(POLICY.allowedApps[0], { useVirtualDisplay: true })
+    ).rejects.toMatchObject({
+      code: "VIRTUAL_DISPLAY_UNSUPPORTED"
+    });
+  });
+
+  it("launches on primary display 0 when useVirtualDisplay is explicitly false on Android < 29", async () => {
+    const adb = new FakeAdb();
+    adb.apiLevel = 28;
+    const service = createService(adb);
+
+    const result = await service.openApp(POLICY.allowedApps[0], {
+      useVirtualDisplay: false
+    });
+
     expect(adb.launches).toEqual([POLICY.allowedApps[0]]);
     expect(result.data.observation.packageName).toBe(POLICY.allowedApps[0]);
+    expect(result.data.observation.displayId).toBe(0);
+  });
+
+  it("fails with VIRTUAL_DISPLAY_FAILED and gives confirmation advice when virtual display creation fails", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    vdManager.failLaunch = true;
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    await expect(service.openApp(POLICY.allowedApps[0])).rejects.toMatchObject({
+      code: "VIRTUAL_DISPLAY_FAILED"
+    });
+  });
+
+  it("closes an active virtual display session with closeApp", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    await service.openApp(POLICY.allowedApps[0]);
+    expect(vdManager.sessions).toHaveLength(1);
+
+    const closeResult = await service.closeApp({
+      packageName: POLICY.allowedApps[0]
+    });
+    expect(closeResult.data.closed).toBe(true);
+    expect(vdManager.sessions).toHaveLength(0);
+  });
+
+  it("returns active virtual displays in status", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    await service.openApp(POLICY.allowedApps[0]);
+    const status = await service.status();
+
+    expect(status.data.virtualDisplays).toHaveLength(1);
+    expect(status.data.virtualDisplays?.[0].packageName).toBe(
+      POLICY.allowedApps[0]
+    );
   });
 
   it("denies a package outside the server-side policy", () => {
@@ -202,12 +380,13 @@ describe("phone-control service safety", () => {
       action: { type: "click", elementRef }
     });
 
-    expect(adb.taps).toEqual([{ x: 60, y: 50 }]);
+    expect(adb.taps).toEqual([{ x: 60, y: 50, displayId: 0 }]);
     expect(result.data.pointerEvent).toMatchObject({
       x: 60,
       y: 50,
       observationId,
       serial: "phone-1",
+      displayId: 0,
       packageName: POLICY.allowedApps[0],
       displayWidth: 1080,
       displayHeight: 2400,
@@ -294,7 +473,9 @@ describe("phone-control service safety", () => {
       };
     };
     const service = createService(adb);
-    await expect(service.openApp(POLICY.allowedApps[0])).rejects.toMatchObject({
+    await expect(
+      service.openApp(POLICY.allowedApps[0], { useVirtualDisplay: false })
+    ).rejects.toMatchObject({
       code: "FORBIDDEN_APP"
     });
   });
@@ -306,7 +487,9 @@ describe("phone-control service safety", () => {
       "launcher rejected the request"
     );
     const service = createService(adb);
-    await expect(service.openApp(POLICY.allowedApps[0])).rejects.toMatchObject({
+    await expect(
+      service.openApp(POLICY.allowedApps[0], { useVirtualDisplay: false })
+    ).rejects.toMatchObject({
       code: "APP_LAUNCH_FAILED"
     });
   });
@@ -398,7 +581,7 @@ describe("phone-control service safety", () => {
       observationId: scrollObservation.data.observation.observationId,
       action: { type: "scroll", direction: "up", amount: "medium" }
     });
-    expect(adb.swipes[0]).toMatchObject({ durationMs: 280 });
+    expect(adb.swipes[0]).toMatchObject({ durationMs: 280, displayId: 0 });
 
     const elementScrollObservation = await service.observe();
     const targetElement = elementScrollObservation.data.observation.elements[0];
@@ -411,7 +594,7 @@ describe("phone-control service safety", () => {
         elementRef: targetElement.elementRef
       }
     });
-    expect(adb.swipes[1]).toMatchObject({ durationMs: 200 });
+    expect(adb.swipes[1]).toMatchObject({ durationMs: 200, displayId: 0 });
 
     const typeObservation = await service.observe();
     const typedResult = await service.execute({
@@ -419,14 +602,14 @@ describe("phone-control service safety", () => {
       action: { type: "type", text: "secret value" }
     });
     expect(typedResult.data.textLength).toBe(12);
-    expect(adb.typed).toEqual(["secret value"]);
+    expect(adb.typed).toEqual([{ text: "secret value", displayId: 0 }]);
 
     const keyObservation = await service.observe();
     await service.execute({
       observationId: keyObservation.data.observation.observationId,
       action: { type: "keypress", key: "ENTER" }
     });
-    expect(adb.keys).toEqual(["ENTER"]);
+    expect(adb.keys).toEqual([{ key: "ENTER", displayId: 0 }]);
     expect(JSON.stringify(logger.entries)).not.toContain("secret value");
   });
 });

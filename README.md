@@ -1,4 +1,4 @@
-# Phone Control MCP server
+# Phone Use MCP server
 
 Phone Control is a local TypeScript MCP server for controlling one authorized Android device through a small, allowlisted operation set. It uses ADB for device I/O and UI Automator for visible controls. It never exposes an ADB shell to MCP callers.
 
@@ -54,12 +54,13 @@ The server writes JSON-RPC only to stdout. Startup diagnostics and recoverable t
 
 ## Tools
 
-- `phone_status` reports the selected device and current foreground package.
+- `phone_status` reports the selected device, primary foreground package, and all active virtual display sessions.
 - `phone_list_allowed_apps` reports the active server-side allowlist.
-- `phone_open_app({ packageName })` launches an allowlisted package and returns a fresh observation.
-- `phone_observe({ includeScreenshot? })` captures UI Automator metadata and a native PNG. When `includeScreenshot` is true, the PNG is returned as MCP `image/png` content.
-- `phone_execute({ observationId, action })` executes exactly one action against the supplied observation.
-- `phone_wait_for({ observationId, condition, timeoutMs? })` waits for a bounded condition and returns a fresh observation when it matches.
+- `phone_open_app({ packageName, useVirtualDisplay? })` launches an allowlisted package and returns a fresh observation. Defaults to running in an isolated virtual display on Android 10+ (`useVirtualDisplay: true`). If virtual display creation fails or is unsupported (device API < 29), returns a descriptive error; ask the user before calling with `useVirtualDisplay: false` to launch directly on the primary display.
+- `phone_close_app({ packageName?, displayId? })` terminates an active virtual display session.
+- `phone_observe({ displayId?, packageName?, includeScreenshot? })` captures UI Automator metadata and a native PNG from the target display. When `includeScreenshot` is true, the PNG is returned as MCP `image/png` content.
+- `phone_execute({ observationId, action })` executes exactly one action against the supplied observation, routing input directly to the observation's bound display.
+- `phone_wait_for({ observationId, condition, timeoutMs? })` waits for a bounded condition on the bound display and returns a fresh observation when it matches.
 
 The public action contract is:
 
@@ -72,6 +73,19 @@ The public action contract is:
 ```
 
 `key` is one of `BACK`, `HOME`, `ENTER`, and `DELETE`. Wait conditions are `foreground_package`, `visible_text`, `visible_resource_id`, and `ui_tree_changed`. Every wait call supplies the baseline `observationId` separately from the condition.
+
+### Virtual Display Architecture
+
+When `phone_open_app` is called on Android 10+ (API 29+), Phone Control uses `scrcpy` with the following flags to establish an isolated virtual display:
+
+- `--new-display`: Creates an isolated secondary display without disrupting the phone's primary screen.
+- `--start-app=com.example.app`: Strictly launches only the allowlisted package in that virtual display.
+- `--no-vd-system-decorations`: Removes navigation and status bars for a clean app canvas.
+- `--mouse=disabled`: Disables host mouse events inside the mirrored window to prevent accidental user interference with agent automation.
+- `--no-audio`: Prevents audio stream overhead.
+- `--stay-awake`: Prevents display timeout while the session is active.
+
+Multiple virtual displays can run concurrently for multi-app automation. Observations and actions automatically bind to the specific `displayId` via `observationId`.
 
 The policy is loaded by the server and is not an MCP input. The sample local profile allows only `com.sec.android.app.popupcalculator`. Foreground policy is checked before and after app launches and actions. Observation IDs are opaque, tied to the device, package/activity, display, rotation, UI hash, screenshot dimensions, and capture time. Any attempted action consumes its observation; state changes return `STALE_OBSERVATION`.
 

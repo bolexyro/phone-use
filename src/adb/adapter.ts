@@ -19,13 +19,24 @@ export interface SwipeGesture {
  */
 export interface FixedAdbAdapter {
   listDevices(): Promise<readonly DeviceInfo[]>;
-  getForeground(serial: string): Promise<ForegroundState>;
-  getDisplay(serial: string): Promise<DisplaySnapshot>;
+  getApiLevel(serial: string): Promise<number>;
+  listDisplays(
+    serial: string
+  ): Promise<
+    readonly {
+      displayId: number;
+      width: number;
+      height: number;
+      rotation: number;
+    }[]
+  >;
+  getForeground(serial: string, displayId?: number): Promise<ForegroundState>;
+  getDisplay(serial: string, displayId?: number): Promise<DisplaySnapshot>;
   dumpUiAutomatorXml(serial: string): Promise<string>;
-  captureScreenshot(serial: string): Promise<Uint8Array>;
+  captureScreenshot(serial: string, displayId?: number): Promise<Uint8Array>;
   launchApp(serial: string, packageName: string): Promise<void>;
-  tap(serial: string, x: number, y: number): Promise<void>;
-  swipe(serial: string, gesture: SwipeGesture): Promise<void>;
-  typeText(serial: string, text: string): Promise<void>;
-  keypress(serial: string, key: Keypress): Promise<void>;
+  tap(serial: string, x: number, y: number, displayId?: number): Promise<void>;
+  swipe(serial: string, gesture: SwipeGesture, displayId?: number): Promise<void>;
+  typeText(serial: string, text: string, displayId?: number): Promise<void>;
+  keypress(serial: string, key: Keypress, displayId?: number): Promise<void>;
 }

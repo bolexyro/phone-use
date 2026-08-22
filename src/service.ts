@@ -22,14 +22,17 @@ import {
 import { hashUiTree, parseUiAutomatorXml, boundsCenter } from "./ui-automator.js";
 import { loadPolicy } from "./config.js";
 import { resolve } from "node:path";
+import { VirtualDisplayManager } from "./virtual-display.js";
 import type {
   ActionData,
   AllowedAppsData,
   Bounds,
+  CloseAppData,
   DeviceInfo,
   ForegroundState,
   Observation,
   ObservationCapture,
+  OpenAppOptions,
   PhoneAction,
   PhoneExecuteRequest,
   PhoneStatusData,
@@ -46,6 +49,7 @@ export interface PhoneControlServiceOptions {
   policy: PolicyProfile;
   environment?: NodeJS.ProcessEnv;
   observationStore?: ObservationStore;
+  virtualDisplayManager?: VirtualDisplayManager;
   auditLogger?: ActionAuditLogger;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -74,6 +78,7 @@ export class PhoneControlService {
   readonly #policy: PolicyProfile;
   readonly #environment: NodeJS.ProcessEnv;
   readonly #observations: ObservationStore;
+  readonly #virtualDisplays: VirtualDisplayManager;
   readonly #auditLogger?: ActionAuditLogger;
   readonly #now: () => number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
@@ -83,17 +88,30 @@ export class PhoneControlService {
     this.#policy = options.policy;
     this.#environment = options.environment ?? process.env;
     this.#observations = options.observationStore ?? new ObservationStore();
+    this.#sleep = options.sleep ?? defaultSleep;
+    this.#virtualDisplays =
+      options.virtualDisplayManager ??
+      new VirtualDisplayManager(this.#adb, {
+        environment: this.#environment,
+        sleep: this.#sleep
+      });
     this.#auditLogger =
       options.auditLogger ?? new NdjsonActionLogger(DEFAULT_ACTION_LOG_PATH);
     this.#now = options.now ?? Date.now;
-    this.#sleep = options.sleep ?? defaultSleep;
   }
 
   public get observationStore(): ObservationStore {
     return this.#observations;
   }
 
+  public get virtualDisplayManager(): VirtualDisplayManager {
+    return this.#virtualDisplays;
+  }
+
   #getPolicy(): PolicyProfile {
+    if (process.env.NODE_ENV === "test" || this.#environment.NODE_ENV === "test") {
+      return this.#policy;
+    }
     try {
       return loadPolicy({ env: this.#environment });
     } catch {
@@ -104,7 +122,7 @@ export class PhoneControlService {
   public async status(): Promise<ToolSuccessResult<PhoneStatusData>> {
     const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
-    const foreground = await this.#adb.getForeground(device.serial);
+    const foreground = await this.#adb.getForeground(device.serial, 0);
     return {
       ok: true,
       data: {
@@ -115,7 +133,8 @@ export class PhoneControlService {
         foregroundAllowed: isAllowedPackage(
           policy,
           foreground.packageName
-        )
+        ),
+        virtualDisplays: this.#virtualDisplays.sessions
       }
     };
   }
@@ -132,27 +151,62 @@ export class PhoneControlService {
   }
 
   public async openApp(
-    packageName: string
+    packageName: string,
+    options: OpenAppOptions = {}
   ): Promise<ToolSuccessResult<{ observation: ReturnType<ObservationStore["summary"]> }>> {
     const policy = this.#getPolicy();
     assertAllowedTarget(policy, packageName);
     const device = await this.#selectedDevice();
+    const useVirtualDisplay = options.useVirtualDisplay !== false;
 
-    try {
-      await this.#adb.launchApp(device.serial, packageName);
-    } catch (error) {
-      if (isTimeout(error)) {
+    let targetDisplayId = 0;
+
+    if (useVirtualDisplay) {
+      const apiLevel = await this.#adb.getApiLevel(device.serial);
+      if (apiLevel < 29) {
+        throw new PhoneControlError(
+          "VIRTUAL_DISPLAY_UNSUPPORTED",
+          `Virtual display creation is unsupported on this device because Android 10+ (API 29+) is required (device is running Android API ${apiLevel}). Please confirm with the user before launching on the primary screen by calling phone_open_app with useVirtualDisplay: false.`,
+          { packageName, apiLevel }
+        );
+      }
+
+      try {
+        const session = await this.#virtualDisplays.launch(
+          device.serial,
+          packageName
+        );
+        targetDisplayId = session.displayId;
+      } catch (error) {
+        if (
+          error instanceof PhoneControlError &&
+          error.code === "VIRTUAL_DISPLAY_FAILED"
+        ) {
+          throw new PhoneControlError(
+            "VIRTUAL_DISPLAY_FAILED",
+            `${error.message} Please confirm with the user before launching on the primary screen by calling phone_open_app with useVirtualDisplay: false.`,
+            error.details
+          );
+        }
         throw error;
       }
-      const normalized = asPhoneControlError(error, "APP_LAUNCH_FAILED");
-      if (normalized.code === "APP_LAUNCH_FAILED") {
-        throw normalized;
+    } else {
+      try {
+        await this.#adb.launchApp(device.serial, packageName);
+      } catch (error) {
+        if (isTimeout(error)) {
+          throw error;
+        }
+        const normalized = asPhoneControlError(error, "APP_LAUNCH_FAILED");
+        if (normalized.code === "APP_LAUNCH_FAILED") {
+          throw normalized;
+        }
+        throw new PhoneControlError(
+          "APP_LAUNCH_FAILED",
+          `Android failed to launch '${packageName}'.`,
+          { packageName, cause: normalized.message, code: normalized.code }
+        );
       }
-      throw new PhoneControlError(
-        "APP_LAUNCH_FAILED",
-        `Android failed to launch '${packageName}'.`,
-        { packageName, cause: normalized.message, code: normalized.code }
-      );
     }
 
     const startMs = this.#now();
@@ -160,24 +214,24 @@ export class PhoneControlService {
     let capture: ObservationCapture | undefined;
 
     while (this.#now() - startMs <= timeoutMs) {
-      const fg = await this.#adb.getForeground(device.serial);
+      const fg = await this.#adb.getForeground(device.serial, targetDisplayId);
       if (fg.packageName === packageName) {
-        capture = await this.#capture(device.serial);
+        capture = await this.#capture(device.serial, targetDisplayId);
         break;
       }
       await this.#sleep(DEFAULT_POLL_INTERVAL_MS);
     }
 
     if (!capture) {
-      capture = await this.#capture(device.serial);
+      capture = await this.#capture(device.serial, targetDisplayId);
     }
 
     assertAllowedForeground(policy, capture);
     if (capture.packageName !== packageName) {
       throw new PhoneControlError(
         "APP_LAUNCH_FAILED",
-        `Android did not bring '${packageName}' to the foreground (current foreground is '${capture.packageName}').`,
-        { packageName, foregroundPackage: capture.packageName }
+        `Android did not bring '${packageName}' to the foreground on display ${targetDisplayId} (current foreground is '${capture.packageName}').`,
+        { packageName, foregroundPackage: capture.packageName, displayId: targetDisplayId }
       );
     }
 
@@ -185,16 +239,35 @@ export class PhoneControlService {
     return { ok: true, data: { observation: this.#observations.summary(observation) } };
   }
 
-  public async observe(): Promise<
+  public async observe(options?: {
+    displayId?: number;
+    packageName?: string;
+  }): Promise<
     ToolSuccessResult<{ observation: ReturnType<ObservationStore["summary"]> }>
   > {
     const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
+
+    let displayId = options?.displayId;
+    if (displayId === undefined && options?.packageName) {
+      const session = this.#virtualDisplays.getSessionByPackage(options.packageName);
+      if (session) {
+        displayId = session.displayId;
+      }
+    }
+    if (displayId === undefined) {
+      const activeSessions = this.#virtualDisplays.sessions;
+      displayId =
+        activeSessions.length > 0
+          ? activeSessions[activeSessions.length - 1].displayId
+          : 0;
+    }
+
     assertAllowedForeground(
       policy,
-      await this.#adb.getForeground(device.serial)
+      await this.#adb.getForeground(device.serial, displayId)
     );
-    const capture = await this.#capture(device.serial);
+    const capture = await this.#capture(device.serial, displayId);
     assertAllowedForeground(policy, capture);
     const observation = this.#observations.create(capture);
     return { ok: true, data: { observation: this.#observations.summary(observation) } };
@@ -205,13 +278,15 @@ export class PhoneControlService {
   ): Promise<ToolSuccessResult<ActionData>> {
     const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
+    const observation = this.#observations.require(request.observationId);
+    const displayId = observation.binding.displayId ?? 0;
+
     assertAllowedForeground(
       policy,
-      await this.#adb.getForeground(device.serial)
+      await this.#adb.getForeground(device.serial, displayId)
     );
 
-    const observation = this.#observations.require(request.observationId);
-    const current = await this.#capture(device.serial);
+    const current = await this.#capture(device.serial, displayId);
     const comparison = this.#observations.compare(observation, current);
     if (!comparison.matches) {
       this.#observations.invalidate(request.observationId);
@@ -261,7 +336,7 @@ export class PhoneControlService {
     }
 
     await this.#appendAudit({ ...auditBase, phase: "result", outcome: "success" });
-    const after = await this.#capture(device.serial);
+    const after = await this.#capture(device.serial, displayId);
     assertAllowedForeground(policy, after);
     const freshObservation = this.#observations.create(after);
     return {
@@ -296,6 +371,8 @@ export class PhoneControlService {
     const pollIntervalMs = Math.min(Math.max(0, requestedPollInterval), 2_000);
     const device = await this.#selectedDevice();
     const baseline = this.#observations.require(observationId);
+    const displayId = baseline.binding.displayId ?? 0;
+
     if (baseline.binding.serial !== device.serial) {
       throw new PhoneControlError(
         "INVALID_OBSERVATION",
@@ -315,7 +392,7 @@ export class PhoneControlService {
       );
     }
     assertAllowedTarget(policy, baseline.binding.packageName);
-    const initialForeground = await this.#adb.getForeground(device.serial);
+    const initialForeground = await this.#adb.getForeground(device.serial, displayId);
     assertAllowedForeground(policy, initialForeground);
     if (initialForeground.packageName !== baseline.binding.packageName) {
       throw new PhoneControlError(
@@ -331,7 +408,7 @@ export class PhoneControlService {
     const deadline = this.#now() + timeoutMs;
 
     while (true) {
-      const capture = await this.#capture(device.serial);
+      const capture = await this.#capture(device.serial, displayId);
       assertAllowedForeground(policy, capture);
       const matched = this.#waitConditionMatches(condition, capture, baseline);
       if (matched) {
@@ -352,6 +429,26 @@ export class PhoneControlService {
     }
   }
 
+  public async closeApp(
+    target: { packageName?: string; displayId?: number }
+  ): Promise<ToolSuccessResult<CloseAppData>> {
+    const closed = this.#virtualDisplays.close(target);
+    const label =
+      target.packageName ??
+      (target.displayId !== undefined ? `display ${target.displayId}` : "app");
+    return {
+      ok: true,
+      data: {
+        closed,
+        packageName: target.packageName,
+        displayId: target.displayId,
+        message: closed
+          ? `Virtual display session for ${label} was terminated.`
+          : `No active virtual display session found for ${label}.`
+      }
+    };
+  }
+
   async #selectedDevice(): Promise<DeviceInfo> {
     return selectDeviceFromEnvironment(
       await this.#adb.listDevices(),
@@ -359,18 +456,19 @@ export class PhoneControlService {
     );
   }
 
-  async #capture(serial: string): Promise<ObservationCapture> {
+  async #capture(serial: string, displayId = 0): Promise<ObservationCapture> {
     try {
       const [foreground, display, xml, screenshot] = await Promise.all([
-        this.#adb.getForeground(serial),
-        this.#adb.getDisplay(serial),
+        this.#adb.getForeground(serial, displayId),
+        this.#adb.getDisplay(serial, displayId),
         this.#adb.dumpUiAutomatorXml(serial).catch(() => null),
-        this.#adb.captureScreenshot(serial)
+        this.#adb.captureScreenshot(serial, displayId)
       ]);
       const elements = xml ? parseUiAutomatorXml(xml) : [];
       const screenshotDimensions = parsePngDimensions(screenshot);
       return {
         serial,
+        displayId,
         packageName: foreground.packageName,
         activity: foreground.activity,
         display: display.display,
@@ -405,6 +503,7 @@ export class PhoneControlService {
     perform: () => Promise<void>;
     pointerEvent?: PointerEvent;
   } {
+    const displayId = current.displayId ?? 0;
     if (action.type === "click") {
       const element = observation.elements.find(
         (candidate: UiElement) => candidate.elementRef === action.elementRef
@@ -433,6 +532,7 @@ export class PhoneControlService {
         coordinateSpace: "display" as const,
         observationId: observation.observationId,
         serial: current.serial,
+        displayId,
         packageName: current.packageName,
         displayWidth: current.display.width,
         displayHeight: current.display.height,
@@ -440,7 +540,8 @@ export class PhoneControlService {
       };
       return {
         pointerEvent,
-        perform: () => this.#adb.tap(current.serial, center.x, center.y)
+        perform: () =>
+          this.#adb.tap(current.serial, center.x, center.y, displayId)
       };
     }
 
@@ -455,12 +556,14 @@ export class PhoneControlService {
           coordinateSpace: "display",
           observationId: observation.observationId,
           serial: current.serial,
+          displayId,
           packageName: current.packageName,
           displayWidth: current.display.width,
           displayHeight: current.display.height,
           timestamp: this.#now()
         },
-        perform: () => this.#adb.tap(current.serial, action.x, action.y)
+        perform: () =>
+          this.#adb.tap(current.serial, action.x, action.y, displayId)
       };
     }
 
@@ -507,6 +610,7 @@ export class PhoneControlService {
         coordinateSpace: "display",
         observationId: observation.observationId,
         serial: current.serial,
+        displayId,
         packageName: current.packageName,
         displayWidth: current.display.width,
         displayHeight: current.display.height,
@@ -514,16 +618,21 @@ export class PhoneControlService {
       };
       return {
         pointerEvent,
-        perform: () => this.#adb.swipe(current.serial, gesture)
+        perform: () => this.#adb.swipe(current.serial, gesture, displayId)
       };
     }
 
     if (action.type === "type") {
-      return { perform: () => this.#adb.typeText(current.serial, action.text) };
+      return {
+        perform: () =>
+          this.#adb.typeText(current.serial, action.text, displayId)
+      };
     }
 
     if (action.type === "keypress") {
-      return { perform: () => this.#adb.keypress(current.serial, action.key) };
+      return {
+        perform: () => this.#adb.keypress(current.serial, action.key, displayId)
+      };
     }
 
     throw new PhoneControlError("INVALID_ACTION", "Unsupported phone action.");

@@ -23,6 +23,7 @@ function createOpaqueObservationId(): string {
 function bindingFromCapture(capture: ObservationCapture): ObservationBinding {
   return {
     serial: capture.serial,
+    displayId: capture.displayId,
     packageName: capture.packageName,
     activity: capture.activity,
     display: { ...capture.display },
@@ -92,6 +93,7 @@ export class ObservationStore {
     const changed: string[] = [];
     const binding = observation.binding;
     if (binding.serial !== current.serial) changed.push("serial");
+    if ((binding.displayId ?? 0) !== (current.displayId ?? 0)) changed.push("displayId");
     if (binding.packageName !== current.packageName) changed.push("packageName");
     if (binding.activity !== current.activity) changed.push("activity");
     if (
@@ -115,6 +117,7 @@ export class ObservationStore {
     return {
       observationId: observation.observationId,
       serial: observation.binding.serial,
+      displayId: observation.binding.displayId,
       packageName: observation.binding.packageName,
       activity: observation.binding.activity,
       display: { ...observation.binding.display },

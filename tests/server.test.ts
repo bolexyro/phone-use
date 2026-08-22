@@ -85,7 +85,7 @@ describe("MCP boundary schemas and result conversion", () => {
     expect(error.content[0]).toMatchObject({ type: "text" });
   });
 
-  it("registers exactly the six public tools", () => {
+  it("registers exactly the seven public tools", () => {
     const registered: string[] = [];
     const fakeServer = {
       registerTool(name: string): void {
@@ -98,6 +98,7 @@ describe("MCP boundary schemas and result conversion", () => {
 
     registerPhoneControlTools(fakeServer, fakeService);
     expect(registered).toEqual([...PHONE_CONTROL_TOOL_NAMES]);
+    expect(registered).toContain("phone_close_app");
     expect(createMcpServer).toBeTypeOf("function");
   });
 

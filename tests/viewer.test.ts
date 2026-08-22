@@ -17,8 +17,10 @@ import {
 } from "../src/viewer/geometry-recovery.js";
 import {
   parseClientWindowRect,
+  parseListWindowsResponse,
   parseWindowChangedEvent
 } from "../src/viewer/win32-window.js";
+import { parsePackageFromWindowTitle } from "../src/viewer/main.js";
 
 const clickLine = JSON.stringify({
   at: 123,
@@ -266,5 +268,45 @@ const scrollLine = JSON.stringify({
     const unavailable = updateGeometryRecovery(attached, undefined);
     expect(unavailable.attached).toBe(false);
     expect(unavailable.state.stableSamples).toBe(0);
+  });
+
+  it("parses scrcpy window listing responses for multi-display tracking", () => {
+    const json = JSON.stringify({
+      ok: true,
+      windows: [
+        {
+          processId: 100,
+          title: "Phone Control (phone-1)",
+          x: 50,
+          y: 60,
+          width: 400,
+          height: 800
+        },
+        {
+          processId: 200,
+          title: "Phone Control: com.sec.android.app.popupcalculator",
+          x: 500,
+          y: 60,
+          width: 400,
+          height: 800
+        }
+      ]
+    });
+    const parsed = parseListWindowsResponse(json);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0].processId).toBe(100);
+    expect(parsed[1].title).toBe("Phone Control: com.sec.android.app.popupcalculator");
+    expect(parseListWindowsResponse('{"ok":false}')).toEqual([]);
+  });
+
+  it("extracts the target package name from virtual display window titles", () => {
+    expect(
+      parsePackageFromWindowTitle("Phone Control: com.sec.android.app.popupcalculator")
+    ).toBe("com.sec.android.app.popupcalculator");
+    expect(
+      parsePackageFromWindowTitle("Phone Control: com.android.settings")
+    ).toBe("com.android.settings");
+    expect(parsePackageFromWindowTitle("Phone Control (RFCW40B3G7X)")).toBeUndefined();
+    expect(parsePackageFromWindowTitle("scrcpy")).toBeUndefined();
   });
 });
