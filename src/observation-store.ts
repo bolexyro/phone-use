@@ -8,10 +8,19 @@ import type {
   ObservationSummary,
   UiElement
 } from "./types.js";
+import {
+  elementActionStateKey,
+  findUniqueElementMatch,
+  isElementPotentiallyObscured
+} from "./ui-automator.js";
 
 export interface ObservationComparison {
   matches: boolean;
   changed: readonly string[];
+}
+
+export interface ElementActionComparison extends ObservationComparison {
+  target?: UiElement;
 }
 
 type IdFactory = () => string;
@@ -111,6 +120,52 @@ export class ObservationStore {
       changed.push("screenshotDimensions");
     }
     return { matches: changed.length === 0, changed };
+  }
+
+  /**
+   * Relax only the UI hash for element-targeted actions. Every hard binding is
+   * still checked. Unrelated nodes may be added, removed, reordered, or mutate;
+   * the target's semantic identity, ancestor context, state, and hit area remain
+   * strict.
+   */
+  public compareElementAction(
+    observation: Observation,
+    current: ObservationCapture,
+    elementRef: string
+  ): ElementActionComparison {
+    const hard = this.compare(observation, current);
+    const changed = hard.changed.filter((field) => field !== "uiHash");
+    const target = observation.elements.find(
+      (element) => element.elementRef === elementRef
+    );
+    if (!target) {
+      return { matches: false, changed: [...changed, "target"] };
+    }
+
+    const rematched = findUniqueElementMatch(
+      target,
+      observation.elements,
+      current.elements
+    );
+    if (!rematched) {
+      return { matches: false, changed: [...changed, "target"] };
+    }
+    if (
+      elementActionStateKey(rematched) !== elementActionStateKey(target)
+    ) {
+      return { matches: false, changed: [...changed, "target"] };
+    }
+    if (
+      isElementPotentiallyObscured(
+        rematched,
+        current.elements,
+        target,
+        observation.elements
+      )
+    ) {
+      return { matches: false, changed: [...changed, "targetObscured"] };
+    }
+    return { matches: changed.length === 0, changed, target: rematched };
   }
 
   public summary(observation: Observation): ObservationSummary {

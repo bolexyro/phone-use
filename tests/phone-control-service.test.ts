@@ -26,6 +26,8 @@ const PNG_2X3 = Buffer.from(
 );
 
 const XML = `<hierarchy rotation="0"><node text="Calculate" content-desc="calc" resource-id="com.sec.android.app.popupcalculator:id/calculate" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/><node text="" class="android.widget.TextView" checked="false" bounds="[0,0][2,2]"/></hierarchy>`;
+const TARGET_XML = `<hierarchy rotation="0"><node text="Pay" content-desc="pay" resource-id="com.paystack:id/pay" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/><node text="Live ticker 29:33" content-desc="live" resource-id="com.paystack:id/timer" class="android.widget.TextView" bounds="[0,0][200,30]"/><node text="$10.00" resource-id="com.paystack:id/amount" class="android.widget.TextView" bounds="[0,40][200,70]"/></hierarchy>`;
+const CHOWDECK_XML = `<hierarchy rotation="0"><node resource-id="com.chowdeck:id/root" class="android.widget.FrameLayout" bounds="[0,0][300,900]"><node resource-id="com.chowdeck:id/feed" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" bounds="[0,0][300,900]"><node text="Restaurant A" class="android.view.View" bounds="[0,650][300,800]"/></node><node resource-id="com.chowdeck:id/offline_sheet" class="android.widget.FrameLayout" bounds="[0,600][300,900]"><node text="Try again" content-desc="Try again" class="android.widget.Button" clickable="true" enabled="true" bounds="[40,700][260,780]"/></node></node></hierarchy>`;
 
 const POLICY: PolicyProfile = {
   profile: "local",
@@ -243,6 +245,14 @@ describe("UI Automator and observation core", () => {
     expect(first[0].states).toMatchObject({ clickable: true, enabled: true });
     expect(first[0].elementRef).not.toBe(second[0].elementRef);
     expect(hashUiTree(first)).toBe(hashUiTree(second));
+
+    const nested = parseUiAutomatorXml(CHOWDECK_XML);
+    const retryIndex = nested.findIndex((element) => element.text === "Try again");
+    const sheetIndex = nested.findIndex(
+      (element) => element.resourceId === "com.chowdeck:id/offline_sheet"
+    );
+    expect(nested[retryIndex].parentIndex).toBe(sheetIndex);
+    expect(nested[sheetIndex].parentIndex).toBe(0);
   });
 
   it("keeps screenshot bytes unchanged in an observation", () => {
@@ -461,6 +471,165 @@ describe("phone-control service safety", () => {
         action: { type: "click_coordinate", x: 10, y: 10 }
       })
     ).rejects.toMatchObject({ code: "STALE_OBSERVATION" });
+  });
+
+  it("ignores generic unrelated mutations and reanchors to fresh target bounds", async () => {
+    const adb = new FakeAdb();
+    adb.xml = TARGET_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    const observation = observed.data.observation;
+    adb.xml = TARGET_XML
+      .replace("Live ticker 29:33", "Clock-like text 09:16")
+      .replace('content-desc="live"', 'content-desc="transient"')
+      .replace('text="$10.00"', 'text="Progress 87%" selected="true"')
+      .replace('bounds="[0,40][200,70]"', 'bounds="[0,50][240,90]"')
+      .replace("[10,20][110,80]", "[20,30][140,100]");
+
+    await service.execute({
+      observationId: observation.observationId,
+      action: { type: "click", elementRef: observation.elements[0].elementRef }
+    });
+    expect(adb.taps).toEqual([{ x: 80, y: 65, displayId: 0 }]);
+  });
+
+  it("allows arbitrary unrelated clock-like and amount mutations", async () => {
+    const adb = new FakeAdb();
+    adb.xml = TARGET_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    const observation = observed.data.observation;
+    adb.xml = adb.xml.replace("Live ticker 29:33", "9:16").replace("$10.00", "$20.00");
+    await service.execute({
+      observationId: observation.observationId,
+      action: { type: "click", elementRef: observation.elements[0].elementRef }
+    });
+  });
+
+  it("allows background feed nodes to lazy-load behind a valid sheet target", async () => {
+    const adb = new FakeAdb();
+    adb.xml = CHOWDECK_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    const retry = observed.data.observation.elements.find(
+      (element) => element.text === "Try again"
+    );
+    expect(retry).toBeDefined();
+    adb.xml = CHOWDECK_XML.replace(
+      '</node><node resource-id="com.chowdeck:id/offline_sheet"',
+      '<node text="Restaurant B" class="android.view.View" bounds="[0,500][300,650]"/><node text="Restaurant C" class="android.view.View" bounds="[0,350][300,500]"/><node text="Restaurant D" class="android.view.View" bounds="[0,200][300,350]"/><node text="Restaurant E" class="android.view.View" bounds="[0,50][300,200]"/></node><node resource-id="com.chowdeck:id/offline_sheet"'
+    );
+
+    await service.execute({
+      observationId: observed.data.observation.observationId,
+      action: { type: "click", elementRef: retry!.elementRef }
+    });
+    expect(adb.taps).toEqual([{ x: 150, y: 740, displayId: 0 }]);
+  });
+
+  it("rejects a matching target that moved into a different ancestor context", async () => {
+    const retryNode = '<node text="Try again" content-desc="Try again" class="android.widget.Button" clickable="true" enabled="true" bounds="[40,700][260,780]"/>';
+    const adb = new FakeAdb();
+    adb.xml = CHOWDECK_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    const retry = observed.data.observation.elements.find(
+      (element) => element.text === "Try again"
+    );
+    expect(retry).toBeDefined();
+    adb.xml = CHOWDECK_XML
+      .replace(retryNode, "")
+      .replace(
+        '</node><node resource-id="com.chowdeck:id/offline_sheet"',
+        `${retryNode}</node><node resource-id="com.chowdeck:id/offline_sheet"`
+      );
+
+    await expect(
+      service.execute({
+        observationId: observed.data.observation.observationId,
+        action: { type: "click", elementRef: retry!.elementRef }
+      })
+    ).rejects.toMatchObject({ code: "STALE_OBSERVATION" });
+    expect(adb.taps).toHaveLength(0);
+  });
+
+  it("reanchors element-scoped scrolls to fresh bounds", async () => {
+    const adb = new FakeAdb();
+    adb.xml = TARGET_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    const target = observed.data.observation.elements[0];
+    adb.xml = TARGET_XML.replace('bounds="[10,20][110,80]"', 'bounds="[20,30][140,100]"')
+      .replace("Live ticker 29:33", "Live ticker 29:21");
+    await service.execute({
+      observationId: observed.data.observation.observationId,
+      action: { type: "scroll", direction: "right", amount: "small", elementRef: target.elementRef }
+    });
+    expect(adb.swipes[0]).toMatchObject({ x1: 95, x2: 65, y1: 65, y2: 65 });
+  });
+
+  it("rejects changed target labels, modal structure, ambiguity, and missing targets", async () => {
+    const scenarios = [
+      (xml: string) => xml.replace('text="Pay"', 'text="Cancel"'),
+      (xml: string) => xml.replace("</hierarchy>", '<node text="Confirm" class="android.widget.Dialog" bounds="[0,0][300,300]"/></hierarchy>'),
+      (xml: string) => xml.replace("</hierarchy>", '<node text="Pay" content-desc="pay" resource-id="com.paystack:id/pay" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/></hierarchy>'),
+      (xml: string) => xml.replace('resource-id="com.paystack:id/pay"', 'resource-id="com.paystack:id/missing"')
+    ];
+    for (const mutate of scenarios) {
+      const adb = new FakeAdb();
+      adb.xml = TARGET_XML;
+      const service = createService(adb);
+      const observed = await service.observe();
+      const observation = observed.data.observation;
+      adb.xml = mutate(TARGET_XML);
+      await expect(
+        service.execute({
+          observationId: observation.observationId,
+          action: { type: "click", elementRef: observation.elements[0].elementRef }
+        })
+      ).rejects.toMatchObject({ code: "STALE_OBSERVATION" });
+      expect(adb.taps).toHaveLength(0);
+    }
+  });
+
+  it("rejects target state changes while ignoring unrelated transient states", async () => {
+    const targetStateXml = TARGET_XML.replace(
+      'clickable="true" enabled="true"',
+      'checkable="true" checked="false" clickable="true" enabled="true"'
+    );
+    const adb = new FakeAdb();
+    adb.xml = targetStateXml;
+    const service = createService(adb);
+    const observed = await service.observe();
+    adb.xml = targetStateXml
+      .replace('checked="false"', 'checked="true"')
+      .replace('text="$10.00"', 'text="$10.00" selected="true"');
+
+    await expect(
+      service.execute({
+        observationId: observed.data.observation.observationId,
+        action: {
+          type: "click",
+          elementRef: observed.data.observation.elements[0].elementRef
+        }
+      })
+    ).rejects.toMatchObject({ code: "STALE_OBSERVATION" });
+    expect(adb.taps).toHaveLength(0);
+  });
+
+  it("keeps coordinate actions strict when an unrelated live label changes", async () => {
+    const adb = new FakeAdb();
+    adb.xml = TARGET_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    adb.xml = TARGET_XML.replace("Live ticker 29:33", "Live ticker 29:21");
+    await expect(
+      service.execute({
+        observationId: observed.data.observation.observationId,
+        action: { type: "click_coordinate", x: 10, y: 20 }
+      })
+    ).rejects.toMatchObject({ code: "STALE_OBSERVATION" });
+    expect(adb.taps).toHaveLength(0);
   });
 
   it("checks the post-launch foreground and rejects a failed transition", async () => {

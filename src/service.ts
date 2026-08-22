@@ -287,7 +287,15 @@ export class PhoneControlService {
     );
 
     const current = await this.#capture(device.serial, displayId);
-    const comparison = this.#observations.compare(observation, current);
+    const targetRef =
+      request.action.type === "click"
+        ? request.action.elementRef
+        : request.action.type === "scroll"
+          ? request.action.elementRef
+          : undefined;
+    const comparison = targetRef
+      ? this.#observations.compareElementAction(observation, current, targetRef)
+      : this.#observations.compare(observation, current);
     if (!comparison.matches) {
       this.#observations.invalidate(request.observationId);
       throw new PhoneControlError(
@@ -299,7 +307,14 @@ export class PhoneControlService {
 
     // Every action attempt consumes its observation, including a rejected action.
     this.#observations.invalidate(request.observationId);
-    const resolved = this.#resolveAction(request.action, observation, current);
+    const resolved = this.#resolveAction(
+      request.action,
+      observation,
+      current,
+      "target" in comparison
+        ? (comparison as { target?: UiElement }).target
+        : undefined
+    );
     const auditBase = {
       at: resolved.pointerEvent?.timestamp ?? this.#now(),
       serial: device.serial,
@@ -461,7 +476,7 @@ export class PhoneControlService {
       const [foreground, display, xml, screenshot] = await Promise.all([
         this.#adb.getForeground(serial, displayId),
         this.#adb.getDisplay(serial, displayId),
-        this.#adb.dumpUiAutomatorXml(serial).catch(() => null),
+        this.#adb.dumpUiAutomatorXml(serial, displayId).catch(() => null),
         this.#adb.captureScreenshot(serial, displayId)
       ]);
       const elements = xml ? parseUiAutomatorXml(xml) : [];
@@ -498,20 +513,28 @@ export class PhoneControlService {
   #resolveAction(
     action: PhoneAction,
     observation: Observation,
-    current: ObservationCapture
+    current: ObservationCapture,
+    rematchedTarget?: UiElement
   ): {
     perform: () => Promise<void>;
     pointerEvent?: PointerEvent;
   } {
     const displayId = current.displayId ?? 0;
     if (action.type === "click") {
-      const element = observation.elements.find(
+      const element = rematchedTarget ?? observation.elements.find(
         (candidate: UiElement) => candidate.elementRef === action.elementRef
       );
       if (!element) {
         throw new PhoneControlError(
-          "ELEMENT_NOT_FOUND",
-          "The element reference is not present in the observation.",
+          "STALE_OBSERVATION",
+          "The referenced element is no longer present in the current UI.",
+          { elementRef: action.elementRef }
+        );
+      }
+      if (element.states.enabled === false || element.states["visibleToUser"] === false) {
+        throw new PhoneControlError(
+          "STALE_OBSERVATION",
+          "The referenced element is no longer actionable.",
           { elementRef: action.elementRef }
         );
       }
@@ -570,13 +593,20 @@ export class PhoneControlService {
     if (action.type === "scroll") {
       let bounds: Bounds | null | undefined = undefined;
       if (action.elementRef) {
-        const element = observation.elements.find(
+        const element = rematchedTarget ?? observation.elements.find(
           (candidate) => candidate.elementRef === action.elementRef
         );
         if (!element) {
           throw new PhoneControlError(
-            "ELEMENT_NOT_FOUND",
-            `Element with ref "${action.elementRef}" was not found in observation ${observation.observationId}.`,
+            "STALE_OBSERVATION",
+            `Element with ref "${action.elementRef}" is no longer present in the current UI.`,
+            { elementRef: action.elementRef }
+          );
+        }
+        if (element.states.enabled === false || element.states["visibleToUser"] === false) {
+          throw new PhoneControlError(
+            "STALE_OBSERVATION",
+            `Element with ref "${action.elementRef}" is no longer actionable.`,
             { elementRef: action.elementRef }
           );
         }

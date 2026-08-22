@@ -219,7 +219,10 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
     return parseDisplaySnapshotForId(sizeOutput, windowOutput, displayId);
   }
 
-  public async dumpUiAutomatorXml(serial: string): Promise<string> {
+  public async dumpUiAutomatorXml(serial: string, _displayId = 0): Promise<string> {
+    // `uiautomator dump` does not expose a display-id argument. Keep this
+    // limitation explicit: screenshot/foreground are display-aware, while
+    // shell UI metadata is the device's default hierarchy.
     try {
       await this.#runText(["-s", serial, "shell", "rm", "-f", UI_AUTOMATOR_DUMP_PATH]);
     } catch {

@@ -32,7 +32,11 @@ export interface FixedAdbAdapter {
   >;
   getForeground(serial: string, displayId?: number): Promise<ForegroundState>;
   getDisplay(serial: string, displayId?: number): Promise<DisplaySnapshot>;
-  dumpUiAutomatorXml(serial: string): Promise<string>;
+  /** UI Automator's shell dump has no display selector on supported Android
+   * versions; displayId is accepted so callers cannot accidentally omit the
+   * binding, but the implementation documents the primary-display limitation.
+   */
+  dumpUiAutomatorXml(serial: string, displayId?: number): Promise<string>;
   captureScreenshot(serial: string, displayId?: number): Promise<Uint8Array>;
   launchApp(serial: string, packageName: string): Promise<void>;
   tap(serial: string, x: number, y: number, displayId?: number): Promise<void>;

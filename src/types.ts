@@ -37,6 +37,8 @@ export interface UiElement {
   class: string;
   states: UiElementStates;
   bounds: Bounds | null;
+  /** Index of this node's parent in the flattened capture, when known. */
+  parentIndex?: number | null;
 }
 
 export interface DisplayInfo {
