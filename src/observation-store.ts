@@ -32,7 +32,7 @@ function createOpaqueObservationId(): string {
 function bindingFromCapture(capture: ObservationCapture): ObservationBinding {
   return {
     serial: capture.serial,
-    displayId: capture.displayId,
+    displayId: capture.displayId ?? 0,
     packageName: capture.packageName,
     activity: capture.activity,
     display: { ...capture.display },
@@ -172,7 +172,7 @@ export class ObservationStore {
     return {
       observationId: observation.observationId,
       serial: observation.binding.serial,
-      displayId: observation.binding.displayId,
+      displayId: observation.binding.displayId ?? 0,
       packageName: observation.binding.packageName,
       activity: observation.binding.activity,
       display: { ...observation.binding.display },

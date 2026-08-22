@@ -396,7 +396,11 @@ public static class PhoneControlWindowApi
             if (width < 1 || height < 1) return true;
 
             string title = GetWindowTitle(handle);
-            if (title.IndexOf("Phone Control", StringComparison.OrdinalIgnoreCase) < 0 && title.IndexOf("scrcpy", StringComparison.OrdinalIgnoreCase) < 0) return true;
+            bool isScrcpyTitle =
+                title.StartsWith("Phone Control", StringComparison.OrdinalIgnoreCase) ||
+                title.Equals("scrcpy", StringComparison.OrdinalIgnoreCase) ||
+                title.StartsWith("scrcpy ", StringComparison.OrdinalIgnoreCase);
+            if (!isScrcpyTitle) return true;
 
             Point origin = new Point { X = client.Left, Y = client.Top };
             if (!ClientToScreen(handle, ref origin)) return true;
@@ -436,7 +440,10 @@ public static class PhoneControlWindowApi
             long area = width * height;
 
             string title = GetWindowTitle(handle);
-            bool titleMatches = title.IndexOf("Phone Control", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("scrcpy", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool titleMatches =
+                title.StartsWith("Phone Control", StringComparison.OrdinalIgnoreCase) ||
+                title.Equals("scrcpy", StringComparison.OrdinalIgnoreCase) ||
+                title.StartsWith("scrcpy ", StringComparison.OrdinalIgnoreCase);
 
             int priority = 0;
             if (processId > 0)

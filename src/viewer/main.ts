@@ -178,6 +178,7 @@ export interface OverlaySession {
   overlay: BrowserWindow;
   recoveryState: ReturnType<typeof createGeometryRecoveryState>;
   geometry: ViewerGeometry;
+  pendingCursorEvent?: SuccessfulClickAuditEvent;
 }
 
 export async function startViewer(
@@ -342,19 +343,44 @@ export async function startViewer(
           if (!session.overlay.isDestroyed() && session.overlay.isVisible()) {
             session.overlay.hide();
           }
+          if (session.recoveryState.stableSamples === 1 && !stopping) {
+            setTimeout(() => void reconcile(), 40);
+          }
         } else {
           if (!session.overlay.isDestroyed() && !session.overlay.isVisible()) {
             session.overlay.showInactive();
+          }
+          if (session.pendingCursorEvent) {
+            const pending = session.pendingCursorEvent;
+            session.pendingCursorEvent = undefined;
+            if (Date.now() - pending.at <= 3000) {
+              showCursor(session.overlay, pending, session.geometry);
+            }
           }
         }
       }
 
       for (const [pid, session] of sessions.entries()) {
         if (!discoveredPids.has(pid)) {
-          if (!session.overlay.isDestroyed()) {
-            session.overlay.close();
+          let isAlive = false;
+          try {
+            process.kill(pid, 0);
+            isAlive = true;
+          } catch {
+            isAlive = false;
           }
-          sessions.delete(pid);
+
+          if (isAlive) {
+            session.recoveryState = updateGeometryRecovery(session.recoveryState, undefined).state;
+            if (!session.overlay.isDestroyed() && session.overlay.isVisible()) {
+              session.overlay.hide();
+            }
+          } else {
+            if (!session.overlay.isDestroyed()) {
+              session.overlay.close();
+            }
+            sessions.delete(pid);
+          }
         }
       }
 
@@ -398,14 +424,14 @@ export async function startViewer(
       }
     }
 
-    if (
-      targetSession &&
-      !targetSession.overlay.isDestroyed()
-    ) {
-      if (!targetSession.overlay.isVisible()) {
-        targetSession.overlay.showInactive();
-      }
+    if (!targetSession || targetSession.overlay.isDestroyed()) {
+      return;
+    }
+
+    if (targetSession.recoveryState.attached && targetSession.overlay.isVisible()) {
       showCursor(targetSession.overlay, event, targetSession.geometry);
+    } else {
+      targetSession.pendingCursorEvent = event;
     }
   };
 

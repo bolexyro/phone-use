@@ -182,7 +182,6 @@ class FakeVirtualDisplayManager extends VirtualDisplayManager {
       packageName,
       activity: `${packageName}/.MainActivity`,
       width: 1080,
-      height: 2400,
       startedAt: Date.now()
     };
     this.fakeSessions.set(this.nextDisplayId, session);
@@ -220,7 +219,7 @@ function createService(
   return new PhoneControlService({
     adb,
     policy: POLICY,
-    environment: {},
+    environment: { NODE_ENV: "test" },
     virtualDisplayManager:
       options.virtualDisplayManager ?? new FakeVirtualDisplayManager(adb),
     auditLogger: logger,
