@@ -203,6 +203,10 @@ export class PhoneControlService {
     }
 
     const device = await this.#selectedDevice();
+    const priorPackageSessions =
+      useVirtualDisplay && options.newInstance === true
+        ? this.#virtualDisplays.getSessionsByPackage(packageName)
+        : [];
 
     let targetDisplayId = 0;
     let ownsVirtualDisplay = false;
@@ -287,6 +291,56 @@ export class PhoneControlService {
           `Android did not bring '${packageName}' to the foreground on display ${targetDisplayId} (current foreground is '${capture.packageName}').`,
           { packageName, foregroundPackage: capture.packageName, displayId: targetDisplayId }
         );
+      }
+
+      if (options.newInstance === true && priorPackageSessions.length > 0) {
+        // Android may report the package on the new display after merely moving
+        // its one existing task. A new display is not proof of a new instance:
+        // every previously active same-package display must still own the app.
+        const foregrounds = await Promise.all(
+          priorPackageSessions.map(async (session) => ({
+            session,
+            foreground: await this.#adb.getForeground(
+              device.serial,
+              session.displayId
+            )
+          }))
+        );
+        const displaced = foregrounds.filter(
+          ({ foreground }) => foreground.packageName !== packageName
+        );
+
+        if (displaced.length > 0) {
+          this.#virtualDisplays.close({ displayId: targetDisplayId });
+
+          const restoreDisplayId = displaced[0].session.displayId;
+          let restoreError: string | undefined;
+          try {
+            await this.#adb.launchAppOnDisplay(
+              device.serial,
+              packageName,
+              restoreDisplayId
+            );
+          } catch (error) {
+            restoreError =
+              error instanceof Error ? error.message : String(error);
+          }
+
+          throw new PhoneControlError(
+            "MULTI_INSTANCE_UNSUPPORTED",
+            `Android reused or moved the existing '${packageName}' task instead of creating another instance.`,
+            {
+              packageName,
+              requestedDisplayId: targetDisplayId,
+              displacedDisplayIds: displaced.map(
+                ({ session }) => session.displayId
+              ),
+              restoreDisplayId,
+              restored: restoreError === undefined,
+              ...(restoreError ? { restoreError } : {})
+            }
+          );
+        }
       }
 
       const observation = this.#observations.create(capture);

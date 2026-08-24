@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildLaunchArgs,
+  buildLaunchOnDisplayArgs,
+  buildResolveLaunchActivityArgs,
   buildTypeTextArgs,
   buildUiDumpArgs,
   buildUiDumpReadArgs,
+  parseResolvedLaunchActivity,
   UI_AUTOMATOR_DUMP_PATH
 } from "../src/adb/process-adapter.js";
 
@@ -30,6 +33,50 @@ describe("fixed ADB process argument construction", () => {
     expect(buildLaunchArgs("phone-1", "com.example.calculator")).not.toContain(
       "'com.example.calculator'"
     );
+  });
+
+  it("builds a fixed display-specific multiple-task launch", () => {
+    expect(
+      buildLaunchOnDisplayArgs("phone-1", "com.example.calculator/.Main", 7, {
+        multipleTask: true
+      })
+    ).toEqual([
+      "-s",
+      "phone-1",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "--display",
+      "7",
+      "-f",
+      "0x18080000",
+      "-n",
+      "com.example.calculator/.Main"
+    ]);
+
+    expect(
+      buildResolveLaunchActivityArgs("phone-1", "com.example.calculator")
+    ).toEqual([
+      "-s",
+      "phone-1",
+      "shell",
+      "cmd",
+      "package",
+      "resolve-activity",
+      "--brief",
+      "-a",
+      "android.intent.action.MAIN",
+      "-c",
+      "android.intent.category.LAUNCHER",
+      "com.example.calculator"
+    ]);
+    expect(
+      parseResolvedLaunchActivity(
+        "priority=0\r\ncom.example.calculator/.Main\r\n",
+        "com.example.calculator"
+      )
+    ).toBe("com.example.calculator/.Main");
   });
 
   it("encodes Android spaces and percent signs without adding shell quotes", () => {
@@ -73,6 +120,13 @@ describe("fixed ADB process argument construction", () => {
       "--window-title=Phone Control: com.example.app",
       "--window-width=420"
     ]);
+
+    const displayOnlyArgs = buildVirtualDisplayScrcpyArgs(
+      "phone-1",
+      "com.example.app",
+      { startApp: false }
+    );
+    expect(displayOnlyArgs).not.toContain("--start-app=com.example.app");
   });
 
   it("parses multiple displays from dumpsys output", () => {

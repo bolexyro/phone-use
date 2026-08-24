@@ -70,6 +70,11 @@ class FakeAdb implements FixedAdbAdapter {
   typed: Array<{ text: string; displayId: number }> = [];
   keys: Array<{ key: Keypress; displayId: number }> = [];
   launches: string[] = [];
+  displayLaunches: Array<{
+    packageName: string;
+    displayId: number;
+    multipleTask: boolean;
+  }> = [];
   failNextAction: PhoneControlError | undefined;
   failLaunch: PhoneControlError | undefined;
   calls = {
@@ -137,6 +142,25 @@ class FakeAdb implements FixedAdbAdapter {
     };
   }
 
+  async launchAppOnDisplay(
+    _serial: string,
+    packageName: string,
+    displayId: number,
+    options: { multipleTask?: boolean } = {}
+  ): Promise<void> {
+    if (this.failLaunch) throw this.failLaunch;
+    this.displayLaunches.push({
+      packageName,
+      displayId,
+      multipleTask: options.multipleTask === true
+    });
+    this.foregroundByDisplay.set(displayId, {
+      packageName,
+      activity: `${packageName}/.MainActivity`,
+      displayId
+    });
+  }
+
   async tap(_serial: string, x: number, y: number, displayId = 0): Promise<void> {
     if (this.failNextAction) throw this.failNextAction;
     this.taps.push({ x, y, displayId });
@@ -189,6 +213,7 @@ class FakeVirtualDisplayManager extends VirtualDisplayManager {
   readonly launchedPackages: string[] = [];
   failLaunch = false;
   nextDisplayId = 2;
+  moveExistingTaskOnNewInstance = false;
   private readonly fakeAdb?: FakeAdb;
   private fakeSessions = new Map<number, VirtualDisplaySession>();
 
@@ -208,6 +233,14 @@ class FakeVirtualDisplayManager extends VirtualDisplayManager {
       if (s.packageName === packageName) return s;
     }
     return undefined;
+  }
+
+  override getSessionsByPackage(
+    packageName: string
+  ): readonly VirtualDisplaySession[] {
+    return Array.from(this.fakeSessions.values()).filter(
+      (session) => session.packageName === packageName
+    );
   }
 
   override async launch(
@@ -241,6 +274,29 @@ class FakeVirtualDisplayManager extends VirtualDisplayManager {
       startedAt: Date.now()
     };
     this.fakeSessions.set(session.displayId, session);
+    if (this.fakeAdb) {
+      if (options.newInstance === true && this.moveExistingTaskOnNewInstance) {
+        for (const existing of this.fakeSessions.values()) {
+          if (
+            existing.displayId !== session.displayId &&
+            existing.packageName === packageName
+          ) {
+            this.fakeAdb.foregroundByDisplay.set(existing.displayId, {
+              packageName: "com.sec.android.app.launcher",
+              activity: "com.sec.android.app.launcher/.Launcher",
+              displayId: existing.displayId
+            });
+          }
+        }
+      }
+      if (!this.fakeAdb.foregroundByDisplay.has(session.displayId)) {
+        this.fakeAdb.foregroundByDisplay.set(session.displayId, {
+          packageName,
+          activity: `${packageName}/.MainActivity`,
+          displayId: session.displayId
+        });
+      }
+    }
     return session;
   }
 
@@ -370,6 +426,40 @@ describe("phone-control service safety", () => {
     );
     expect(vdManager.launchedPackages).toHaveLength(2);
     expect(vdManager.sessions).toHaveLength(2);
+  });
+
+  it("rejects a relocated task and restores the original display", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    const first = await service.openApp(POLICY.allowedApps[0]);
+    vdManager.moveExistingTaskOnNewInstance = true;
+
+    await expect(
+      service.openApp(POLICY.allowedApps[0], { newInstance: true })
+    ).rejects.toMatchObject({
+      code: "MULTI_INSTANCE_UNSUPPORTED",
+      details: {
+        displacedDisplayIds: [first.data.observation.displayId],
+        restoreDisplayId: first.data.observation.displayId,
+        restored: true
+      }
+    });
+
+    expect(vdManager.sessions.map((session) => session.displayId)).toEqual([
+      first.data.observation.displayId
+    ]);
+    expect(adb.displayLaunches.at(-1)).toEqual({
+      packageName: POLICY.allowedApps[0],
+      displayId: first.data.observation.displayId,
+      multipleTask: false
+    });
+    await expect(
+      adb.getForeground("phone-1", first.data.observation.displayId)
+    ).resolves.toMatchObject({ packageName: POLICY.allowedApps[0] });
   });
 
   it("rejects newInstance on the primary display", async () => {

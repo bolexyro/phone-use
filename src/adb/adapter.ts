@@ -55,6 +55,13 @@ export interface FixedAdbAdapter {
   dumpUiAutomatorXml(serial: string, displayId?: number): Promise<string>;
   captureScreenshot(serial: string, displayId?: number): Promise<Uint8Array>;
   launchApp(serial: string, packageName: string): Promise<void>;
+  /** Launch an allowlisted package on one known display using fixed task flags. */
+  launchAppOnDisplay(
+    serial: string,
+    packageName: string,
+    displayId: number,
+    options?: { multipleTask?: boolean }
+  ): Promise<void>;
   tap(serial: string, x: number, y: number, displayId?: number): Promise<void>;
   /**
    * Execute a bounded, already-validated batch of display-relative taps.

@@ -55,6 +55,7 @@ export function buildVirtualDisplayScrcpyArgs(
     windowWidth?: number;
     mouseMode?: "disabled" | "sdk" | "uhid" | "aoa";
     noDecorations?: boolean;
+    startApp?: boolean;
   } = {}
 ): readonly string[] {
   const args = ["-s", serial];
@@ -68,7 +69,9 @@ export function buildVirtualDisplayScrcpyArgs(
     args.push("--new-display");
   }
 
-  args.push(`--start-app=${packageName}`);
+  if (options.startApp !== false) {
+    args.push(`--start-app=${packageName}`);
+  }
 
   if (options.noDecorations !== false) {
     args.push("--no-vd-system-decorations");
@@ -189,7 +192,11 @@ export class VirtualDisplayManager {
       height: options.height,
       dpi: options.dpi,
       mouseMode: options.mouseMode,
-      noDecorations: options.noDecorations
+      noDecorations: options.noDecorations,
+      // scrcpy's package launch reuses an existing Android task. For an
+      // intentional second instance, create the display first and launch with
+      // explicit multiple-task flags once its display id is known.
+      startApp: options.newInstance !== true
     });
 
     let child: ChildProcess;
@@ -290,6 +297,12 @@ export class VirtualDisplayManager {
 
       const displayId = detectedDisplayId;
       const displayInfo = await this.#adb.getDisplay(serial, displayId);
+
+      if (options.newInstance === true) {
+        await this.#adb.launchAppOnDisplay(serial, packageName, displayId, {
+          multipleTask: true
+        });
+      }
 
       if (exitedEarly) {
         throw new PhoneControlError(

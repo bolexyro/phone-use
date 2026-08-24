@@ -346,7 +346,7 @@ export function registerPhoneControlTools(
     "phone_open_app",
     {
       description:
-        "Launch one allowlisted package in a virtual display. Reuses an existing package session by default; set newInstance true for another display. Use displayId to target an instance. Set useVirtualDisplay false only for the primary display.",
+        "Launch one allowlisted package in a virtual display. Reuses an existing package session by default; set newInstance true to request another Android task. If the app reuses or moves its existing task, the call fails as unsupported. Use displayId to target an instance.",
       inputSchema: phoneOpenAppInputSchema.shape
     },
     async (input) => {

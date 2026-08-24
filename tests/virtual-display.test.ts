@@ -27,6 +27,11 @@ class FakeChild extends EventEmitter {
 class FakeAdb implements FixedAdbAdapter {
   displays = [{ displayId: 0, width: 1080, height: 2400, rotation: 0 }];
   failDisplayIds = new Set<number>();
+  displayLaunches: Array<{
+    packageName: string;
+    displayId: number;
+    multipleTask: boolean;
+  }> = [];
 
   async listDevices(): Promise<readonly DeviceInfo[]> {
     return [{ serial: "phone-1", state: "device", authorized: true }];
@@ -73,6 +78,18 @@ class FakeAdb implements FixedAdbAdapter {
   }
 
   async launchApp(): Promise<void> {}
+  async launchAppOnDisplay(
+    _serial: string,
+    packageName: string,
+    displayId: number,
+    options: { multipleTask?: boolean } = {}
+  ): Promise<void> {
+    this.displayLaunches.push({
+      packageName,
+      displayId,
+      multipleTask: options.multipleTask === true
+    });
+  }
   async tap(): Promise<void> {}
   async swipe(): Promise<void> {}
   async typeText(): Promise<void> {}
@@ -140,6 +157,13 @@ describe("VirtualDisplayManager", () => {
       3
     ]);
     expect(children).toHaveLength(2);
+    expect(adb.displayLaunches).toEqual([
+      {
+        packageName: "com.example.app",
+        displayId: 3,
+        multipleTask: true
+      }
+    ]);
   });
 
   it("serializes concurrent launches so each detects its own display", async () => {

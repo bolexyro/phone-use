@@ -68,6 +68,48 @@ export function buildLaunchArgs(
   ];
 }
 
+export function buildLaunchOnDisplayArgs(
+  serial: string,
+  componentName: string,
+  displayId: number,
+  options: { multipleTask?: boolean } = {}
+): readonly string[] {
+  return [
+    "-s",
+    serial,
+    "shell",
+    "am",
+    "start",
+    "-W",
+    "--display",
+    String(displayId),
+    "-f",
+    options.multipleTask === true ? "0x18080000" : "0x10000000",
+    "-n",
+    componentName
+  ];
+}
+
+export function buildResolveLaunchActivityArgs(
+  serial: string,
+  packageName: string
+): readonly string[] {
+  return [
+    "-s",
+    serial,
+    "shell",
+    "cmd",
+    "package",
+    "resolve-activity",
+    "--brief",
+    "-a",
+    "android.intent.action.MAIN",
+    "-c",
+    "android.intent.category.LAUNCHER",
+    packageName
+  ];
+}
+
 export function buildTypeTextArgs(
   serial: string,
   text: string,
@@ -104,6 +146,19 @@ function isLaunchFailure(output: string): boolean {
   return /(?:^|\n)\s*(?:Error|Exception):|START_ABORTED|does not exist/i.test(
     output
   );
+}
+
+export function parseResolvedLaunchActivity(
+  output: string,
+  packageName: string
+): string | undefined {
+  const lines = output.split(/\r?\n/).map((line) => line.trim());
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (lines[index]?.startsWith(`${packageName}/`) === true) {
+      return lines[index];
+    }
+  }
+  return undefined;
 }
 
 export class AdbProcessAdapter implements FixedAdbAdapter {
@@ -309,6 +364,35 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
     }
   }
 
+  public async launchAppOnDisplay(
+    serial: string,
+    packageName: string,
+    displayId: number,
+    options: { multipleTask?: boolean } = {}
+  ): Promise<void> {
+    const resolvedOutput = await this.#runText(
+      buildResolveLaunchActivityArgs(serial, packageName)
+    );
+    const componentName = parseResolvedLaunchActivity(resolvedOutput, packageName);
+    if (componentName === undefined) {
+      throw new PhoneControlError(
+        "APP_LAUNCH_FAILED",
+        `Android could not resolve a launcher activity for '${packageName}'.`,
+        { packageName, output: resolvedOutput.slice(0, 500) }
+      );
+    }
+    const output = await this.#runText(
+      buildLaunchOnDisplayArgs(serial, componentName, displayId, options)
+    );
+    if (isLaunchFailure(output)) {
+      throw new PhoneControlError(
+        "APP_LAUNCH_FAILED",
+        `Android did not launch '${packageName}' on display ${displayId}.`,
+        { packageName, displayId, output: output.slice(0, 500) }
+      );
+    }
+  }
+
   public async tap(
     serial: string,
     x: number,
@@ -480,6 +564,7 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
           reject(
             new PhoneControlError("ADB_COMMAND_FAILED", "ADB command failed.", {
               exitCode: result.exitCode,
+              stdout: result.stdout.toString("utf8").slice(0, 500),
               stderr: result.stderr.toString("utf8").slice(0, 500)
             })
           );
