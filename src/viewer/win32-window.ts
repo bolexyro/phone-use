@@ -25,7 +25,7 @@ interface WindowChangedResponse {
   processId?: unknown;
 }
 
-const POWERSHELL_SCRIPT = String.raw`
+export const POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = "Stop"
 Add-Type @'
 using System;
@@ -379,6 +379,31 @@ public static class PhoneControlWindowApi
         public int Height;
     }
 
+    private static bool IsScrcpyWindow(IntPtr handle, uint processId, string title)
+    {
+        if (
+            title.StartsWith("Phone Control", StringComparison.OrdinalIgnoreCase) ||
+            title.Equals("scrcpy", StringComparison.OrdinalIgnoreCase) ||
+            title.StartsWith("scrcpy ", StringComparison.OrdinalIgnoreCase) ||
+            title.IndexOf("Phone Control", StringComparison.OrdinalIgnoreCase) >= 0
+        )
+        {
+            return true;
+        }
+
+        try
+        {
+            var proc = System.Diagnostics.Process.GetProcessById((int)processId);
+            if (proc.ProcessName.Equals("scrcpy", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        catch {}
+
+        return false;
+    }
+
     public static WindowInfo[] ListWindows()
     {
         var list = new System.Collections.Generic.List<WindowInfo>();
@@ -396,11 +421,7 @@ public static class PhoneControlWindowApi
             if (width < 1 || height < 1) return true;
 
             string title = GetWindowTitle(handle);
-            bool isScrcpyTitle =
-                title.StartsWith("Phone Control", StringComparison.OrdinalIgnoreCase) ||
-                title.Equals("scrcpy", StringComparison.OrdinalIgnoreCase) ||
-                title.StartsWith("scrcpy ", StringComparison.OrdinalIgnoreCase);
-            if (!isScrcpyTitle) return true;
+            if (!IsScrcpyWindow(handle, candidateProcessId, title)) return true;
 
             Point origin = new Point { X = client.Left, Y = client.Top };
             if (!ClientToScreen(handle, ref origin)) return true;
@@ -440,10 +461,7 @@ public static class PhoneControlWindowApi
             long area = width * height;
 
             string title = GetWindowTitle(handle);
-            bool titleMatches =
-                title.StartsWith("Phone Control", StringComparison.OrdinalIgnoreCase) ||
-                title.Equals("scrcpy", StringComparison.OrdinalIgnoreCase) ||
-                title.StartsWith("scrcpy ", StringComparison.OrdinalIgnoreCase);
+            bool titleMatches = IsScrcpyWindow(handle, candidateProcessId, title);
 
             int priority = 0;
             if (processId > 0)
