@@ -1,4 +1,8 @@
-import type { MachineError, PhoneControlErrorCode } from "./errors.js";
+import type {
+  ErrorDetails,
+  MachineError,
+  PhoneControlErrorCode
+} from "./errors.js";
 
 export interface PolicyProfile {
   profile: string;
@@ -115,9 +119,52 @@ export type PhoneAction =
   | { type: "type"; text: string }
   | { type: "keypress"; key: Keypress };
 
+/**
+ * A semantic selector used by bounded sequences. Element refs are intentionally
+ * opaque and are regenerated for every observation, so a sequence can also
+ * select a control by stable UI metadata when a previous action reveals a new
+ * screen. Every supplied field must match exactly; the server requires a
+ * unique actionable match before sending input.
+ */
+export interface UiElementTarget {
+  text?: string;
+  contentDescription?: string;
+  resourceId?: string;
+  class?: string;
+}
+
+export type PhoneSequenceAction =
+  | { type: "click"; elementRef: string }
+  | { type: "click"; target: UiElementTarget }
+  | {
+      type: "scroll";
+      direction: ScrollDirection;
+      amount: ScrollAmount;
+      elementRef?: string;
+    }
+  | {
+      type: "scroll";
+      direction: ScrollDirection;
+      amount: ScrollAmount;
+      target: UiElementTarget;
+    }
+  | { type: "type"; text: string }
+  | { type: "keypress"; key: Keypress };
+
+export type SequenceExecutionMode = "validated" | "stable_surface";
+
+/** Maximum number of server-validated actions in one MCP call. */
+export const MAX_SEQUENCE_ACTIONS = 32;
+
 export interface PhoneExecuteRequest {
   observationId: string;
   action: PhoneAction;
+}
+
+export interface PhoneExecuteSequenceRequest {
+  observationId: string;
+  actions: readonly PhoneSequenceAction[];
+  executionMode?: SequenceExecutionMode;
 }
 
 export interface ClickPointerEvent {
@@ -226,6 +273,56 @@ export interface ActionData {
   textLength?: number;
   pointerEvent?: PointerEvent;
   observation: ObservationSummary;
+}
+
+export interface SequenceStepSuccess {
+  index: number;
+  status: "success";
+  action: PhoneSequenceAction["type"];
+  observation: ObservationSummary;
+  textLength?: number;
+  pointerEvent?: PointerEvent;
+}
+
+export interface SequenceStepFailure {
+  index: number;
+  status: "failed";
+  action: PhoneSequenceAction["type"];
+  /** A timeout means the transport outcome is unknown, not that no input ran. */
+  outcome?: "failed" | "unknown";
+  error: {
+    code: PhoneControlErrorCode;
+    message: string;
+    details: ErrorDetails;
+  };
+}
+
+export type SequenceStepOutcome = SequenceStepSuccess | SequenceStepFailure;
+
+export interface SequenceStepTiming {
+  index: number;
+  preflightMs: number;
+  dispatchMs: number;
+  observationMs: number;
+  totalMs: number;
+}
+
+export interface SequenceTiming {
+  mode: SequenceExecutionMode;
+  initialCaptureMs: number;
+  finalCaptureMs: number;
+  totalMs: number;
+  steps: readonly SequenceStepTiming[];
+}
+
+export interface SequenceData {
+  executionMode: SequenceExecutionMode;
+  completed: boolean;
+  requestedSteps: number;
+  completedSteps: number;
+  steps: readonly SequenceStepOutcome[];
+  finalObservation: ObservationSummary;
+  timing: SequenceTiming;
 }
 
 export interface ToolSuccessResult<TData extends object = object> {

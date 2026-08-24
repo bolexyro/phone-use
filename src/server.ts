@@ -5,13 +5,18 @@ import { z } from "zod";
 
 import { asPhoneControlError, PhoneControlError, toMachineError } from "./errors.js";
 import { ObservationStore } from "./observation-store.js";
+import { MAX_SEQUENCE_ACTIONS } from "./types.js";
 import type {
   ActionData,
   AllowedAppsData,
   CloseAppData,
   ObservationSummary,
   PhoneExecuteRequest,
+  PhoneExecuteSequenceRequest,
+  PhoneSequenceAction,
   PhoneStatusData,
+  SequenceExecutionMode,
+  SequenceData,
   ToolSuccessResult,
   WaitCondition
 } from "./types.js";
@@ -23,6 +28,7 @@ export const PHONE_CONTROL_TOOL_NAMES = [
   "phone_close_app",
   "phone_observe",
   "phone_execute",
+  "phone_execute_sequence",
   "phone_wait_for"
 ] as const;
 
@@ -64,10 +70,80 @@ export const phoneActionSchema = z.discriminatedUnion("type", [
     .strict()
 ]);
 
+const elementTargetSchema = z
+  .object({
+    text: z.string().min(1).max(4096).optional(),
+    contentDescription: z.string().min(1).max(4096).optional(),
+    resourceId: z.string().min(1).max(255).optional(),
+    class: z.string().min(1).max(255).optional()
+  })
+  .strict()
+  .refine(
+    (target) => Object.values(target).some((value) => value !== undefined),
+    { message: "A semantic element target must specify at least one field." }
+  );
+
+/**
+ * Sequence actions intentionally omit click_coordinate. A sequence may use
+ * an observation-bound elementRef or a semantic target, but never a list of
+ * blind coordinates.
+ */
+export const phoneSequenceActionSchema: z.ZodType<PhoneSequenceAction> = z.union([
+  z
+    .object({
+      type: z.literal("click"),
+      elementRef: z.string().min(1)
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("click"),
+      target: elementTargetSchema
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("scroll"),
+      direction: z.enum(["up", "down", "left", "right"]),
+      amount: z.enum(["small", "medium", "large"]),
+      elementRef: z.string().min(1).optional()
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("scroll"),
+      direction: z.enum(["up", "down", "left", "right"]),
+      amount: z.enum(["small", "medium", "large"]),
+      target: elementTargetSchema
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("type"),
+      text: z.string().min(1).max(4096)
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("keypress"),
+      key: z.enum(["BACK", "HOME", "ENTER", "DELETE"])
+    })
+    .strict()
+]);
+
 export const phoneExecuteInputSchema = z
   .object({
     observationId: z.string().min(1),
     action: phoneActionSchema
+  })
+  .strict();
+
+export const phoneExecuteSequenceInputSchema = z
+  .object({
+    observationId: z.string().min(1),
+    actions: z.array(phoneSequenceActionSchema).min(1).max(MAX_SEQUENCE_ACTIONS),
+    executionMode: z.enum(["validated", "stable_surface"]).optional(),
+    includeScreenshot: z.boolean().optional()
   })
   .strict();
 
@@ -144,6 +220,9 @@ export interface PhoneControlToolService {
     packageName?: string;
   }): Promise<ToolSuccessResult<{ observation: ObservationSummary }>>;
   execute(request: PhoneExecuteRequest): Promise<ToolSuccessResult<ActionData>>;
+  executeSequence(
+    request: PhoneExecuteSequenceRequest
+  ): Promise<ToolSuccessResult<SequenceData>>;
   waitFor(
     observationId: string,
     condition: WaitCondition,
@@ -226,7 +305,13 @@ function resolveScreenshot(
   result: unknown,
   includeScreenshot = false
 ): Uint8Array | undefined {
-  const summary = (result as { data?: { observation?: ObservationSummary } })?.data?.observation;
+  const data = (result as {
+    data?: {
+      observation?: ObservationSummary;
+      finalObservation?: ObservationSummary;
+    };
+  })?.data;
+  const summary = data?.observation ?? data?.finalObservation;
   if (!summary) return undefined;
   if (includeScreenshot || summary.elements.length === 0) {
     return service.observationStore.get(summary.observationId)?.screenshot;
@@ -326,6 +411,33 @@ export function registerPhoneControlTools(
           return service.execute(parsed);
         },
         (result) => resolveScreenshot(service, result)
+      );
+    }
+  );
+
+  server.registerTool(
+    "phone_execute_sequence",
+    {
+      description:
+        `Execute up to ${MAX_SEQUENCE_ACTIONS} typed semantic actions in one MCP call. Choose executionMode for each workflow: use stable_surface whenever every action is a click uniquely resolvable from one surface and earlier clicks cannot change the position or meaning of later targets; examples such as keypads and button grids are illustrative, not exhaustive. Use validated when later actions depend on intermediate UI changes or when uncertain. The default validated mode reuses each authorized post-action UI capture for the next immediate step, rechecks foreground, rematches targets, and captures one final screenshot. stable_surface dispatches a bounded typed tap batch and performs one final observation. Coordinates and state-dependent actions are never accepted in stable_surface mode.`,
+      inputSchema: phoneExecuteSequenceInputSchema.shape
+    },
+    async (input) => {
+      let includeScreenshot = false;
+      return safely(
+        () => {
+          const parsed = parseInput(phoneExecuteSequenceInputSchema, input);
+          includeScreenshot = parsed.includeScreenshot === true;
+          const request: PhoneExecuteSequenceRequest = {
+            observationId: parsed.observationId,
+            actions: parsed.actions,
+            ...(parsed.executionMode
+              ? { executionMode: parsed.executionMode as SequenceExecutionMode }
+              : {})
+          };
+          return service.executeSequence(request);
+        },
+        (result) => resolveScreenshot(service, result, includeScreenshot)
       );
     }
   );

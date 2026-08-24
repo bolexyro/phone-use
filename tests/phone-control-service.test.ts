@@ -2,7 +2,11 @@ import { Buffer } from "node:buffer";
 
 import { describe, expect, it } from "vitest";
 
-import type { FixedAdbAdapter, SwipeGesture } from "../src/adb/adapter.js";
+import type {
+  FixedAdbAdapter,
+  SwipeGesture,
+  TapBatchHooks
+} from "../src/adb/adapter.js";
 import type { AuditLogEntry } from "../src/audit-log.js";
 import { PhoneControlError } from "../src/errors.js";
 import { hashUiTree, parseUiAutomatorXml, parseBounds, boundsCenter } from "../src/ui-automator.js";
@@ -26,6 +30,8 @@ const PNG_2X3 = Buffer.from(
 );
 
 const XML = `<hierarchy rotation="0"><node text="Calculate" content-desc="calc" resource-id="com.sec.android.app.popupcalculator:id/calculate" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/><node text="" class="android.widget.TextView" checked="false" bounds="[0,0][2,2]"/></hierarchy>`;
+const SEQUENCE_XML = `<hierarchy rotation="0"><node text="Menu" content-desc="menu" resource-id="com.example:id/menu" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/><node text="One" content-desc="one" resource-id="com.example:id/key" class="android.widget.Button" clickable="true" enabled="true" bounds="[120,20][220,80]"/></hierarchy>`;
+const APPLY_XML = `<hierarchy rotation="0"><node text="Apply" content-desc="apply" resource-id="com.example:id/apply" class="android.widget.Button" clickable="true" enabled="true" bounds="[300,400][500,500]"/></hierarchy>`;
 const TARGET_XML = `<hierarchy rotation="0"><node text="Pay" content-desc="pay" resource-id="com.paystack:id/pay" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/><node text="Live ticker 29:33" content-desc="live" resource-id="com.paystack:id/timer" class="android.widget.TextView" bounds="[0,0][200,30]"/><node text="$10.00" resource-id="com.paystack:id/amount" class="android.widget.TextView" bounds="[0,40][200,70]"/></hierarchy>`;
 const CHOWDECK_XML = `<hierarchy rotation="0"><node resource-id="com.chowdeck:id/root" class="android.widget.FrameLayout" bounds="[0,0][300,900]"><node resource-id="com.chowdeck:id/feed" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" bounds="[0,0][300,900]"><node text="Restaurant A" class="android.view.View" bounds="[0,650][300,800]"/></node><node resource-id="com.chowdeck:id/offline_sheet" class="android.widget.FrameLayout" bounds="[0,600][300,900]"><node text="Try again" content-desc="Try again" class="android.widget.Button" clickable="true" enabled="true" bounds="[40,700][260,780]"/></node></node></hierarchy>`;
 
@@ -65,8 +71,17 @@ class FakeAdb implements FixedAdbAdapter {
   launches: string[] = [];
   failNextAction: PhoneControlError | undefined;
   failLaunch: PhoneControlError | undefined;
+  calls = {
+    listDevices: 0,
+    getForeground: 0,
+    getDisplay: 0,
+    dumpUiAutomatorXml: 0,
+    captureScreenshot: 0,
+    tapBatch: 0
+  };
 
   async listDevices(): Promise<readonly DeviceInfo[]> {
+    this.calls.listDevices += 1;
     return this.devices;
   }
 
@@ -86,10 +101,12 @@ class FakeAdb implements FixedAdbAdapter {
   }
 
   async getForeground(_serial: string, displayId = 0): Promise<ForegroundState> {
+    this.calls.getForeground += 1;
     return { ...this.foreground, displayId };
   }
 
   async getDisplay(_serial: string, displayId = 0): Promise<DisplaySnapshot> {
+    this.calls.getDisplay += 1;
     return {
       display: { ...this.display.display, displayId },
       rotation: this.display.rotation,
@@ -98,10 +115,12 @@ class FakeAdb implements FixedAdbAdapter {
   }
 
   async dumpUiAutomatorXml(): Promise<string> {
+    this.calls.dumpUiAutomatorXml += 1;
     return this.xml;
   }
 
   async captureScreenshot(): Promise<Uint8Array> {
+    this.calls.captureScreenshot += 1;
     return this.screenshot;
   }
 
@@ -117,6 +136,33 @@ class FakeAdb implements FixedAdbAdapter {
   async tap(_serial: string, x: number, y: number, displayId = 0): Promise<void> {
     if (this.failNextAction) throw this.failNextAction;
     this.taps.push({ x, y, displayId });
+  }
+
+  async tapBatch(
+    serial: string,
+    points: readonly { x: number; y: number }[],
+    displayId = 0,
+    hooks: TapBatchHooks = {}
+  ): Promise<{ completed: number }> {
+    this.calls.tapBatch += 1;
+    let completed = 0;
+    try {
+      for (const [index, point] of points.entries()) {
+        await hooks.beforeTap?.(index, point);
+        await this.tap(serial, point.x, point.y, displayId);
+        completed += 1;
+      }
+      return { completed };
+    } catch (error) {
+      if (error instanceof PhoneControlError) {
+        throw new PhoneControlError(error.code, error.message, {
+          ...error.details,
+          completedSteps: completed,
+          outcome: error.code === "ADB_TIMEOUT" ? "unknown" : "failed"
+        });
+      }
+      throw error;
+    }
   }
 
   async swipe(_serial: string, gesture: SwipeGesture, displayId = 0): Promise<void> {
@@ -682,6 +728,197 @@ describe("phone-control service safety", () => {
     expect(logger.entries[0]).toMatchObject({ outcome: "unknown", errorCode: "ADB_TIMEOUT" });
     expect(adb.keys).toHaveLength(0);
     expect(service.observationStore.get(observed.data.observation.observationId)).toBeUndefined();
+  });
+
+  it("executes a bounded sequence with fresh semantic target bounds and no observation round trips", async () => {
+    const adb = new FakeAdb();
+    adb.xml = SEQUENCE_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    const before = { ...adb.calls };
+
+    const originalTap = adb.tap.bind(adb);
+    adb.tap = async (...args) => {
+      await originalTap(...args);
+      if (adb.taps.length === 1) {
+        // The first click reveals the next control. The second step must use
+        // the fresh post-click observation rather than a blind coordinate.
+        adb.xml = APPLY_XML;
+      }
+    };
+
+    const result = await service.executeSequence({
+      observationId: observed.data.observation.observationId,
+      actions: [
+        {
+          type: "click",
+          target: {
+            resourceId: "com.example:id/menu",
+            contentDescription: "menu"
+          }
+        },
+        {
+          type: "click",
+          target: {
+            resourceId: "com.example:id/apply",
+            text: "Apply"
+          }
+        }
+      ]
+    });
+
+    expect(result.data.completed).toBe(true);
+    expect(result.data.completedSteps).toBe(2);
+    expect(result.data.steps).toHaveLength(2);
+    expect(result.data.steps.every((step) => step.status === "success")).toBe(true);
+    expect(result.data.finalObservation.packageName).toBe(POLICY.allowedApps[0]);
+    expect(adb.taps).toEqual([
+      { x: 60, y: 50, displayId: 0 },
+      { x: 400, y: 450, displayId: 0 }
+    ]);
+    expect(adb.calls.listDevices - before.listDevices).toBe(1);
+    expect(adb.calls.getForeground - before.getForeground).toBe(4);
+    expect(adb.calls.getDisplay - before.getDisplay).toBe(3);
+    expect(adb.calls.dumpUiAutomatorXml - before.dumpUiAutomatorXml).toBe(3);
+    expect(adb.calls.captureScreenshot - before.captureScreenshot).toBe(1);
+    expect(adb.calls.tapBatch - before.tapBatch).toBe(0);
+    expect(
+      service.observationStore.get(observed.data.observation.observationId)
+    ).toBeUndefined();
+  });
+
+  it("stops on the first failed sequence step and returns the last safe observation", async () => {
+    const adb = new FakeAdb();
+    adb.xml = SEQUENCE_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    const result = await service.executeSequence({
+      observationId: observed.data.observation.observationId,
+      actions: [
+        {
+          type: "click",
+          target: { resourceId: "com.example:id/menu" }
+        },
+        {
+          type: "click",
+          target: { resourceId: "com.example:id/does-not-exist" }
+        },
+        { type: "keypress", key: "ENTER" }
+      ]
+    });
+
+    expect(result.data.completed).toBe(false);
+    expect(result.data.completedSteps).toBe(1);
+    expect(result.data.steps).toHaveLength(2);
+    expect(result.data.steps[1]).toMatchObject({
+      status: "failed",
+      error: { code: "STALE_OBSERVATION" }
+    });
+    expect(adb.taps).toHaveLength(1);
+    expect(adb.keys).toHaveLength(0);
+    expect(
+      service.observationStore.get(result.data.finalObservation.observationId)
+    ).toBeDefined();
+  });
+
+  it("uses the generalized stable-surface tap batch for unchanged semantic click grids", async () => {
+    const adb = new FakeAdb();
+    adb.xml = SEQUENCE_XML;
+    const logger = new MemoryAuditLogger();
+    const order: string[] = [];
+    const append = logger.append.bind(logger);
+    logger.append = async (entry) => {
+      order.push(`audit:${entry.phase ?? "result"}:${entry.pointerEvent?.x ?? "none"}`);
+      await append(entry);
+    };
+    const originalTap = adb.tap.bind(adb);
+    adb.tap = async (serial, x, y, displayId) => {
+      order.push(`tap:${x}`);
+      await originalTap(serial, x, y, displayId);
+    };
+    const service = createService(adb, logger);
+    const observed = await service.observe();
+    const before = { ...adb.calls };
+
+    const result = await service.executeSequence({
+      observationId: observed.data.observation.observationId,
+      executionMode: "stable_surface",
+      actions: [
+        { type: "click", target: { resourceId: "com.example:id/menu" } },
+        { type: "click", target: { resourceId: "com.example:id/key", text: "One" } }
+      ]
+    });
+
+    expect(result.data.executionMode).toBe("stable_surface");
+    expect(result.data.completed).toBe(true);
+    expect(result.data.steps).toHaveLength(2);
+    expect(result.data.timing.mode).toBe("stable_surface");
+    expect(adb.taps).toEqual([
+      { x: 60, y: 50, displayId: 0 },
+      { x: 170, y: 50, displayId: 0 }
+    ]);
+    expect(adb.calls.listDevices - before.listDevices).toBe(1);
+    expect(adb.calls.getForeground - before.getForeground).toBe(2);
+    expect(adb.calls.getDisplay - before.getDisplay).toBe(2);
+    expect(adb.calls.dumpUiAutomatorXml - before.dumpUiAutomatorXml).toBe(2);
+    expect(adb.calls.captureScreenshot - before.captureScreenshot).toBe(1);
+    expect(adb.calls.tapBatch - before.tapBatch).toBe(1);
+    expect(order.slice(0, 4)).toEqual([
+      "audit:start:60",
+      "tap:60",
+      "audit:start:170",
+      "tap:170"
+    ]);
+  });
+
+  it("reports an unknown stable-surface transport prefix without replaying", async () => {
+    const adb = new FakeAdb();
+    adb.xml = SEQUENCE_XML;
+    const service = createService(adb);
+    const observed = await service.observe();
+    adb.failNextAction = new PhoneControlError(
+      "ADB_TIMEOUT",
+      "tap transport timed out",
+      { outcome: "unknown" }
+    );
+
+    const result = await service.executeSequence({
+      observationId: observed.data.observation.observationId,
+      executionMode: "stable_surface",
+      actions: [
+        { type: "click", target: { resourceId: "com.example:id/menu" } },
+        { type: "click", target: { resourceId: "com.example:id/key" } }
+      ]
+    });
+
+    expect(result.data.completed).toBe(false);
+    expect(result.data.completedSteps).toBe(0);
+    expect(result.data.steps[0]).toMatchObject({
+      status: "failed",
+      outcome: "unknown",
+      error: { code: "ADB_TIMEOUT" }
+    });
+    expect(adb.taps).toHaveLength(0);
+  });
+
+  it("rejects coordinate clicks when a sequence bypasses the MCP schema", async () => {
+    const adb = new FakeAdb();
+    const service = createService(adb);
+    const observed = await service.observe();
+
+    const result = await service.executeSequence({
+      observationId: observed.data.observation.observationId,
+      actions: [
+        { type: "click_coordinate", x: 10, y: 20 } as never
+      ]
+    });
+
+    expect(result.data.completed).toBe(false);
+    expect(result.data.steps[0]).toMatchObject({
+      status: "failed",
+      error: { code: "INVALID_ACTION" }
+    });
+    expect(adb.taps).toHaveLength(0);
   });
 
   it("returns a bounded wait timeout", async () => {

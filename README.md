@@ -60,6 +60,8 @@ The server writes JSON-RPC only to stdout. Startup diagnostics and recoverable t
 - `phone_close_app({ packageName?, displayId? })` terminates an active virtual display session.
 - `phone_observe({ displayId?, packageName?, includeScreenshot? })` captures UI Automator metadata and a native PNG from the target display. When `includeScreenshot` is true, the PNG is returned as MCP `image/png` content.
 - `phone_execute({ observationId, action })` executes exactly one action against the supplied observation, routing input directly to the observation's bound display.
+- `phone_execute_sequence({ observationId, actions, executionMode?, includeScreenshot? })` executes up to 32 typed actions in one MCP call. The default `validated` mode performs a fresh authorized capture at the start, reuses each post-action UI capture for the next immediate step, rechecks the foreground package between steps, and takes one final native screenshot. It still uniquely rematches semantic targets, computes fresh bounds from the latest captured UI, stops on the first failure, and returns per-step outcomes, timing phases, and a final observation. Sequence actions do not accept coordinate clicks. A click or element-scoped scroll may use an observation `elementRef` or an exact semantic `target` (`text`, `contentDescription`, `resourceId`, and/or `class`), which lets later steps address controls revealed by an earlier step.
+- `executionMode: "stable_surface"` is an explicit fast path for a bounded batch of clicks on one unchanged surface. The calling agent chooses it at its discretion whenever every click is uniquely resolvable, enabled, visible, bounded, and display-in-bounds from one fresh authorized capture, and earlier clicks cannot change the position or meaning of later targets. Keypads, keyboards, media controls, and button grids are examples, not an exhaustive workflow list. When later targets depend on intermediate UI changes—or when the agent is uncertain—it uses `validated`. The server validates the whole surface before calling the typed adapter tap batch, emits each cursor start event immediately before its corresponding physical tap, performs no intermediate UI observations, and always obtains an authorized final observation. It rejects typing, keypresses, scrolls, coordinate clicks, and other actions whose meaning may depend on intermediate state. A transport timeout reports the confirmed prefix and marks the uncertain step with `outcome: "unknown"`.
 - `phone_wait_for({ observationId, condition, timeoutMs? })` waits for a bounded condition on the bound display and returns a fresh observation when it matches.
 
 The public action contract is:
@@ -73,6 +75,21 @@ The public action contract is:
 ```
 
 `key` is one of `BACK`, `HOME`, `ENTER`, and `DELETE`. Wait conditions are `foreground_package`, `visible_text`, `visible_resource_id`, and `ui_tree_changed`. Every wait call supplies the baseline `observationId` separately from the condition.
+
+Sequence actions are bounded and semantic. Coordinates are intentionally not accepted in a sequence:
+
+```json
+{
+  "observationId": "obs_initial",
+  "actions": [
+    { "type": "click", "target": { "resourceId": "com.example:id/refresh_rate" } },
+    { "type": "click", "target": { "text": "120 Hz", "class": "android.widget.RadioButton" } },
+    { "type": "click", "target": { "resourceId": "com.example:id/apply", "text": "Apply" } }
+  ]
+}
+```
+
+The service never turns a sequence into a blind coordinate macro. `validated` mode skips only redundant observation work between immediately adjacent steps; it retains allowlist/foreground enforcement, semantic target rematching, fresh bounds, stale-state handling, and stop-on-failure. The sequence path also omits the 150 ms viewer-animation wait used by the single-action path; audit start records are still written before input dispatch. `stable_surface` intentionally omits intermediate captures only under its explicit unchanged-surface invariant and uses the fixed typed adapter boundary rather than exposing ADB or shell commands.
 
 ### Virtual Display Architecture
 

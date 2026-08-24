@@ -17,7 +17,13 @@ import {
   parseForegroundOutput,
   parsePngDimensions
 } from "./process-parsers.js";
-import type { FixedAdbAdapter, SwipeGesture } from "./adapter.js";
+import type {
+  FixedAdbAdapter,
+  SwipeGesture,
+  TapBatchHooks,
+  TapBatchResult,
+  TapPoint
+} from "./adapter.js";
 import { resolveAdbPath } from "./path.js";
 
 interface CompletedProcess {
@@ -320,6 +326,39 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
       String(y)
     ];
     await this.#runText(args);
+  }
+
+  public async tapBatch(
+    serial: string,
+    points: readonly TapPoint[],
+    displayId = 0,
+    hooks: TapBatchHooks = {}
+  ): Promise<TapBatchResult> {
+    let completed = 0;
+    try {
+      // Keep the operation behind the fixed adapter boundary. Android's
+      // `input` command accepts one tap per invocation, so the adapter owns
+      // the bounded transport loop while callers never provide shell args.
+      for (const [index, point] of points.entries()) {
+        await hooks.beforeTap?.(index, point);
+        await this.tap(serial, point.x, point.y, displayId);
+        completed += 1;
+      }
+      return { completed };
+    } catch (error) {
+      const normalized =
+        error instanceof PhoneControlError
+          ? error
+          : new PhoneControlError(
+              "ADB_COMMAND_FAILED",
+              "ADB could not complete the tap batch."
+            );
+      throw new PhoneControlError(normalized.code, normalized.message, {
+        ...normalized.details,
+        completedSteps: completed,
+        outcome: normalized.code === "ADB_TIMEOUT" ? "unknown" : "failed"
+      });
+    }
   }
 
   public async swipe(

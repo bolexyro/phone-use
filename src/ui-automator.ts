@@ -1,7 +1,12 @@
 import { randomBytes } from "node:crypto";
 
 import { PhoneControlError } from "./errors.js";
-import type { Bounds, UiElement, UiElementStates } from "./types.js";
+import type {
+  Bounds,
+  UiElement,
+  UiElementStates,
+  UiElementTarget
+} from "./types.js";
 import { hashText } from "./adb/process-parsers.js";
 
 type ElementRefFactory = () => string;
@@ -184,6 +189,40 @@ export function findUniqueElementMatch(
   );
   if (exact.length === 1) return exact[0];
   return undefined;
+}
+
+/**
+ * Resolve a server-owned semantic selector against one capture. Selectors are
+ * exact and must identify one bounded node; ambiguous selectors fail closed so
+ * they cannot become coordinate macros against an arbitrary matching control.
+ */
+export function findUniqueElementByTarget(
+  target: UiElementTarget,
+  elements: readonly UiElement[]
+): UiElement | undefined {
+  const fields = Object.entries(target).filter(
+    ([, value]) => typeof value === "string" && value.length > 0
+  );
+  if (fields.length === 0) return undefined;
+
+  const matches = elements.filter((element) => {
+    if (!element.bounds) return false;
+    return fields.every(([field, value]) => {
+      switch (field) {
+        case "text":
+          return element.text === value;
+        case "contentDescription":
+          return element.contentDescription === value;
+        case "resourceId":
+          return element.resourceId === value;
+        case "class":
+          return element.class === value;
+        default:
+          return false;
+      }
+    });
+  });
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function elementAncestorStructurePath(

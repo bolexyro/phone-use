@@ -1,5 +1,5 @@
 import { AdbProcessAdapter } from "./adb/process-adapter.js";
-import type { FixedAdbAdapter } from "./adb/adapter.js";
+import type { FixedAdbAdapter, TapBatchResult, TapPoint } from "./adb/adapter.js";
 import { selectDeviceFromEnvironment } from "./adb/device-selection.js";
 import { parsePngDimensions } from "./adb/process-parsers.js";
 import {
@@ -19,10 +19,16 @@ import {
   assertAllowedTarget,
   isAllowedPackage
 } from "./policy-guard.js";
-import { hashUiTree, parseUiAutomatorXml, boundsCenter } from "./ui-automator.js";
+import {
+  boundsCenter,
+  findUniqueElementByTarget,
+  hashUiTree,
+  parseUiAutomatorXml
+} from "./ui-automator.js";
 import { loadPolicy } from "./config.js";
 import { resolve } from "node:path";
 import { VirtualDisplayManager } from "./virtual-display.js";
+import { MAX_SEQUENCE_ACTIONS } from "./types.js";
 import type {
   ActionData,
   AllowedAppsData,
@@ -35,11 +41,19 @@ import type {
   OpenAppOptions,
   PhoneAction,
   PhoneExecuteRequest,
+  PhoneExecuteSequenceRequest,
+  PhoneSequenceAction,
   PhoneStatusData,
   PolicyProfile,
   PointerEvent,
+  SequenceData,
+  SequenceExecutionMode,
+  SequenceStepTiming,
+  SequenceStepOutcome,
+  SequenceTiming,
   ToolSuccessResult,
   UiElement,
+  UiElementTarget,
   WaitCondition,
   WaitOptions
 } from "./types.js";
@@ -53,6 +67,23 @@ export interface PhoneControlServiceOptions {
   auditLogger?: ActionAuditLogger;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
+}
+
+interface CaptureOptions {
+  includeScreenshot?: boolean;
+  fallback?: Observation | ObservationCapture;
+}
+
+interface PreparedSequenceAction {
+  action: PhoneAction;
+  target?: UiElement;
+}
+
+interface SequenceActionExecution {
+  result: ToolSuccessResult<ActionData>;
+  capture: ObservationCapture;
+  dispatchMs: number;
+  observationMs: number;
 }
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
@@ -71,6 +102,10 @@ function defaultSleep(milliseconds: number): Promise<void> {
 
 function isTimeout(error: unknown): boolean {
   return error instanceof PhoneControlError && error.code === "ADB_TIMEOUT";
+}
+
+function elapsedMilliseconds(start: number): number {
+  return Math.round(Math.max(0, performance.now() - start) * 100) / 100;
 }
 
 export class PhoneControlService {
@@ -279,92 +314,536 @@ export class PhoneControlService {
     const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
     const observation = this.#observations.require(request.observationId);
-    const displayId = observation.binding.displayId ?? 0;
+    return this.#executeAction(policy, device, observation, request.action);
+  }
 
-    assertAllowedForeground(
-      policy,
-      await this.#adb.getForeground(device.serial, displayId)
-    );
-
-    const current = await this.#capture(device.serial, displayId);
-    const targetRef =
-      request.action.type === "click"
-        ? request.action.elementRef
-        : request.action.type === "scroll"
-          ? request.action.elementRef
-          : undefined;
-    const comparison = targetRef
-      ? this.#observations.compareElementAction(observation, current, targetRef)
-      : this.#observations.compare(observation, current);
-    if (!comparison.matches) {
-      this.#observations.invalidate(request.observationId);
+  /**
+   * Execute several typed actions without returning to the model between
+   * steps. The default path keeps semantic rematching and foreground checks,
+   * but reuses each post-action UI capture as the next immediate starting
+   * state. Only a cheap foreground check is repeated between steps; screenshots
+   * are captured for the final observation rather than every intermediate
+   * result. The single-action path is intentionally unchanged.
+   */
+  public async executeSequence(
+    request: PhoneExecuteSequenceRequest
+  ): Promise<ToolSuccessResult<SequenceData>> {
+    if (
+      request.actions.length < 1 ||
+      request.actions.length > MAX_SEQUENCE_ACTIONS
+    ) {
       throw new PhoneControlError(
-        "STALE_OBSERVATION",
-        "The screen changed since the observation was captured; refresh before acting.",
-        { observationId: request.observationId, changed: comparison.changed }
+        "INVALID_ACTION",
+        `A sequence must contain between 1 and ${MAX_SEQUENCE_ACTIONS} actions.`,
+        { actionCount: request.actions.length, maxActions: MAX_SEQUENCE_ACTIONS }
       );
     }
 
-    // Every action attempt consumes its observation, including a rejected action.
-    this.#observations.invalidate(request.observationId);
-    const resolved = this.#resolveAction(
-      request.action,
-      observation,
-      current,
-      "target" in comparison
-        ? (comparison as { target?: UiElement }).target
-        : undefined
-    );
-    const auditBase = {
-      at: resolved.pointerEvent?.timestamp ?? this.#now(),
-      serial: device.serial,
-      packageName: current.packageName,
-      action: sanitizeAction(
-        request.action,
-        resolved.pointerEvent && resolved.pointerEvent.action === "click"
-          ? resolved.pointerEvent
-          : undefined
-      ),
-      ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {})
-    } satisfies Omit<AuditLogEntry, "outcome">;
-
-    if (resolved.pointerEvent) {
-      await this.#appendAudit({
-        ...auditBase,
-        outcome: "pending",
-        phase: "start"
-      });
-      await this.#sleep(POINTER_START_DELAY_MS);
+    const executionMode: SequenceExecutionMode =
+      request.executionMode ?? "validated";
+    if (executionMode === "stable_surface") {
+      return this.#executeStableSurfaceSequence(request);
     }
+    return this.#executeValidatedSequence(request);
+  }
+
+  async #executeValidatedSequence(
+    request: PhoneExecuteSequenceRequest
+  ): Promise<ToolSuccessResult<SequenceData>> {
+    const sequenceStarted = performance.now();
+    const policy = this.#getPolicy();
+    const device = await this.#selectedDevice();
+    const reference = this.#observations.require(request.observationId);
+    const displayId = reference.binding.displayId ?? 0;
+    const steps: SequenceStepOutcome[] = [];
+    const timings: SequenceStepTiming[] = [];
+    let baseline = reference;
+    let finalObservation = this.#observations.summary(reference);
+    let currentCapture: ObservationCapture | undefined;
+    let initialCaptureMs = 0;
+    let finalCaptureMs = 0;
+
+    const initialStarted = performance.now();
+    try {
+      // The initial capture is fresh for foreground, display, and UI metadata.
+      // Reuse the supplied screenshot bytes because it is not returned for an
+      // intermediate sequence result; the final step gets a native screenshot.
+      currentCapture = await this.#capture(device.serial, displayId, {
+        includeScreenshot: false,
+        fallback: reference
+      });
+      assertAllowedForeground(policy, currentCapture);
+      initialCaptureMs = elapsedMilliseconds(initialStarted);
+    } catch (error) {
+      initialCaptureMs = elapsedMilliseconds(initialStarted);
+      const normalized = asPhoneControlError(error);
+      this.#observations.invalidate(baseline.observationId);
+      const recoveryStarted = performance.now();
+      const recovered = await this.#recoverSequenceObservation(
+        policy,
+        device,
+        baseline
+      );
+      finalCaptureMs = elapsedMilliseconds(recoveryStarted);
+      if (recovered) finalObservation = recovered;
+      steps.push(this.#sequenceFailure(0, request.actions[0], normalized));
+      return this.#sequenceResult(
+        request,
+        "validated",
+        steps,
+        finalObservation,
+        timings,
+        initialCaptureMs,
+        finalCaptureMs,
+        sequenceStarted
+      );
+    }
+
+    for (const [index, sequenceAction] of request.actions.entries()) {
+      const stepStarted = performance.now();
+      const preflightStarted = performance.now();
+      try {
+        if (!currentCapture) {
+          throw new PhoneControlError(
+            "INTERNAL_ERROR",
+            "The sequence has no current observation state."
+          );
+        }
+        if (index > 0) {
+          // The previous post-action capture was authorized immediately before
+          // this step. Recheck only foreground here to catch app takeovers
+          // without repeating the expensive UI dump and screenshot.
+          const foreground = await this.#adb.getForeground(
+            device.serial,
+            displayId
+          );
+          assertAllowedForeground(policy, foreground);
+          if (
+            foreground.packageName !== baseline.binding.packageName ||
+            foreground.activity !== baseline.binding.activity
+          ) {
+            throw new PhoneControlError(
+              "STALE_OBSERVATION",
+              "The foreground activity changed between sequence steps; refresh before acting.",
+              {
+                observationId: baseline.observationId,
+                baselinePackage: baseline.binding.packageName,
+                currentPackage: foreground.packageName,
+                baselineActivity: baseline.binding.activity,
+                currentActivity: foreground.activity
+              }
+            );
+          }
+        }
+
+        const prepared = this.#prepareSequenceAction(
+          sequenceAction,
+          baseline,
+          currentCapture
+        );
+        const preflightMs = elapsedMilliseconds(preflightStarted);
+        this.#observations.invalidate(baseline.observationId);
+
+        const execution = await this.#executeSequenceAction(
+          policy,
+          device,
+          baseline,
+          currentCapture,
+          prepared,
+          index === request.actions.length - 1
+        );
+        const dispatchMs = execution.dispatchMs;
+        const observationMs = execution.observationMs;
+        const stepTiming: SequenceStepTiming = {
+          index,
+          preflightMs,
+          dispatchMs,
+          observationMs: Math.max(0, observationMs),
+          totalMs: elapsedMilliseconds(stepStarted)
+        };
+        timings.push(stepTiming);
+        if (index === request.actions.length - 1) {
+          finalCaptureMs = stepTiming.observationMs;
+        }
+        steps.push({
+          index,
+          status: "success",
+          action: sequenceAction.type,
+          ...(execution.result.data.textLength !== undefined
+            ? { textLength: execution.result.data.textLength }
+            : {}),
+          ...(execution.result.data.pointerEvent
+            ? { pointerEvent: execution.result.data.pointerEvent }
+            : {}),
+          observation: execution.result.data.observation
+        });
+        finalObservation = execution.result.data.observation;
+        baseline = this.#observations.require(
+          execution.result.data.observation.observationId
+        );
+        currentCapture = execution.capture;
+      } catch (error) {
+        const normalized = asPhoneControlError(error);
+        const preflightMs = elapsedMilliseconds(preflightStarted);
+        const recoveryStarted = performance.now();
+        this.#observations.invalidate(baseline.observationId);
+        const recovered = await this.#recoverSequenceObservation(
+          policy,
+          device,
+          baseline
+        );
+        const recoveryMs = elapsedMilliseconds(recoveryStarted);
+        finalCaptureMs = Math.max(finalCaptureMs, recoveryMs);
+        if (recovered) finalObservation = recovered;
+        timings.push({
+          index,
+          preflightMs,
+          dispatchMs: 0,
+          observationMs: recoveryMs,
+          totalMs: elapsedMilliseconds(stepStarted)
+        });
+        steps.push(this.#sequenceFailure(index, sequenceAction, normalized));
+        break;
+      }
+    }
+
+    return this.#sequenceResult(
+      request,
+      "validated",
+      steps,
+      finalObservation,
+      timings,
+      initialCaptureMs,
+      finalCaptureMs,
+      sequenceStarted
+    );
+  }
+
+  async #executeStableSurfaceSequence(
+    request: PhoneExecuteSequenceRequest
+  ): Promise<ToolSuccessResult<SequenceData>> {
+    const sequenceStarted = performance.now();
+    const policy = this.#getPolicy();
+    const device = await this.#selectedDevice();
+    const reference = this.#observations.require(request.observationId);
+    const displayId = reference.binding.displayId ?? 0;
+    const steps: SequenceStepOutcome[] = [];
+    const timings: SequenceStepTiming[] = [];
+    let finalObservation = this.#observations.summary(reference);
+    let initialCaptureMs = 0;
+    let finalCaptureMs = 0;
+    const initialStarted = performance.now();
+    let surface: ObservationCapture;
 
     try {
-      await resolved.perform();
-    } catch (error) {
-      const normalized = asPhoneControlError(error);
-      await this.#appendAudit({
-        ...auditBase,
-        phase: "result",
-        outcome: isTimeout(normalized) ? "unknown" : "failed",
-        errorCode: normalized.code
+      surface = await this.#capture(device.serial, displayId, {
+        includeScreenshot: false,
+        fallback: reference
       });
-      throw normalized;
+      assertAllowedForeground(policy, surface);
+      const comparison = this.#observations.compare(reference, surface);
+      if (!comparison.matches) {
+        throw new PhoneControlError(
+          "STALE_OBSERVATION",
+          "The stable-surface observation changed before dispatch; refresh before acting.",
+          { observationId: reference.observationId, changed: comparison.changed }
+        );
+      }
+      initialCaptureMs = elapsedMilliseconds(initialStarted);
+    } catch (error) {
+      initialCaptureMs = elapsedMilliseconds(initialStarted);
+      const normalized = asPhoneControlError(error);
+      this.#observations.invalidate(reference.observationId);
+      const recoveryStarted = performance.now();
+      const recovered = await this.#recoverSequenceObservation(
+        policy,
+        device,
+        reference
+      );
+      finalCaptureMs = elapsedMilliseconds(recoveryStarted);
+      if (recovered) finalObservation = recovered;
+      steps.push(this.#sequenceFailure(0, request.actions[0], normalized));
+      return this.#sequenceResult(
+        request,
+        "stable_surface",
+        steps,
+        finalObservation,
+        timings,
+        initialCaptureMs,
+        finalCaptureMs,
+        sequenceStarted
+      );
     }
 
-    await this.#appendAudit({ ...auditBase, phase: "result", outcome: "success" });
-    const after = await this.#capture(device.serial, displayId);
-    assertAllowedForeground(policy, after);
-    const freshObservation = this.#observations.create(after);
-    return {
-      ok: true,
-      data: {
-        action: request.action.type,
-        ...(request.action.type === "type"
-          ? { textLength: request.action.text.length }
-          : {}),
-        ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {}),
-        observation: this.#observations.summary(freshObservation)
+    const prepared: Array<{
+      action: PhoneAction;
+      target: UiElement;
+      pointerEvent: PointerEvent;
+      point: TapPoint;
+    }> = [];
+    const preparationStarted = performance.now();
+    let preparationFailedIndex = 0;
+    try {
+      for (const [index, sequenceAction] of request.actions.entries()) {
+        preparationFailedIndex = index;
+        if (sequenceAction.type !== "click") {
+          throw new PhoneControlError(
+            "INVALID_ACTION",
+            "stable_surface accepts click actions only; actions requiring intermediate state use validated mode.",
+            { actionType: sequenceAction.type }
+          );
+        }
+        const action = this.#prepareStableSurfaceClick(
+          sequenceAction,
+          reference,
+          surface
+        );
+        const resolved = this.#resolveAction(
+          action.action,
+          reference,
+          surface,
+          action.target
+        );
+        if (!resolved.pointerEvent || resolved.pointerEvent.action !== "click") {
+          throw new PhoneControlError(
+            "INTERNAL_ERROR",
+            "The stable-surface click did not produce a pointer event."
+          );
+        }
+        prepared.push({
+          action: action.action,
+          target: action.target,
+          pointerEvent: resolved.pointerEvent,
+          point: { x: resolved.pointerEvent.x, y: resolved.pointerEvent.y }
+        });
       }
-    };
+    } catch (error) {
+      const normalized = asPhoneControlError(error);
+      this.#observations.invalidate(reference.observationId);
+      const recoveryStarted = performance.now();
+      const recovered = await this.#recoverSequenceObservation(
+        policy,
+        device,
+        reference
+      );
+      finalCaptureMs = elapsedMilliseconds(recoveryStarted);
+      if (recovered) finalObservation = recovered;
+      steps.push(
+        this.#sequenceFailure(
+          preparationFailedIndex,
+          request.actions[preparationFailedIndex],
+          normalized
+        )
+      );
+      timings.push({
+        index: preparationFailedIndex,
+        preflightMs: elapsedMilliseconds(preparationStarted),
+        dispatchMs: 0,
+        observationMs: finalCaptureMs,
+        totalMs: elapsedMilliseconds(preparationStarted)
+      });
+      return this.#sequenceResult(
+        request,
+        "stable_surface",
+        steps,
+        finalObservation,
+        timings,
+        initialCaptureMs,
+        finalCaptureMs,
+        sequenceStarted
+      );
+    }
+
+    this.#observations.invalidate(reference.observationId);
+    const dispatchStarted = performance.now();
+    let batchResult: TapBatchResult;
+    try {
+      batchResult = await this.#adb.tapBatch(
+        device.serial,
+        prepared.map((item) => item.point),
+        displayId,
+        {
+          beforeTap: async (index) => {
+            const item = prepared[index];
+            item.pointerEvent = {
+              ...item.pointerEvent,
+              timestamp: this.#now()
+            };
+            await this.#appendAudit({
+              at: item.pointerEvent.timestamp,
+              serial: device.serial,
+              packageName: surface.packageName,
+              action: sanitizeAction(
+                item.action,
+                this.#pointerCoordinates(item.pointerEvent)
+              ),
+              pointerEvent: item.pointerEvent,
+              outcome: "pending",
+              phase: "start"
+            });
+          }
+        }
+      );
+      if (batchResult.completed !== prepared.length) {
+        throw new PhoneControlError(
+          "ADB_COMMAND_FAILED",
+          "The tap batch reported an incomplete transport result.",
+          { completedSteps: batchResult.completed, outcome: "failed" }
+        );
+      }
+    } catch (error) {
+      const normalized = asPhoneControlError(error);
+      const completed = this.#completedBatchSteps(normalized, prepared.length);
+      const unknown = isTimeout(normalized) || normalized.details.outcome === "unknown";
+      const recoveryStarted = performance.now();
+      const recovered = await this.#recoverSequenceObservation(
+        policy,
+        device,
+        reference
+      );
+      finalCaptureMs = elapsedMilliseconds(recoveryStarted);
+      if (recovered) finalObservation = recovered;
+      for (let index = 0; index < completed; index += 1) {
+        await this.#appendAudit({
+          at: prepared[index].pointerEvent.timestamp,
+          serial: device.serial,
+          packageName: surface.packageName,
+          action: sanitizeAction(
+            prepared[index].action,
+            this.#pointerCoordinates(prepared[index].pointerEvent)
+          ),
+          pointerEvent: prepared[index].pointerEvent,
+          outcome: "success",
+          phase: "result"
+        });
+        steps.push({
+          index,
+          status: "success",
+          action: request.actions[index].type,
+          observation: finalObservation
+        });
+      }
+      const failedIndex = Math.min(completed, prepared.length - 1);
+      const failure = this.#sequenceFailure(
+        failedIndex,
+        request.actions[failedIndex],
+        new PhoneControlError(normalized.code, normalized.message, {
+          ...normalized.details,
+          completedSteps: completed,
+          outcome: unknown ? "unknown" : "failed"
+        })
+      );
+      await this.#appendAudit({
+        at: prepared[failedIndex].pointerEvent.timestamp,
+        serial: device.serial,
+        packageName: surface.packageName,
+        action: sanitizeAction(
+          prepared[failedIndex].action,
+          this.#pointerCoordinates(prepared[failedIndex].pointerEvent)
+        ),
+        pointerEvent: prepared[failedIndex].pointerEvent,
+        outcome: unknown ? "unknown" : "failed",
+        phase: "result",
+        errorCode: normalized.code
+      });
+      steps.push(failure);
+      timings.push({
+        index: failedIndex,
+        preflightMs: elapsedMilliseconds(preparationStarted),
+        dispatchMs: elapsedMilliseconds(dispatchStarted),
+        observationMs: finalCaptureMs,
+        totalMs: elapsedMilliseconds(sequenceStarted)
+      });
+      return this.#sequenceResult(
+        request,
+        "stable_surface",
+        steps,
+        finalObservation,
+        timings,
+        initialCaptureMs,
+        finalCaptureMs,
+        sequenceStarted
+      );
+    }
+
+    for (let index = 0; index < prepared.length; index += 1) {
+      const item = prepared[index];
+      await this.#appendAudit({
+        at: item.pointerEvent.timestamp,
+        serial: device.serial,
+        packageName: surface.packageName,
+        action: sanitizeAction(
+          item.action,
+          this.#pointerCoordinates(item.pointerEvent)
+        ),
+        pointerEvent: item.pointerEvent,
+        outcome: "success",
+        phase: "result"
+      });
+    }
+
+    const finalCaptureStarted = performance.now();
+    try {
+      const after = await this.#capture(device.serial, displayId);
+      assertAllowedForeground(policy, after);
+      const observation = this.#observations.create(after);
+      finalObservation = this.#observations.summary(observation);
+      finalCaptureMs = elapsedMilliseconds(finalCaptureStarted);
+      const dispatchMs = elapsedMilliseconds(dispatchStarted);
+      for (let index = 0; index < prepared.length; index += 1) {
+        steps.push({
+          index,
+          status: "success",
+          action: request.actions[index].type,
+          pointerEvent: prepared[index].pointerEvent,
+          observation: finalObservation
+        });
+        timings.push({
+          index,
+          preflightMs: elapsedMilliseconds(preparationStarted),
+          dispatchMs,
+          observationMs: finalCaptureMs,
+          totalMs: elapsedMilliseconds(sequenceStarted)
+        });
+      }
+    } catch (error) {
+      const normalized = asPhoneControlError(error);
+      finalCaptureMs = elapsedMilliseconds(finalCaptureStarted);
+      const recoveryStarted = performance.now();
+      const recovered = await this.#recoverSequenceObservation(
+        policy,
+        device,
+        reference
+      );
+      finalCaptureMs += elapsedMilliseconds(recoveryStarted);
+      if (recovered) finalObservation = recovered;
+      const failedIndex = prepared.length - 1;
+      steps.push(
+        this.#sequenceFailure(
+          failedIndex,
+          request.actions[failedIndex],
+          normalized
+        )
+      );
+      timings.push({
+        index: failedIndex,
+        preflightMs: elapsedMilliseconds(preparationStarted),
+        dispatchMs: elapsedMilliseconds(dispatchStarted),
+        observationMs: finalCaptureMs,
+        totalMs: elapsedMilliseconds(sequenceStarted)
+      });
+    }
+
+    return this.#sequenceResult(
+      request,
+      "stable_surface",
+      steps,
+      finalObservation,
+      timings,
+      initialCaptureMs,
+      finalCaptureMs,
+      sequenceStarted
+    );
   }
 
   public async waitFor(
@@ -464,6 +943,431 @@ export class PhoneControlService {
     };
   }
 
+  async #recoverSequenceObservation(
+    policy: PolicyProfile,
+    device: DeviceInfo,
+    baseline: Observation
+  ): Promise<ReturnType<ObservationStore["summary"]> | undefined> {
+    try {
+      const capture = await this.#capture(
+        device.serial,
+        baseline.binding.displayId ?? 0
+      );
+      assertAllowedForeground(policy, capture);
+      const observation = this.#observations.create(capture);
+      return this.#observations.summary(observation);
+    } catch {
+      // A denied foreground or a disconnected device must not be turned into
+      // an apparently safe observation. The sequence result still reports the
+      // last known summary in that case.
+      return undefined;
+    }
+  }
+
+  #prepareSequenceAction(
+    sequenceAction: PhoneSequenceAction,
+    baseline: Observation,
+    current: ObservationCapture
+  ): PreparedSequenceAction {
+    const stale = (changed: readonly string[]): never => {
+      throw new PhoneControlError(
+        "STALE_OBSERVATION",
+        "The screen changed between sequence steps; refresh before acting.",
+        { observationId: baseline.observationId, changed }
+      );
+    };
+
+    const resolveTarget = (target: UiElementTarget): UiElement => {
+      const hardChanged = this.#observations
+        .compare(baseline, current)
+        .changed.filter((field) => field !== "uiHash");
+      if (hardChanged.length > 0) stale(hardChanged);
+      const resolved = findUniqueElementByTarget(target, current.elements);
+      if (!resolved) {
+        throw new PhoneControlError(
+          "STALE_OBSERVATION",
+          "The semantic sequence target is not uniquely present in the current UI.",
+          { target }
+        );
+      }
+      this.#assertSequenceTargetActionable(resolved);
+      return resolved;
+    };
+
+    const resolveRef = (elementRef: string): UiElement => {
+      const comparison = this.#observations.compareElementAction(
+        baseline,
+        current,
+        elementRef
+      );
+      const target = comparison.target;
+      if (!comparison.matches) stale(comparison.changed);
+      if (!target) {
+        throw new PhoneControlError(
+          "STALE_OBSERVATION",
+          "The sequence target could not be rematched in the current UI.",
+          { elementRef }
+        );
+      }
+      this.#assertSequenceTargetActionable(target);
+      return target;
+    };
+
+    const requireUnchanged = (): void => {
+      const comparison = this.#observations.compare(baseline, current);
+      if (!comparison.matches) stale(comparison.changed);
+    };
+
+    if (sequenceAction.type === "click") {
+      const target =
+        "target" in sequenceAction
+          ? resolveTarget(sequenceAction.target)
+          : resolveRef(sequenceAction.elementRef);
+      return {
+        action: { type: "click", elementRef: target.elementRef },
+        target
+      };
+    }
+
+    if (sequenceAction.type === "scroll") {
+      if ("target" in sequenceAction) {
+        const target = resolveTarget(sequenceAction.target);
+        return {
+          action: {
+            type: "scroll",
+            direction: sequenceAction.direction,
+            amount: sequenceAction.amount,
+            elementRef: target.elementRef
+          },
+          target
+        };
+      }
+      if (sequenceAction.elementRef) {
+        const target = resolveRef(sequenceAction.elementRef);
+        return {
+          action: {
+            type: "scroll",
+            direction: sequenceAction.direction,
+            amount: sequenceAction.amount,
+            elementRef: target.elementRef
+          },
+          target
+        };
+      }
+      requireUnchanged();
+      return {
+        action: {
+          type: "scroll",
+          direction: sequenceAction.direction,
+          amount: sequenceAction.amount
+        }
+      };
+    }
+
+    requireUnchanged();
+    if (sequenceAction.type === "type") {
+      return { action: { type: "type", text: sequenceAction.text } };
+    }
+    if (sequenceAction.type === "keypress") {
+      return { action: { type: "keypress", key: sequenceAction.key } };
+    }
+    throw new PhoneControlError(
+      "INVALID_ACTION",
+      "Coordinate clicks are not allowed in an action sequence."
+    );
+  }
+
+  #prepareStableSurfaceClick(
+    sequenceAction: Extract<PhoneSequenceAction, { type: "click" }>,
+    reference: Observation,
+    surface: ObservationCapture
+  ): { action: PhoneAction; target: UiElement } {
+    const target =
+      "target" in sequenceAction
+        ? findUniqueElementByTarget(sequenceAction.target, surface.elements)
+        : this.#observations.compareElementAction(
+              reference,
+              surface,
+              sequenceAction.elementRef
+            ).target;
+    if (!target) {
+      throw new PhoneControlError(
+        "STALE_OBSERVATION",
+        "The stable-surface click target is not uniquely present in the authorized surface.",
+        {
+          ...( "target" in sequenceAction
+            ? { target: sequenceAction.target }
+            : { elementRef: sequenceAction.elementRef })
+        }
+      );
+    }
+    this.#assertSequenceTargetActionable(target);
+    return { action: { type: "click", elementRef: target.elementRef }, target };
+  }
+
+  #assertSequenceTargetActionable(element: UiElement): void {
+    if (
+      element.states.enabled === false ||
+      element.states["visibleToUser"] === false
+    ) {
+      throw new PhoneControlError(
+        "STALE_OBSERVATION",
+        "The sequence target is no longer actionable.",
+        { elementRef: element.elementRef }
+      );
+    }
+    if (!element.bounds) {
+      throw new PhoneControlError(
+        "ELEMENT_NO_BOUNDS",
+        "The sequence target has no usable bounds.",
+        { elementRef: element.elementRef }
+      );
+    }
+  }
+
+  async #executeSequenceAction(
+    policy: PolicyProfile,
+    device: DeviceInfo,
+    observation: Observation,
+    current: ObservationCapture,
+    prepared: PreparedSequenceAction,
+    includeScreenshot: boolean
+  ): Promise<SequenceActionExecution> {
+    const resolved = this.#resolveAction(
+      prepared.action,
+      observation,
+      current,
+      prepared.target
+    );
+    const auditBase = {
+      at: resolved.pointerEvent?.timestamp ?? this.#now(),
+      serial: device.serial,
+      packageName: current.packageName,
+      action: sanitizeAction(
+        prepared.action,
+        resolved.pointerEvent && resolved.pointerEvent.action === "click"
+          ? resolved.pointerEvent
+          : undefined
+      ),
+      ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {})
+    } satisfies Omit<AuditLogEntry, "outcome">;
+
+    if (resolved.pointerEvent) {
+      // The 150 ms viewer animation delay is intentionally omitted for a
+      // sequence. The audit start record is still emitted before transport,
+      // and the normal single-action path retains its existing delay.
+      await this.#appendAudit({
+        ...auditBase,
+        outcome: "pending",
+        phase: "start"
+      });
+    }
+
+    const dispatchStarted = performance.now();
+    try {
+      await resolved.perform();
+    } catch (error) {
+      const normalized = asPhoneControlError(error);
+      await this.#appendAudit({
+        ...auditBase,
+        phase: "result",
+        outcome: isTimeout(normalized) ? "unknown" : "failed",
+        errorCode: normalized.code
+      });
+      throw normalized;
+    }
+    const dispatchMs = elapsedMilliseconds(dispatchStarted);
+
+    await this.#appendAudit({ ...auditBase, phase: "result", outcome: "success" });
+    const observationStarted = performance.now();
+    const after = await this.#capture(device.serial, current.displayId ?? 0, {
+      includeScreenshot,
+      fallback: observation
+    });
+    const observationMs = elapsedMilliseconds(observationStarted);
+    assertAllowedForeground(policy, after);
+    const freshObservation = this.#observations.create(after);
+    return {
+      capture: after,
+      dispatchMs,
+      observationMs,
+      result: {
+        ok: true,
+        data: {
+          action: prepared.action.type,
+          ...(prepared.action.type === "type"
+            ? { textLength: prepared.action.text.length }
+            : {}),
+          ...(resolved.pointerEvent
+            ? { pointerEvent: resolved.pointerEvent }
+            : {}),
+          observation: this.#observations.summary(freshObservation)
+        }
+      }
+    };
+  }
+
+  #completedBatchSteps(error: PhoneControlError, max: number): number {
+    const value = error.details.completedSteps;
+    if (typeof value !== "number" || !Number.isInteger(value)) return 0;
+    return Math.min(max, Math.max(0, value));
+  }
+
+  #pointerCoordinates(
+    pointerEvent: PointerEvent
+  ): { x: number; y: number } | undefined {
+    return pointerEvent.action === "click"
+      ? { x: pointerEvent.x, y: pointerEvent.y }
+      : undefined;
+  }
+
+  #sequenceFailure(
+    index: number,
+    action: PhoneSequenceAction,
+    error: PhoneControlError
+  ): SequenceStepOutcome {
+    const unknown = isTimeout(error) || error.details.outcome === "unknown";
+    return {
+      index,
+      status: "failed",
+      action: action.type,
+      ...(unknown ? { outcome: "unknown" as const } : { outcome: "failed" as const }),
+      error: {
+        code: error.code,
+        message: error.message,
+        details: error.details
+      }
+    };
+  }
+
+  #sequenceResult(
+    request: PhoneExecuteSequenceRequest,
+    mode: SequenceExecutionMode,
+    steps: readonly SequenceStepOutcome[],
+    finalObservation: ReturnType<ObservationStore["summary"]>,
+    timings: readonly SequenceStepTiming[],
+    initialCaptureMs: number,
+    finalCaptureMs: number,
+    started: number
+  ): ToolSuccessResult<SequenceData> {
+    const timing: SequenceTiming = {
+      mode,
+      initialCaptureMs,
+      finalCaptureMs,
+      totalMs: elapsedMilliseconds(started),
+      steps: timings
+    };
+    return {
+      ok: true,
+      data: {
+        executionMode: mode,
+        completed:
+          steps.length === request.actions.length &&
+          steps.every((step) => step.status === "success"),
+        requestedSteps: request.actions.length,
+        completedSteps: steps.filter((step) => step.status === "success").length,
+        steps,
+        finalObservation,
+        timing
+      }
+    };
+  }
+
+  async #executeAction(
+    policy: PolicyProfile,
+    device: DeviceInfo,
+    observation: Observation,
+    action: PhoneAction
+  ): Promise<ToolSuccessResult<ActionData>> {
+    const displayId = observation.binding.displayId ?? 0;
+
+    assertAllowedForeground(
+      policy,
+      await this.#adb.getForeground(device.serial, displayId)
+    );
+
+    const current = await this.#capture(device.serial, displayId);
+    const targetRef =
+      action.type === "click"
+        ? action.elementRef
+        : action.type === "scroll"
+          ? action.elementRef
+          : undefined;
+    const comparison = targetRef
+      ? this.#observations.compareElementAction(observation, current, targetRef)
+      : this.#observations.compare(observation, current);
+    if (!comparison.matches) {
+      this.#observations.invalidate(observation.observationId);
+      throw new PhoneControlError(
+        "STALE_OBSERVATION",
+        "The screen changed since the observation was captured; refresh before acting.",
+        { observationId: observation.observationId, changed: comparison.changed }
+      );
+    }
+
+    // Every action attempt consumes its observation, including a rejected
+    // action. Sequence callers rely on this just as single-action callers do.
+    this.#observations.invalidate(observation.observationId);
+    const resolved = this.#resolveAction(
+      action,
+      observation,
+      current,
+      "target" in comparison
+        ? (comparison as { target?: UiElement }).target
+        : undefined
+    );
+    const auditBase = {
+      at: resolved.pointerEvent?.timestamp ?? this.#now(),
+      serial: device.serial,
+      packageName: current.packageName,
+      action: sanitizeAction(
+        action,
+        resolved.pointerEvent && resolved.pointerEvent.action === "click"
+          ? resolved.pointerEvent
+          : undefined
+      ),
+      ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {})
+    } satisfies Omit<AuditLogEntry, "outcome">;
+
+    if (resolved.pointerEvent) {
+      await this.#appendAudit({
+        ...auditBase,
+        outcome: "pending",
+        phase: "start"
+      });
+      await this.#sleep(POINTER_START_DELAY_MS);
+    }
+
+    try {
+      await resolved.perform();
+    } catch (error) {
+      const normalized = asPhoneControlError(error);
+      await this.#appendAudit({
+        ...auditBase,
+        phase: "result",
+        outcome: isTimeout(normalized) ? "unknown" : "failed",
+        errorCode: normalized.code
+      });
+      throw normalized;
+    }
+
+    await this.#appendAudit({ ...auditBase, phase: "result", outcome: "success" });
+    const after = await this.#capture(device.serial, displayId);
+    assertAllowedForeground(policy, after);
+    const freshObservation = this.#observations.create(after);
+    return {
+      ok: true,
+      data: {
+        action: action.type,
+        ...(action.type === "type"
+          ? { textLength: action.text.length }
+          : {}),
+        ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {}),
+        observation: this.#observations.summary(freshObservation)
+      }
+    };
+  }
+
   async #selectedDevice(): Promise<DeviceInfo> {
     return selectDeviceFromEnvironment(
       await this.#adb.listDevices(),
@@ -471,16 +1375,44 @@ export class PhoneControlService {
     );
   }
 
-  async #capture(serial: string, displayId = 0): Promise<ObservationCapture> {
+  async #capture(
+    serial: string,
+    displayId = 0,
+    options: CaptureOptions = {}
+  ): Promise<ObservationCapture> {
     try {
+      const includeScreenshot = options.includeScreenshot !== false;
+      const fallback = options.fallback;
+      if (!includeScreenshot && !fallback) {
+        throw new PhoneControlError(
+          "INTERNAL_ERROR",
+          "An intermediate capture requires a screenshot fallback."
+        );
+      }
       const [foreground, display, xml, screenshot] = await Promise.all([
         this.#adb.getForeground(serial, displayId),
         this.#adb.getDisplay(serial, displayId),
         this.#adb.dumpUiAutomatorXml(serial, displayId).catch(() => null),
-        this.#adb.captureScreenshot(serial, displayId)
+        includeScreenshot
+          ? this.#adb.captureScreenshot(serial, displayId)
+          : Promise.resolve<Uint8Array | undefined>(undefined)
       ]);
       const elements = xml ? parseUiAutomatorXml(xml) : [];
-      const screenshotDimensions = parsePngDimensions(screenshot);
+      const fallbackScreenshotDimensions = fallback
+        ? "binding" in fallback
+          ? fallback.binding.screenshotDimensions
+          : fallback.screenshotDimensions
+        : undefined;
+      const screenshotBytes = screenshot ?? fallback?.screenshot;
+      if (!screenshotBytes || !fallbackScreenshotDimensions && !screenshot) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          "The Android screen screenshot could not be retained for the observation."
+        );
+      }
+      const screenshotDimensions = screenshot
+        ? parsePngDimensions(screenshot)
+        : fallbackScreenshotDimensions!;
       return {
         serial,
         displayId,
@@ -492,7 +1424,7 @@ export class PhoneControlService {
         screenshotDimensions,
         observedAt: this.#now(),
         elements,
-        screenshot: Uint8Array.from(screenshot)
+        screenshot: Uint8Array.from(screenshotBytes)
       };
     } catch (error) {
       const normalized = asPhoneControlError(error, "OBSERVATION_FAILED");

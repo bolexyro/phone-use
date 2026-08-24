@@ -13,6 +13,22 @@ export interface SwipeGesture {
   durationMs: number;
 }
 
+/** A validated display-relative point for the fixed tap batch adapter. */
+export interface TapPoint {
+  x: number;
+  y: number;
+}
+
+/** Reports the number of taps whose transport calls completed. */
+export interface TapBatchResult {
+  completed: number;
+}
+
+/** Internal lifecycle hooks for keeping observers aligned with tap dispatch. */
+export interface TapBatchHooks {
+  beforeTap?: (index: number, point: TapPoint) => Promise<void>;
+}
+
 /**
  * The only ADB surface exposed to the phone-control service.
  * There is deliberately no public method accepting arbitrary command args.
@@ -40,6 +56,17 @@ export interface FixedAdbAdapter {
   captureScreenshot(serial: string, displayId?: number): Promise<Uint8Array>;
   launchApp(serial: string, packageName: string): Promise<void>;
   tap(serial: string, x: number, y: number, displayId?: number): Promise<void>;
+  /**
+   * Execute a bounded, already-validated batch of display-relative taps.
+   * This is intentionally typed; it is not a general ADB or shell escape
+   * hatch. A rejected operation may have completed a prefix of the batch.
+   */
+  tapBatch(
+    serial: string,
+    points: readonly TapPoint[],
+    displayId?: number,
+    hooks?: TapBatchHooks
+  ): Promise<TapBatchResult>;
   swipe(serial: string, gesture: SwipeGesture, displayId?: number): Promise<void>;
   typeText(serial: string, text: string, displayId?: number): Promise<void>;
   keypress(serial: string, key: Keypress, displayId?: number): Promise<void>;
