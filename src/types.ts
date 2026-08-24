@@ -252,6 +252,7 @@ export interface CloseAppData {
 
 export interface OpenAppOptions {
   useVirtualDisplay?: boolean;
+  newInstance?: boolean;
 }
 
 export interface PhoneStatusData {

@@ -8,6 +8,7 @@ import {
   phoneExecuteInputSchema,
   phoneExecuteSequenceInputSchema,
   phoneSequenceActionSchema,
+  phoneOpenAppInputSchema,
   phoneWaitForInputSchema,
   registerPhoneControlTools,
   toErrorResponse,
@@ -18,6 +19,30 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 describe("MCP boundary schemas and result conversion", () => {
+  it("accepts only the optional newInstance field for phone_open_app", () => {
+    expect(
+      phoneOpenAppInputSchema.parse({
+        packageName: "com.example.app",
+        newInstance: true
+      })
+    ).toEqual({
+      packageName: "com.example.app",
+      newInstance: true
+    });
+    expect(
+      phoneOpenAppInputSchema.safeParse({
+        packageName: "com.example.app",
+        instanceId: "second"
+      }).success
+    ).toBe(false);
+    expect(
+      phoneOpenAppInputSchema.safeParse({
+        packageName: "com.example.app",
+        newInstance: "true"
+      }).success
+    ).toBe(false);
+  });
+
   it("accepts exactly one approved discriminated action shape", () => {
     expect(
       phoneActionSchema.parse({
@@ -267,5 +292,43 @@ describe("MCP boundary schemas and result conversion", () => {
       type: "image",
       mimeType: "image/png"
     });
+  });
+
+  it("passes newInstance through the phone_open_app handler", async () => {
+    const tools = new Map<string, (input: unknown) => Promise<any>>();
+    const fakeServer = {
+      registerTool(
+        name: string,
+        _schema: unknown,
+        handler: (input: unknown) => Promise<any>
+      ): void {
+        tools.set(name, handler);
+      }
+    } as unknown as McpServer;
+    const calls: Array<{ packageName: string; options: unknown }> = [];
+    const fakeService = {
+      observationStore: new ObservationStore(),
+      openApp: async (packageName: string, options: unknown) => {
+        calls.push({ packageName, options });
+        return {
+          ok: true,
+          data: { observation: { observationId: "obs_1", elements: [] } }
+        };
+      }
+    } as unknown as PhoneControlToolService;
+
+    registerPhoneControlTools(fakeServer, fakeService);
+    const response = await tools.get("phone_open_app")!({
+      packageName: "com.example.app",
+      newInstance: true
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(calls).toEqual([
+      {
+        packageName: "com.example.app",
+        options: { useVirtualDisplay: undefined, newInstance: true }
+      }
+    ]);
   });
 });

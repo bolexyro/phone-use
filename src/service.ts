@@ -54,6 +54,7 @@ import type {
   ToolSuccessResult,
   UiElement,
   UiElementTarget,
+  VirtualDisplaySession,
   WaitCondition,
   WaitOptions
 } from "./types.js";
@@ -191,10 +192,20 @@ export class PhoneControlService {
   ): Promise<ToolSuccessResult<{ observation: ReturnType<ObservationStore["summary"]> }>> {
     const policy = this.#getPolicy();
     assertAllowedTarget(policy, packageName);
-    const device = await this.#selectedDevice();
     const useVirtualDisplay = options.useVirtualDisplay !== false;
 
+    if (options.newInstance === true && !useVirtualDisplay) {
+      throw new PhoneControlError(
+        "INVALID_ACTION",
+        "newInstance is only supported when useVirtualDisplay is true.",
+        { packageName, newInstance: true, useVirtualDisplay: false }
+      );
+    }
+
+    const device = await this.#selectedDevice();
+
     let targetDisplayId = 0;
+    let ownsVirtualDisplay = false;
 
     if (useVirtualDisplay) {
       const apiLevel = await this.#adb.getApiLevel(device.serial);
@@ -207,11 +218,18 @@ export class PhoneControlService {
       }
 
       try {
+        const reusableSession =
+          options.newInstance === true
+            ? undefined
+            : this.#virtualDisplays.getSessionByPackage(packageName);
         const session = await this.#virtualDisplays.launch(
           device.serial,
-          packageName
+          packageName,
+          { newInstance: options.newInstance }
         );
         targetDisplayId = session.displayId;
+        ownsVirtualDisplay =
+          options.newInstance === true || reusableSession === undefined;
       } catch (error) {
         if (
           error instanceof PhoneControlError &&
@@ -244,34 +262,44 @@ export class PhoneControlService {
       }
     }
 
-    const startMs = this.#now();
-    const timeoutMs = 6000;
-    let capture: ObservationCapture | undefined;
+    try {
+      const startMs = this.#now();
+      const timeoutMs = 6000;
+      let capture: ObservationCapture | undefined;
 
-    while (this.#now() - startMs <= timeoutMs) {
-      const fg = await this.#adb.getForeground(device.serial, targetDisplayId);
-      if (fg.packageName === packageName) {
-        capture = await this.#capture(device.serial, targetDisplayId);
-        break;
+      while (this.#now() - startMs <= timeoutMs) {
+        const fg = await this.#adb.getForeground(device.serial, targetDisplayId);
+        if (fg.packageName === packageName) {
+          capture = await this.#capture(device.serial, targetDisplayId);
+          break;
+        }
+        await this.#sleep(DEFAULT_POLL_INTERVAL_MS);
       }
-      await this.#sleep(DEFAULT_POLL_INTERVAL_MS);
-    }
 
-    if (!capture) {
-      capture = await this.#capture(device.serial, targetDisplayId);
-    }
+      if (!capture) {
+        capture = await this.#capture(device.serial, targetDisplayId);
+      }
 
-    assertAllowedForeground(policy, capture);
-    if (capture.packageName !== packageName) {
-      throw new PhoneControlError(
-        "APP_LAUNCH_FAILED",
-        `Android did not bring '${packageName}' to the foreground on display ${targetDisplayId} (current foreground is '${capture.packageName}').`,
-        { packageName, foregroundPackage: capture.packageName, displayId: targetDisplayId }
-      );
-    }
+      assertAllowedForeground(policy, capture);
+      if (capture.packageName !== packageName) {
+        throw new PhoneControlError(
+          "APP_LAUNCH_FAILED",
+          `Android did not bring '${packageName}' to the foreground on display ${targetDisplayId} (current foreground is '${capture.packageName}').`,
+          { packageName, foregroundPackage: capture.packageName, displayId: targetDisplayId }
+        );
+      }
 
-    const observation = this.#observations.create(capture);
-    return { ok: true, data: { observation: this.#observations.summary(observation) } };
+      const observation = this.#observations.create(capture);
+      return { ok: true, data: { observation: this.#observations.summary(observation) } };
+    } catch (error) {
+      // newInstance always creates a fresh session. If the post-launch
+      // foreground/observation check fails, close only that fresh display and
+      // leave all existing same-package sessions untouched.
+      if (ownsVirtualDisplay) {
+        this.#virtualDisplays.close({ displayId: targetDisplayId });
+      }
+      throw error;
+    }
   }
 
   public async observe(options?: {
@@ -285,7 +313,7 @@ export class PhoneControlService {
 
     let displayId = options?.displayId;
     if (displayId === undefined && options?.packageName) {
-      const session = this.#virtualDisplays.getSessionByPackage(options.packageName);
+      const session = this.#uniquePackageSession(options.packageName);
       if (session) {
         displayId = session.displayId;
       }
@@ -926,7 +954,15 @@ export class PhoneControlService {
   public async closeApp(
     target: { packageName?: string; displayId?: number }
   ): Promise<ToolSuccessResult<CloseAppData>> {
-    const closed = this.#virtualDisplays.close(target);
+    const packageSession =
+      target.displayId === undefined && target.packageName !== undefined
+        ? this.#uniquePackageSession(target.packageName)
+        : undefined;
+    const effectiveTarget =
+      packageSession && target.displayId === undefined
+        ? { ...target, displayId: packageSession.displayId }
+        : target;
+    const closed = this.#virtualDisplays.close(effectiveTarget);
     const label =
       target.packageName ??
       (target.displayId !== undefined ? `display ${target.displayId}` : "app");
@@ -935,7 +971,7 @@ export class PhoneControlService {
       data: {
         closed,
         packageName: target.packageName,
-        displayId: target.displayId,
+        displayId: effectiveTarget.displayId,
         message: closed
           ? `Virtual display session for ${label} was terminated.`
           : `No active virtual display session found for ${label}.`
@@ -1373,6 +1409,25 @@ export class PhoneControlService {
       await this.#adb.listDevices(),
       this.#environment
     );
+  }
+
+  #uniquePackageSession(
+    packageName: string
+  ): VirtualDisplaySession | undefined {
+    const matches = this.#virtualDisplays.sessions.filter(
+      (session) => session.packageName === packageName
+    );
+    if (matches.length > 1) {
+      throw new PhoneControlError(
+        "INVALID_ACTION",
+        `Multiple active virtual display sessions match '${packageName}'. Use displayId to select one.`,
+        {
+          packageName,
+          displayIds: matches.map((session) => session.displayId)
+        }
+      );
+    }
+    return matches[0];
   }
 
   async #capture(

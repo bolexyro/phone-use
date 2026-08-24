@@ -192,7 +192,8 @@ export const phoneWaitForInputSchema = z
 export const phoneOpenAppInputSchema = z
   .object({
     packageName: packageNameSchema,
-    useVirtualDisplay: z.boolean().optional()
+    useVirtualDisplay: z.boolean().optional(),
+    newInstance: z.boolean().optional()
   })
   .strict();
 
@@ -209,7 +210,7 @@ export interface PhoneControlToolService {
   allowedApps(): ToolSuccessResult<AllowedAppsData>;
   openApp(
     packageName: string,
-    options?: { useVirtualDisplay?: boolean }
+    options?: { useVirtualDisplay?: boolean; newInstance?: boolean }
   ): Promise<ToolSuccessResult<{ observation: ObservationSummary }>>;
   closeApp(target: {
     packageName?: string;
@@ -345,7 +346,7 @@ export function registerPhoneControlTools(
     "phone_open_app",
     {
       description:
-        "Launch one package from the server-side allowlist. Defaults to running in an isolated virtual display (Android 10+). If virtual display creation fails or is unsupported, returns a descriptive error; confirm with the user before calling with useVirtualDisplay: false to run on the primary screen.",
+        "Launch one allowlisted package in a virtual display. Reuses an existing package session by default; set newInstance true for another display. Use displayId to target an instance. Set useVirtualDisplay false only for the primary display.",
       inputSchema: phoneOpenAppInputSchema.shape
     },
     async (input) => {
@@ -353,7 +354,8 @@ export function registerPhoneControlTools(
         () => {
           const parsed = parseInput(phoneOpenAppInputSchema, input);
           return service.openApp(parsed.packageName, {
-            useVirtualDisplay: parsed.useVirtualDisplay
+            useVirtualDisplay: parsed.useVirtualDisplay,
+            newInstance: parsed.newInstance
           });
         },
         (result) => resolveScreenshot(service, result)

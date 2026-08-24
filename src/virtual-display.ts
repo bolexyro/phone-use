@@ -7,6 +7,8 @@ import type { VirtualDisplaySession } from "./types.js";
 import { resolveScrcpyPath } from "./viewer/scrcpy-path.js";
 
 export interface VirtualDisplayOptions {
+  /** Reuse an existing package session unless explicitly set to true. */
+  newInstance?: boolean;
   scrcpyPath?: string;
   width?: number;
   height?: number;
@@ -23,6 +25,16 @@ export interface SpawnedVirtualDisplay {
   session: VirtualDisplaySession;
   process: ChildProcess;
 }
+
+type SpawnVirtualDisplay = (
+  file: string,
+  args: readonly string[],
+  options: {
+    shell: boolean;
+    windowsHide: boolean;
+    stdio: ["ignore", "ignore", "pipe"];
+  }
+) => ChildProcess;
 
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_LAUNCH_TIMEOUT_MS = 10_000;
@@ -81,6 +93,8 @@ export class VirtualDisplayManager {
   readonly #environment: NodeJS.ProcessEnv;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #scrcpyPath?: string;
+  readonly #spawn: SpawnVirtualDisplay;
+  #launchQueue: Promise<void> = Promise.resolve();
 
   public constructor(
     adb: FixedAdbAdapter,
@@ -88,12 +102,17 @@ export class VirtualDisplayManager {
       environment?: NodeJS.ProcessEnv;
       scrcpyPath?: string;
       sleep?: (ms: number) => Promise<void>;
+      spawn?: SpawnVirtualDisplay;
     } = {}
   ) {
     this.#adb = adb;
     this.#environment = options.environment ?? process.env;
     this.#scrcpyPath = options.scrcpyPath;
     this.#sleep = options.sleep ?? defaultSleep;
+    this.#spawn =
+      options.spawn ??
+      ((file, args, spawnOptions) =>
+        spawn(file, [...args], spawnOptions));
   }
 
   public get sessions(): readonly VirtualDisplaySession[] {
@@ -112,12 +131,15 @@ export class VirtualDisplayManager {
   public getSessionByPackage(
     packageName: string
   ): VirtualDisplaySession | undefined {
-    for (const item of this.#sessions.values()) {
-      if (item.session.packageName === packageName) {
-        return { ...item.session };
-      }
-    }
-    return undefined;
+    return this.getSessionsByPackage(packageName)[0];
+  }
+
+  public getSessionsByPackage(
+    packageName: string
+  ): readonly VirtualDisplaySession[] {
+    return Array.from(this.#sessions.values())
+      .filter((item) => item.session.packageName === packageName)
+      .map((item) => ({ ...item.session }));
   }
 
   public async launch(
@@ -125,10 +147,32 @@ export class VirtualDisplayManager {
     packageName: string,
     options: VirtualDisplayOptions = {}
   ): Promise<VirtualDisplaySession> {
-    // If already running for this package, return existing session
-    const existing = this.getSessionByPackage(packageName);
-    if (existing) {
-      return existing;
+    const previous = this.#launchQueue;
+    let release!: () => void;
+    this.#launchQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous;
+    try {
+      return await this.#launchUnlocked(serial, packageName, options);
+    } finally {
+      release();
+    }
+  }
+
+  async #launchUnlocked(
+    serial: string,
+    packageName: string,
+    options: VirtualDisplayOptions
+  ): Promise<VirtualDisplaySession> {
+    // The default remains idempotent per package. newInstance deliberately
+    // bypasses this check so the same package can own multiple displays.
+    if (options.newInstance !== true) {
+      const existing = this.getSessionByPackage(packageName);
+      if (existing) {
+        return existing;
+      }
     }
 
     const env = options.environment ?? this.#environment;
@@ -151,7 +195,7 @@ export class VirtualDisplayManager {
     let child: ChildProcess;
     const stderrChunks: Buffer[] = [];
     try {
-      child = spawn(scrcpyPath, [...args], {
+      child = this.#spawn(scrcpyPath, args, {
         shell: false,
         windowsHide: false,
         stdio: ["ignore", "ignore", "pipe"]
@@ -168,6 +212,7 @@ export class VirtualDisplayManager {
 
     let exitedEarly = false;
     let exitCode: number | null = null;
+    let spawnError: Error | undefined;
     child.stderr?.on("data", (chunk: Buffer | string) => {
       stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });
@@ -175,6 +220,20 @@ export class VirtualDisplayManager {
       exitedEarly = true;
       exitCode = code;
     });
+    child.once("error", (error) => {
+      exitedEarly = true;
+      spawnError = error;
+    });
+
+    const killChild = (): void => {
+      if (!child.killed) {
+        try {
+          child.kill();
+        } catch {
+          // The process may have exited between the check and kill().
+        }
+      }
+    };
 
     const timeoutMs = options.launchTimeoutMs ?? DEFAULT_LAUNCH_TIMEOUT_MS;
     const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
@@ -182,60 +241,110 @@ export class VirtualDisplayManager {
 
     let detectedDisplayId: number | undefined;
 
-    while (Date.now() - startTime < timeoutMs) {
-      if (exitedEarly) {
+    try {
+      while (Date.now() - startTime < timeoutMs) {
+        if (exitedEarly) {
+          const stderr = Buffer.concat(stderrChunks).toString("utf8");
+          throw new PhoneControlError(
+            "VIRTUAL_DISPLAY_FAILED",
+            spawnError
+              ? `scrcpy failed while creating a virtual display for '${packageName}': ${spawnError.message}`
+              : `scrcpy exited early with code ${exitCode} while creating virtual display for '${packageName}'.`,
+            {
+              packageName,
+              exitCode,
+              ...(spawnError ? { cause: spawnError.message } : {}),
+              stderr: stderr.slice(0, 500)
+            }
+          );
+        }
+
+        const currentDisplays = await this.#adb.listDisplays(serial);
+        const newDisplay = currentDisplays.find(
+          (d) => !initialIds.has(d.displayId)
+        );
+        if (newDisplay) {
+          detectedDisplayId = newDisplay.displayId;
+          break;
+        }
+
+        await (options.sleep ?? this.#sleep)(pollIntervalMs);
+      }
+
+      if (detectedDisplayId === undefined) {
         const stderr = Buffer.concat(stderrChunks).toString("utf8");
         throw new PhoneControlError(
           "VIRTUAL_DISPLAY_FAILED",
-          `scrcpy exited early with code ${exitCode} while creating virtual display for '${packageName}'.`,
-          { packageName, exitCode, stderr: stderr.slice(0, 500) }
+          `Timed out waiting for virtual display to be created for '${packageName}'.`,
+          { packageName, timeoutMs, stderr: stderr.slice(0, 500) }
         );
       }
 
-      const currentDisplays = await this.#adb.listDisplays(serial);
-      const newDisplay = currentDisplays.find((d) => !initialIds.has(d.displayId));
-      if (newDisplay) {
-        detectedDisplayId = newDisplay.displayId;
-        break;
+      if (exitedEarly) {
+        throw new PhoneControlError(
+          "VIRTUAL_DISPLAY_FAILED",
+          `scrcpy exited before virtual display ${detectedDisplayId} was ready for '${packageName}'.`,
+          { packageName, displayId: detectedDisplayId, exitCode }
+        );
       }
 
-      await this.#sleep(pollIntervalMs);
-    }
+      const displayId = detectedDisplayId;
+      const displayInfo = await this.#adb.getDisplay(serial, displayId);
 
-    if (detectedDisplayId === undefined) {
-      if (!child.killed) child.kill();
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (exitedEarly) {
+        throw new PhoneControlError(
+          "VIRTUAL_DISPLAY_FAILED",
+          `scrcpy exited before virtual display ${displayId} was ready for '${packageName}'.`,
+          { packageName, displayId, exitCode }
+        );
+      }
+
+      const session: VirtualDisplaySession = {
+        displayId,
+        packageName,
+        activity: null,
+        width: displayInfo.display.width,
+        height: displayInfo.display.height,
+        startedAt: Date.now()
+      };
+
+      const spawned: SpawnedVirtualDisplay = {
+        session,
+        process: child
+      };
+
+      child.once("exit", () => {
+        this.#sessions.delete(displayId);
+      });
+
+      // Register before checking the flag so an exit racing this section
+      // cannot leave a dead process in the session map.
+      this.#sessions.set(displayId, spawned);
+      if (exitedEarly) {
+        this.#sessions.delete(displayId);
+        throw new PhoneControlError(
+          "VIRTUAL_DISPLAY_FAILED",
+          `scrcpy exited before virtual display ${displayId} was ready for '${packageName}'.`,
+          { packageName, displayId, exitCode }
+        );
+      }
+
+      return { ...session };
+    } catch (error) {
+      // No session is registered until display metadata succeeds. Killing the
+      // child here also tears down any display scrcpy created before a later
+      // ADB poll or metadata read failed.
+      killChild();
+      if (error instanceof PhoneControlError && error.code === "VIRTUAL_DISPLAY_FAILED") {
+        throw error;
+      }
+      const cause = error instanceof Error ? error.message : String(error);
       throw new PhoneControlError(
         "VIRTUAL_DISPLAY_FAILED",
-        `Timed out waiting for virtual display to be created for '${packageName}'.`,
-        { packageName, timeoutMs, stderr: stderr.slice(0, 500) }
+        `Virtual display launch failed for '${packageName}': ${cause}`,
+        { packageName, cause }
       );
     }
-
-    const displayId = detectedDisplayId;
-    const displayInfo = await this.#adb.getDisplay(serial, displayId);
-
-    const session: VirtualDisplaySession = {
-      displayId,
-      packageName,
-      activity: null,
-      width: displayInfo.display.width,
-      height: displayInfo.display.height,
-      startedAt: Date.now()
-    };
-
-    const spawned: SpawnedVirtualDisplay = {
-      session,
-      process: child
-    };
-
-    this.#sessions.set(displayId, spawned);
-
-    child.once("exit", () => {
-      this.#sessions.delete(displayId);
-    });
-
-    return { ...session };
   }
 
   public close(target: {

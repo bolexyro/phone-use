@@ -58,6 +58,7 @@ class FakeAdb implements FixedAdbAdapter {
     packageName: "com.sec.android.app.popupcalculator",
     activity: "com.sec.android.app.popupcalculator/.MainActivity"
   };
+  foregroundByDisplay = new Map<number, ForegroundState>();
   display: DisplaySnapshot = {
     display: { width: 1080, height: 2400 },
     rotation: 0
@@ -102,7 +103,10 @@ class FakeAdb implements FixedAdbAdapter {
 
   async getForeground(_serial: string, displayId = 0): Promise<ForegroundState> {
     this.calls.getForeground += 1;
-    return { ...this.foreground, displayId };
+    return {
+      ...(this.foregroundByDisplay.get(displayId) ?? this.foreground),
+      displayId
+    };
   }
 
   async getDisplay(_serial: string, displayId = 0): Promise<DisplaySnapshot> {
@@ -208,13 +212,18 @@ class FakeVirtualDisplayManager extends VirtualDisplayManager {
 
   override async launch(
     _serial: string,
-    packageName: string
+    packageName: string,
+    options: { newInstance?: boolean } = {}
   ): Promise<VirtualDisplaySession> {
     if (this.failLaunch) {
       throw new PhoneControlError(
         "VIRTUAL_DISPLAY_FAILED",
         "Failed to create virtual display"
       );
+    }
+    if (options.newInstance !== true) {
+      const existing = this.getSessionByPackage(packageName);
+      if (existing) return existing;
     }
     this.launchedPackages.push(packageName);
     if (this.fakeAdb) {
@@ -224,13 +233,14 @@ class FakeVirtualDisplayManager extends VirtualDisplayManager {
       };
     }
     const session: VirtualDisplaySession = {
-      displayId: this.nextDisplayId,
+      displayId: this.nextDisplayId++,
       packageName,
       activity: `${packageName}/.MainActivity`,
       width: 1080,
+      height: 2400,
       startedAt: Date.now()
     };
-    this.fakeSessions.set(this.nextDisplayId, session);
+    this.fakeSessions.set(session.displayId, session);
     return session;
   }
 
@@ -339,6 +349,43 @@ describe("phone-control service safety", () => {
     expect(result.data.observation.displayId).toBe(2);
   });
 
+  it("reuses the existing package session unless newInstance is requested", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    const first = await service.openApp(POLICY.allowedApps[0]);
+    const reused = await service.openApp(POLICY.allowedApps[0]);
+    const second = await service.openApp(POLICY.allowedApps[0], {
+      newInstance: true
+    });
+
+    expect(reused.data.observation.displayId).toBe(
+      first.data.observation.displayId
+    );
+    expect(second.data.observation.displayId).not.toBe(
+      first.data.observation.displayId
+    );
+    expect(vdManager.launchedPackages).toHaveLength(2);
+    expect(vdManager.sessions).toHaveLength(2);
+  });
+
+  it("rejects newInstance on the primary display", async () => {
+    const service = createService(new FakeAdb());
+
+    await expect(
+      service.openApp(POLICY.allowedApps[0], {
+        useVirtualDisplay: false,
+        newInstance: true
+      })
+    ).rejects.toMatchObject({
+      code: "INVALID_ACTION",
+      details: { packageName: POLICY.allowedApps[0] }
+    });
+  });
+
   it("fails with VIRTUAL_DISPLAY_UNSUPPORTED when useVirtualDisplay is true and Android API < 29", async () => {
     const adb = new FakeAdb();
     adb.apiLevel = 28; // Android 9 Pie
@@ -395,6 +442,67 @@ describe("phone-control service safety", () => {
     expect(vdManager.sessions).toHaveLength(0);
   });
 
+  it("rejects ambiguous package targeting and supports display-specific observe/close", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    const first = await service.openApp(POLICY.allowedApps[0]);
+    const second = await service.openApp(POLICY.allowedApps[0], {
+      newInstance: true
+    });
+    const displayIds = [
+      first.data.observation.displayId,
+      second.data.observation.displayId
+    ];
+
+    await expect(
+      service.observe({ packageName: POLICY.allowedApps[0] })
+    ).rejects.toMatchObject({
+      code: "INVALID_ACTION",
+      details: { displayIds }
+    });
+    await expect(
+      service.closeApp({ packageName: POLICY.allowedApps[0] })
+    ).rejects.toMatchObject({
+      code: "INVALID_ACTION",
+      details: { displayIds }
+    });
+
+    const observed = await service.observe({ displayId: displayIds[1] });
+    expect(observed.data.observation.displayId).toBe(displayIds[1]);
+    const closed = await service.closeApp({ displayId: displayIds[0] });
+    expect(closed.data.closed).toBe(true);
+    expect(vdManager.sessions.map((session) => session.displayId)).toEqual([
+      displayIds[1]
+    ]);
+  });
+
+  it("cleans up a failed new instance without closing the existing session", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    let now = 0;
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager,
+      now: () => (now += 7000)
+    });
+
+    await service.openApp(POLICY.allowedApps[0]);
+    adb.foregroundByDisplay.set(3, {
+      packageName: "com.android.settings",
+      activity: "com.android.settings/.Settings"
+    });
+
+    await expect(
+      service.openApp(POLICY.allowedApps[0], { newInstance: true })
+    ).rejects.toMatchObject({ code: "FORBIDDEN_APP" });
+    expect(vdManager.sessions.map((session) => session.displayId)).toEqual([
+      2
+    ]);
+  });
+
   it("returns active virtual displays in status", async () => {
     const adb = new FakeAdb();
     const vdManager = new FakeVirtualDisplayManager(adb);
@@ -403,12 +511,17 @@ describe("phone-control service safety", () => {
     });
 
     await service.openApp(POLICY.allowedApps[0]);
+    await service.openApp(POLICY.allowedApps[0], { newInstance: true });
     const status = await service.status();
 
-    expect(status.data.virtualDisplays).toHaveLength(1);
-    expect(status.data.virtualDisplays?.[0].packageName).toBe(
-      POLICY.allowedApps[0]
-    );
+    expect(status.data.virtualDisplays).toHaveLength(2);
+    expect(status.data.virtualDisplays?.map((session) => session.displayId)).toEqual([
+      2,
+      3
+    ]);
+    expect(status.data.virtualDisplays?.every((session) =>
+      session.packageName === POLICY.allowedApps[0]
+    )).toBe(true);
   });
 
   it("denies a package outside the server-side policy", () => {
