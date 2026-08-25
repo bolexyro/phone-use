@@ -52,6 +52,28 @@ Build the server, then add an entry like this to the client configuration. Escap
 
 The server writes JSON-RPC only to stdout. Startup diagnostics and recoverable tool diagnostics go to stderr.
 
+## Streamable HTTP transport
+
+Set `PHONE_CONTROL_TRANSPORT=http` to serve MCP over Streamable HTTP at `/mcp`. Set `PHONE_CONTROL_HTTP_AUTH_TOKEN` to require `Authorization: Bearer <token>`; when unset, HTTP requests are unauthenticated. It listens on `127.0.0.1:3000` by default. Override those defaults with `PHONE_CONTROL_HTTP_HOST` and `PHONE_CONTROL_HTTP_PORT`.
+
+```powershell
+$env:PHONE_CONTROL_TRANSPORT = "http"
+$env:PHONE_CONTROL_HTTP_AUTH_TOKEN = "replace-with-a-long-random-token"
+pnpm build
+pnpm start
+```
+
+For development, `pnpm dev` watches the TypeScript source and restarts the server after changes:
+
+```powershell
+$env:PHONE_CONTROL_TRANSPORT = "http"
+$env:PHONE_CONTROL_HTTP_PORT = "3100"
+Remove-Item Env:PHONE_CONTROL_HTTP_AUTH_TOKEN -ErrorAction SilentlyContinue
+pnpm dev
+```
+
+Use `/health` for a non-MCP liveness check. An unauthenticated tunnel exposes phone-control actions to anyone with the URL.
+
 ## Tools
 
 - `phone_status` reports the selected device, primary foreground package, and all active virtual display sessions.
