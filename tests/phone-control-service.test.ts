@@ -405,6 +405,23 @@ describe("phone-control service safety", () => {
     expect(result.data.observation.displayId).toBe(2);
   });
 
+  it("does not attach the primary UI Automator tree to a secondary display", async () => {
+    const adb = new FakeAdb();
+    adb.xml = XML.replace("Calculate", "YouTube primary display");
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    const result = await service.openApp(POLICY.allowedApps[0]);
+
+    expect(result.data.observation.displayId).toBe(2);
+    expect(result.data.observation.elements).toEqual([]);
+    // The secondary capture is visual-only, so the fake's unscoped dump is
+    // never even requested.
+    expect(adb.calls.dumpUiAutomatorXml).toBe(0);
+  });
+
   it("reuses the existing package session unless newInstance is requested", async () => {
     const adb = new FakeAdb();
     const vdManager = new FakeVirtualDisplayManager(adb);

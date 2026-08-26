@@ -7,6 +7,9 @@ import {
   buildTypeTextArgs,
   buildUiDumpArgs,
   buildUiDumpReadArgs,
+  parseLogicalDisplayUniqueId,
+  parseSurfaceFlingerDisplayId,
+  parseUniqueSurfaceFlingerVirtualDisplayId,
   parseResolvedLaunchActivity,
   UI_AUTOMATOR_DUMP_PATH
 } from "../src/adb/process-adapter.js";
@@ -98,6 +101,137 @@ describe("fixed ADB process argument construction", () => {
       "cat",
       UI_AUTOMATOR_DUMP_PATH
     ]);
+
+    const isolatedPath = "/sdcard/phone_control_window_dump-1.xml";
+    expect(buildUiDumpArgs("phone-1", isolatedPath).at(-1)).toBe(isolatedPath);
+    expect(buildUiDumpReadArgs("phone-1", isolatedPath).at(-1)).toBe(
+      isolatedPath
+    );
+  });
+
+  it("only resolves the SurfaceFlinger id whose line names the requested display", () => {
+    const output = [
+      "Virtual Display 17 (scrcpy): 1080x2400",
+      "Virtual Display 134 (scrcpy): 1080x2400",
+      "Virtual Display 206 (scrcpy): 1920x1080"
+    ].join("\n");
+
+    expect(parseSurfaceFlingerDisplayId(output, 134)).toBe("134");
+    expect(parseSurfaceFlingerDisplayId(output, 206)).toBe("206");
+    expect(parseSurfaceFlingerDisplayId(output, 99)).toBeUndefined();
+
+    expect(
+      parseSurfaceFlingerDisplayId(
+        'Display 134 (Virtual display): displayName="scrcpy"',
+        134
+      )
+    ).toBe("134");
+  });
+
+  it("maps a logical display to SurfaceFlinger through DisplayInfo.uniqueId", () => {
+    const displayInfo =
+      'Display id 134: DisplayInfo{"scrcpy", displayId 134, uniqueId "virtual:com.android.shell,2000,scrcpy,3"}';
+    const uniqueId = parseLogicalDisplayUniqueId(displayInfo, 134);
+    expect(uniqueId).toBe("virtual:com.android.shell,2000,scrcpy,3");
+    expect(
+      parseSurfaceFlingerDisplayId(
+        'Display 9223372036854775811 (Virtual display): displayName="scrcpy" uniqueId="virtual:com.android.shell,2000,scrcpy,3"',
+        134,
+        uniqueId
+      )
+    ).toBe("9223372036854775811");
+    expect(
+      parseSurfaceFlingerDisplayId(
+        'Display 134 (Virtual display): displayName="other" uniqueId="virtual:other,2000,scrcpy,4"',
+        134,
+        uniqueId
+      )
+    ).toBeUndefined();
+    expect(
+      parseSurfaceFlingerDisplayId(
+        [
+          'Display 9223372036854775811 (Virtual display): uniqueId="virtual:com.android.shell,2000,scrcpy,3"',
+          'Display 9223372036854775812 (Virtual display): uniqueId="virtual:com.android.shell,2000,scrcpy,3"'
+        ].join("\n"),
+        134,
+        uniqueId
+      )
+    ).toBeUndefined();
+  });
+
+  it("maps a physical local unique id only when SurfaceFlinger lists that token", () => {
+    const displayInfo =
+      'Display id 2: DisplayInfo{"HDMI", displayId 2, uniqueId "local:4630947059332006275"}';
+    const uniqueId = parseLogicalDisplayUniqueId(displayInfo, 2);
+    expect(
+      parseSurfaceFlingerDisplayId(
+        "Display 4630947059332006275 (HWC display 1): port=1",
+        2,
+        uniqueId
+      )
+    ).toBe("4630947059332006275");
+    expect(
+      parseSurfaceFlingerDisplayId(
+        "Display 4630947059332006276 (HWC display 1): port=1",
+        2,
+        uniqueId
+      )
+    ).toBeUndefined();
+  });
+
+  it("does not treat an unrelated physical display line as a virtual target", () => {
+    const output = [
+      "Display 134 (HWC display 0): port=0 displayName=\"Built-in\"",
+      "Display 206 (HWC display 1): port=1 displayName=\"HDMI\""
+    ].join("\n");
+
+    expect(parseSurfaceFlingerDisplayId(output, 134)).toBeUndefined();
+  });
+
+  it("accepts one named virtual candidate from the full SurfaceFlinger dump", () => {
+    const output = [
+      'Virtual Display 9223372036854775811',
+      ' + DisplayDevice{9223372036854775811, virtual, "scrcpy"}',
+      'Virtual Display 9223372036854775812',
+      ' + DisplayDevice{9223372036854775812, virtual, "other"}'
+    ].join("\n");
+
+    expect(parseUniqueSurfaceFlingerVirtualDisplayId(output)).toBe(
+      "9223372036854775811"
+    );
+  });
+
+  it("accepts one named virtual candidate from Android 15/16 --display-id and --displays dumps", () => {
+    const sfDisplayIdOutput = [
+      'Display 4630947059332006275 (HWC display 0): port=131 pnpId=QCM screenPartStatus=UNSUPPORTED displayName=""',
+      'Display 11529215048760749642 (Virtual display): displayName="scrcpy"'
+    ].join("\n");
+
+    expect(parseUniqueSurfaceFlingerVirtualDisplayId(sfDisplayIdOutput)).toBe(
+      "11529215048760749642"
+    );
+
+    const sfDisplaysOutput = [
+      "Display 4630947059332006275",
+      "    port=131",
+      "    connectionType=Internal",
+      "Virtual Display 11529215048760749642",
+      '    name="scrcpy"',
+      "    powerMode=ON"
+    ].join("\n");
+
+    expect(parseUniqueSurfaceFlingerVirtualDisplayId(sfDisplaysOutput)).toBe(
+      "11529215048760749642"
+    );
+  });
+
+  it("rejects ambiguous named virtual candidates without a unique-id bridge", () => {
+    const output = [
+      'DisplayDevice{9223372036854775811, virtual, "scrcpy"}',
+      'DisplayDevice{9223372036854775812, virtual, "scrcpy"}'
+    ].join("\n");
+
+    expect(parseUniqueSurfaceFlingerVirtualDisplayId(output)).toBeUndefined();
   });
 
   it("builds virtual display scrcpy args with required flags", () => {

@@ -14,7 +14,6 @@ import {
   parseDisplaysList,
   parseDisplaySnapshotForId,
   parseForegroundForDisplay,
-  parseForegroundOutput,
   parsePngDimensions
 } from "./process-parsers.js";
 import type {
@@ -39,6 +38,8 @@ interface ProcessAdapterOptions {
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 export const UI_AUTOMATOR_DUMP_PATH = "/sdcard/window_dump.xml";
+const UI_AUTOMATOR_DUMP_PATH_PREFIX = "/sdcard/phone_control_window_dump";
+let uiAutomatorDumpSequence = 0;
 
 const KEYCODES: Record<Keypress, number> = {
   BACK: 4,
@@ -126,7 +127,10 @@ export function buildTypeTextArgs(
   ];
 }
 
-export function buildUiDumpArgs(serial: string): readonly string[] {
+export function buildUiDumpArgs(
+  serial: string,
+  dumpPath = UI_AUTOMATOR_DUMP_PATH
+): readonly string[] {
   return [
     "-s",
     serial,
@@ -134,12 +138,192 @@ export function buildUiDumpArgs(serial: string): readonly string[] {
     "uiautomator",
     "dump",
     "--compressed",
-    UI_AUTOMATOR_DUMP_PATH
+    dumpPath
   ];
 }
 
-export function buildUiDumpReadArgs(serial: string): readonly string[] {
-  return ["-s", serial, "exec-out", "cat", UI_AUTOMATOR_DUMP_PATH];
+export function buildUiDumpReadArgs(
+  serial: string,
+  dumpPath = UI_AUTOMATOR_DUMP_PATH
+): readonly string[] {
+  return ["-s", serial, "exec-out", "cat", dumpPath];
+}
+
+/**
+ * Resolve the physical/SurfaceFlinger id for one requested logical display.
+ *
+ * `screencap -d` consumes an id emitted by SurfaceFlinger, not an arbitrary
+ * logical display id. Never use the first virtual-display-looking line: with
+ * multiple sessions that can silently capture another display. The matching
+ * line must identify the requested display explicitly.
+ */
+export function parseSurfaceFlingerDisplayId(
+  output: string,
+  logicalDisplayId: number,
+  logicalUniqueId?: string
+): string | undefined {
+  const requested = String(logicalDisplayId);
+
+  // Android has separate logical and SurfaceFlinger display identifiers. On
+  // current releases the only reliable bridge is DisplayInfo.uniqueId: the
+  // same uniqueId is printed beside the SurfaceFlinger id. Prefer that bridge
+  // whenever it is available instead of comparing unrelated integer spaces.
+  if (logicalUniqueId) {
+    const matchingIds = new Set<string>();
+    for (const line of output.split(/\r?\n/)) {
+      if (!line.includes(logicalUniqueId)) {
+        continue;
+      }
+      const displayMatch = line.match(
+        /^\s*(?:Virtual\s+)?Display\s+(\d+)\b/i
+      );
+      if (displayMatch) {
+        matchingIds.add(displayMatch[1]);
+      }
+    }
+    if (matchingIds.size > 0) {
+      return matchingIds.size === 1 ? [...matchingIds][0] : undefined;
+    }
+
+    // Physical DisplayInfo ids are normally local:<physical-id>. Validate
+    // that token against the actual SurfaceFlinger display list before using
+    // it; never pass an unverified unique-id suffix to screencap.
+    const localId = logicalUniqueId.match(/^local:(\d+)$/i)?.[1];
+    if (localId) {
+      const physicalLine = output.split(/\r?\n/).find((line) => {
+        const match = line.match(/^\s*Display\s+(\d+)\b/i);
+        return match?.[1] === localId;
+      });
+      if (physicalLine) {
+        return localId;
+      }
+    }
+
+    // We found the logical identity but SurfaceFlinger did not expose the
+    // same identity. Do not fall back to comparing unrelated numeric ids.
+    return undefined;
+  }
+
+  for (const line of output.split(/\r?\n/)) {
+    const virtualMatch = line.match(
+      /^\s*Virtual\s+Display\s+(\d+)\b.*$/i
+    );
+    if (virtualMatch?.[1] === requested) {
+      return virtualMatch[1];
+    }
+
+    // Some vendor builds label virtual displays as `Display <id>` and put
+    // the virtual/scrcpy marker later on the same line. Require both the
+    // exact id and the marker so a neighbouring display cannot be selected.
+    const displayMatch = line.match(/^\s*Display\s+(\d+)\b(.*)$/i);
+    if (
+      displayMatch?.[1] === requested &&
+      /virtual\s+display|scrcpy/i.test(displayMatch[2] ?? "")
+    ) {
+      return displayMatch[1];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a virtual SurfaceFlinger id from the compact `--displays` dump when
+ * the Android build does not print virtual displays in `--display-id`.
+ *
+ * This is deliberately a uniqueness check, not a first-match heuristic. The
+ * virtual display manager creates displays named `scrcpy`; if more than one
+ * such candidate is present and the build exposes no unique-id bridge, there
+ * is no safe host-only way to bind one to a logical display.
+ */
+export function parseUniqueSurfaceFlingerVirtualDisplayId(
+  output: string,
+  displayName = "scrcpy"
+): string | undefined {
+  const expectedName = displayName.toLowerCase();
+  const candidates = new Set<string>();
+  let currentVirtualId: string | null = null;
+
+  for (const line of output.split(/\r?\n/)) {
+    const singleLineMatch =
+      line.match(
+        /^\s*Display\s+(\d+)\b.*?Virtual\s+display.*?displayName="([^"]+)"/i
+      ) ??
+      line.match(/\bDisplayDevice\{\s*(\d+),\s*virtual,\s*"([^"]+)"/i) ??
+      line.match(
+        /^\s*Display\s+(\d+)\b.*?\(virtual,\s*"([^"]+)"\)/i
+      ) ??
+      line.match(
+        /^\s*Virtual\s+Display\s+(\d+)\b.*?\(([^)]+)\)/i
+      );
+
+    if (
+      singleLineMatch &&
+      singleLineMatch[2].toLowerCase() === expectedName
+    ) {
+      candidates.add(singleLineMatch[1]);
+      currentVirtualId = null;
+      continue;
+    }
+
+    const blockHeaderMatch =
+      line.match(/^\s*Virtual\s+Display\s+(\d+)\b/i) ??
+      line.match(/^\s*Display\s+(\d+)\b.*?\bVirtual\s+display\b/i);
+    if (blockHeaderMatch) {
+      currentVirtualId = blockHeaderMatch[1];
+      const inlineNameMatch = line.match(
+        /\b(?:displayName|name)="([^"]+)"/i
+      );
+      if (inlineNameMatch) {
+        if (inlineNameMatch[1].toLowerCase() === expectedName) {
+          candidates.add(currentVirtualId);
+        }
+        currentVirtualId = null;
+      }
+      continue;
+    }
+
+    if (currentVirtualId) {
+      const nameMatch = line.match(/\b(?:displayName|name)="([^"]+)"/i);
+      if (nameMatch) {
+        if (nameMatch[1].toLowerCase() === expectedName) {
+          candidates.add(currentVirtualId);
+        }
+        currentVirtualId = null;
+      } else if (/^\s*(?:Virtual\s+)?Display\s+\d+\b/i.test(line)) {
+        currentVirtualId = null;
+      }
+    }
+  }
+
+  return candidates.size === 1 ? [...candidates][0] : undefined;
+}
+
+/**
+ * Extract DisplayInfo.uniqueId for one Android logical display. `cmd display
+ * get-displays` prints the logical id and unique id on the same line on
+ * supported Android versions; the line-oriented parser also accepts the
+ * equivalent DisplayInfo spelling used by dumpsys output.
+ */
+export function parseLogicalDisplayUniqueId(
+  output: string,
+  logicalDisplayId: number
+): string | undefined {
+  const requested = String(logicalDisplayId);
+  const uniqueIdPattern = /\buniqueId\s*["'=:\s]+"([^"]+)"/i;
+  for (const line of output.split(/\r?\n/)) {
+    const displayId =
+      line.match(/\bDisplay\s+id\s*[:=]\s*(\d+)\b/i)?.[1] ??
+      line.match(/\bdisplayId\s*[:=]?\s*(\d+)\b/i)?.[1] ??
+      line.match(/\bmDisplayId\s*[:=]\s*(\d+)\b/i)?.[1];
+    if (displayId !== requested) {
+      continue;
+    }
+    const uniqueId = line.match(uniqueIdPattern)?.[1];
+    if (uniqueId) {
+      return uniqueId;
+    }
+  }
+  return undefined;
 }
 
 function isLaunchFailure(output: string): boolean {
@@ -280,34 +464,60 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
     return parseDisplaySnapshotForId(sizeOutput, windowOutput, displayId);
   }
 
-  public async dumpUiAutomatorXml(serial: string, _displayId = 0): Promise<string> {
-    // `uiautomator dump` does not expose a display-id argument. Keep this
-    // limitation explicit: screenshot/foreground are display-aware, while
-    // shell UI metadata is the device's default hierarchy.
+  public async dumpUiAutomatorXml(
+    serial: string,
+    displayId = 0
+  ): Promise<string> {
+    // `uiautomator dump` has no display-id selector on the supported Android
+    // versions. A dump from a secondary display would therefore be the
+    // focused/default (usually display 0) hierarchy, so never return it as
+    // semantic metadata for another display. The service keeps secondary
+    // captures visual-only until a genuinely display-scoped adapter exists.
+    if (displayId !== 0) {
+      throw new PhoneControlError(
+        "OBSERVATION_FAILED",
+        "Android UI Automator cannot provide display-scoped metadata for a secondary display.",
+        { displayId, visualOnly: true }
+      );
+    }
+
+    // Each dump gets an isolated device path. The old shared path allowed
+    // concurrent observations to rm/write/read one another's XML.
+    const dumpPath = `${UI_AUTOMATOR_DUMP_PATH_PREFIX}-${process.pid}-${Date.now()}-${uiAutomatorDumpSequence++}.xml`;
     try {
-      await this.#runText(["-s", serial, "shell", "rm", "-f", UI_AUTOMATOR_DUMP_PATH]);
-    } catch {
-      // Ignore failure to remove prior file
+      try {
+        await this.#runText(["-s", serial, "shell", "rm", "-f", dumpPath]);
+      } catch {
+        // Ignore failure to remove a path that should not exist yet.
+      }
+
+      const output = await this.#runText(buildUiDumpArgs(serial, dumpPath));
+      if (/error|exception|failed/i.test(output)) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          "Android UI Automator could not write its server-owned dump file.",
+          { outputPrefix: output.slice(0, 160) }
+        );
+      }
+
+      const dump = await this.#run(buildUiDumpReadArgs(serial, dumpPath));
+      const xml = dump.stdout.toString("utf8");
+      const xmlStart = xml.search(/(?:<\?xml|<hierarchy\b)/i);
+      if (xmlStart < 0) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          "The server-owned UI Automator dump file did not contain XML.",
+          { outputPrefix: xml.slice(0, 160) }
+        );
+      }
+      return xml.slice(xmlStart);
+    } finally {
+      try {
+        await this.#runText(["-s", serial, "shell", "rm", "-f", dumpPath]);
+      } catch {
+        // Cleanup is best effort; the path is unique and contains no user data.
+      }
     }
-    const output = await this.#runText(buildUiDumpArgs(serial));
-    if (/error|exception|failed/i.test(output)) {
-      throw new PhoneControlError(
-        "OBSERVATION_FAILED",
-        "Android UI Automator could not write its fixed dump file.",
-        { outputPrefix: output.slice(0, 160) }
-      );
-    }
-    const dump = await this.#run(buildUiDumpReadArgs(serial));
-    const xml = dump.stdout.toString("utf8");
-    const xmlStart = xml.search(/(?:<\?xml|<hierarchy\b)/i);
-    if (xmlStart < 0) {
-      throw new PhoneControlError(
-        "OBSERVATION_FAILED",
-        "The fixed UI Automator dump file did not contain XML.",
-        { outputPrefix: xml.slice(0, 160) }
-      );
-    }
-    return xml.slice(xmlStart);
   }
 
   public async captureScreenshot(
@@ -316,8 +526,49 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
   ): Promise<Uint8Array> {
     let sfDisplayId: string | undefined;
     if (displayId > 0) {
+      let displayInfoOutput = "";
       try {
-        const sfOutput = await this.#runText([
+        // `cmd display get-displays` exposes the logical display id and its
+        // DisplayInfo.uniqueId together. That unique id is the only stable
+        // bridge to SurfaceFlinger's physical/virtual capture id.
+        displayInfoOutput = await this.#runText([
+          "-s",
+          serial,
+          "shell",
+          "cmd",
+          "display",
+          "get-displays"
+        ]);
+      } catch (error) {
+        if (error instanceof PhoneControlError && error.code === "ADB_TIMEOUT") {
+          throw error;
+        }
+        try {
+          // Older Android builds do not expose `cmd display get-displays`.
+          displayInfoOutput = await this.#runText([
+            "-s",
+            serial,
+            "shell",
+            "dumpsys",
+            "display"
+          ]);
+        } catch (fallbackError) {
+          if (
+            fallbackError instanceof PhoneControlError &&
+            fallbackError.code === "ADB_TIMEOUT"
+          ) {
+            throw fallbackError;
+          }
+        }
+      }
+
+      const logicalUniqueId = parseLogicalDisplayUniqueId(
+        displayInfoOutput,
+        displayId
+      );
+      let sfOutput = "";
+      try {
+        sfOutput = await this.#runText([
           "-s",
           serial,
           "shell",
@@ -325,18 +576,49 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
           "SurfaceFlinger",
           "--display-id"
         ]);
-        const lines = sfOutput.split("\n");
-        const virtualLine = lines.find(
-          (l) => l.includes("Virtual display") || l.includes("scrcpy")
-        );
-        if (virtualLine) {
-          const match = virtualLine.match(/Display\s+(\d+)/i);
-          if (match) {
-            sfDisplayId = match[1];
+      } catch (error) {
+        if (error instanceof PhoneControlError && error.code === "ADB_TIMEOUT") {
+          throw error;
+        }
+      }
+
+      sfDisplayId =
+        parseSurfaceFlingerDisplayId(sfOutput, displayId, logicalUniqueId) ??
+        parseUniqueSurfaceFlingerVirtualDisplayId(sfOutput);
+
+      if (sfDisplayId === undefined) {
+        try {
+          // Android 14/15/16 commonly restrict `--display-id` to physical
+          // displays or omit the uniqueId token. The compact `--displays`
+          // dump still includes virtual DisplayDevice/Virtual Display ids, so
+          // use it only when exactly one candidate has scrcpy's display name.
+          const displaysOutput = await this.#runText([
+            "-s",
+            serial,
+            "shell",
+            "dumpsys",
+            "SurfaceFlinger",
+            "--displays"
+          ]);
+          sfDisplayId =
+            parseSurfaceFlingerDisplayId(
+              displaysOutput,
+              displayId,
+              logicalUniqueId
+            ) ?? parseUniqueSurfaceFlingerVirtualDisplayId(displaysOutput);
+        } catch (error) {
+          if (error instanceof PhoneControlError && error.code === "ADB_TIMEOUT") {
+            throw error;
           }
         }
-      } catch {
-        // Ignore failure and fallback to logical displayId
+      }
+
+      if (sfDisplayId === undefined) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          `SurfaceFlinger did not expose a capture id provably bound to logical display ${displayId}.`,
+          { displayId, visualOnly: true }
+        );
       }
     }
 

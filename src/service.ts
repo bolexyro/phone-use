@@ -1501,7 +1501,13 @@ export class PhoneControlService {
       const [foreground, display, xml, screenshot] = await Promise.all([
         this.#adb.getForeground(serial, displayId),
         this.#adb.getDisplay(serial, displayId),
-        this.#adb.dumpUiAutomatorXml(serial, displayId).catch(() => null),
+        // UI Automator's shell dump is device-focused rather than
+        // display-scoped. Never attach that primary-display hierarchy to a
+        // secondary observation; those observations intentionally remain
+        // visual-only until the adapter can prove UI provenance.
+        displayId === 0
+          ? this.#adb.dumpUiAutomatorXml(serial, displayId).catch(() => null)
+          : Promise.resolve<string | null>(null),
         includeScreenshot
           ? this.#adb.captureScreenshot(serial, displayId)
           : Promise.resolve<Uint8Array | undefined>(undefined)
