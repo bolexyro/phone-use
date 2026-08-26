@@ -1,0 +1,7 @@
+/local.properties
+/build/
+/app/build/
+/.gradle/
+/session-setup.png
+/active-session.png
+/layout-check.png
