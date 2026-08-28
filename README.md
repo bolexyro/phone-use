@@ -45,3 +45,10 @@ The ADB executable is resolved in this order:
 3. `adb.exe`/`adb` found through `PATH`
 
 Use `PHONE_CONTROL_DEVICE_SERIAL` when more than one authorized device is connected. Without it, exactly one device in the ADB `device` state is required. `PHONE_CONTROL_PROFILE` defaults to `local`; `PHONE_CONTROL_CONFIG_PATH` can point at another server-side policy file.
+
+## Phone-assistant pivot
+
+The standalone `android-assistant/` app is now the phone-side Watch-mode
+authority. Codex App Server can load the desktop adapter with the configured
+`phone_assistant` MCP server; setup and the typed action contract are in
+[`docs/codex-app-server-phone-assistant.md`](docs/codex-app-server-phone-assistant.md).

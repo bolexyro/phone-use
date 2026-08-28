@@ -6,8 +6,30 @@ enum class ActionType {
     TAP,
     TYPE,
     SWIPE,
+    SCROLL,
     BACK,
+    KEYPRESS,
     WAIT,
+}
+
+enum class KeypressKey {
+    BACK,
+    HOME,
+    ENTER,
+    DELETE,
+}
+
+enum class ScrollDirection {
+    UP,
+    DOWN,
+    LEFT,
+    RIGHT,
+}
+
+enum class ScrollAmount {
+    SMALL,
+    MEDIUM,
+    LARGE,
 }
 
 /**
@@ -71,6 +93,11 @@ data class TypeAction(
     val text: String,
     override val metadata: ActionMetadata,
 ) : PhoneAction {
+    init {
+        require(text.isNotEmpty()) { "Type text must not be empty" }
+        require(text.length <= 4096) { "Type text must be at most 4096 characters" }
+    }
+
     override val type: ActionType = ActionType.TYPE
 }
 
@@ -91,10 +118,25 @@ data class SwipeAction(
     override val type: ActionType = ActionType.SWIPE
 }
 
+data class ScrollAction(
+    val direction: ScrollDirection,
+    val amount: ScrollAmount,
+    override val metadata: ActionMetadata,
+) : PhoneAction {
+    override val type: ActionType = ActionType.SCROLL
+}
+
 data class BackAction(
     override val metadata: ActionMetadata,
 ) : PhoneAction {
     override val type: ActionType = ActionType.BACK
+}
+
+data class KeypressAction(
+    val key: KeypressKey,
+    override val metadata: ActionMetadata,
+) : PhoneAction {
+    override val type: ActionType = ActionType.KEYPRESS
 }
 
 data class WaitAction(

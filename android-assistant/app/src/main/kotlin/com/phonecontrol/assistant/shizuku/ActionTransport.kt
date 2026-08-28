@@ -3,9 +3,19 @@ package com.phonecontrol.assistant.shizuku
 import android.content.Context
 import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot
+import com.phonecontrol.assistant.domain.BackAction
+import com.phonecontrol.assistant.domain.KeypressAction
+import com.phonecontrol.assistant.domain.KeypressKey
 import com.phonecontrol.assistant.domain.OpenAppAction
 import com.phonecontrol.assistant.domain.PhoneAction
+import com.phonecontrol.assistant.domain.ScrollAction
+import com.phonecontrol.assistant.domain.ScrollAmount
+import com.phonecontrol.assistant.domain.ScrollDirection
+import com.phonecontrol.assistant.domain.SwipeAction
 import com.phonecontrol.assistant.domain.TapAction
+import com.phonecontrol.assistant.domain.TypeAction
+import com.phonecontrol.assistant.domain.WaitAction
+import kotlinx.coroutines.delay
 
 sealed interface TransportResult {
     data class Rejected(val code: RejectionCode, val message: String) : TransportResult
@@ -20,6 +30,7 @@ enum class RejectionCode {
     STALE_OBSERVATION,
     FOREGROUND_CHANGED,
     INVALID_COORDINATE,
+    UNSUPPORTED_TEXT,
     COMMAND_FAILED,
 }
 
@@ -27,7 +38,7 @@ interface PhoneActionTransport {
     suspend fun execute(action: PhoneAction, observation: ObservationSnapshot?): TransportResult
 }
 
-/** Shizuku-backed executor for the first two typed actions. */
+/** Shizuku-backed executor for the typed v0 action set. */
 class ShizukuActionTransport(
     private val controller: ShizukuController,
     private val context: Context,
@@ -67,9 +78,12 @@ class ShizukuActionTransport(
         return when (action) {
             is OpenAppAction -> openApp(action)
             is TapAction -> tap(action, observation)
-            else -> TransportResult.Unsupported(
-                "${action.type} is not wired to input injection yet; no phone action was executed.",
-            )
+            is TypeAction -> type(action, observation)
+            is SwipeAction -> swipe(action, observation)
+            is ScrollAction -> scroll(action, observation)
+            is BackAction -> back(action, observation)
+            is KeypressAction -> keypress(action, observation)
+            is WaitAction -> wait(action, observation)
         }
     }
 
@@ -110,27 +124,11 @@ class ShizukuActionTransport(
         action: TapAction,
         observation: ObservationSnapshot,
     ): TransportResult {
-        val fresh = observationProvider.capture(
-            expectedPackageName = observation.packageName,
-            guardRegions = action.metadata.guardRegions,
-        )
-        val current = when (fresh) {
-            is ObservationCaptureResult.Failed -> {
-                return TransportResult.Rejected(
-                    RejectionCode.FOREGROUND_CHANGED,
-                    fresh.message,
-                )
-            }
-
-            is ObservationCaptureResult.Succeeded -> fresh.snapshot
+        val current = when (val check = freshCheck(action, observation)) {
+            is FreshCheck.Rejected -> return check.result
+            is FreshCheck.Ready -> check.snapshot
         }
-        if (isStale(observation, current, action.metadata.guardRegions)) {
-            return TransportResult.Rejected(
-                RejectionCode.STALE_OBSERVATION,
-                "The approved screen changed before the tap; no input was sent.",
-            )
-        }
-        if (action.x >= current.width || action.y >= current.height) {
+        if (!current.contains(action.x, action.y)) {
             return TransportResult.Rejected(
                 RejectionCode.INVALID_COORDINATE,
                 "Tap coordinate ${action.x},${action.y} is outside the ${current.width}x${current.height} display.",
@@ -144,6 +142,156 @@ class ShizukuActionTransport(
             result,
             successMessage = "Tapped ${action.x},${action.y}: ${action.metadata.purpose}",
         )
+    }
+
+    private suspend fun type(
+        action: TypeAction,
+        observation: ObservationSnapshot,
+    ): TransportResult {
+        when (val check = freshCheck(action, observation)) {
+            is FreshCheck.Rejected -> return check.result
+            is FreshCheck.Ready -> Unit
+        }
+        val encoded = try {
+            encodeInputText(action.text)
+        } catch (error: IllegalArgumentException) {
+            return TransportResult.Rejected(
+                RejectionCode.UNSUPPORTED_TEXT,
+                error.message ?: "The requested text cannot be sent by Android input text.",
+            )
+        }
+        val result = processRunner.run(listOf("input", "text", encoded))
+        return commandResult(
+            result,
+            successMessage = "Typed ${action.text.length} characters: ${action.metadata.purpose}",
+        )
+    }
+
+    private suspend fun swipe(
+        action: SwipeAction,
+        observation: ObservationSnapshot,
+    ): TransportResult {
+        val current = when (val check = freshCheck(action, observation)) {
+            is FreshCheck.Rejected -> return check.result
+            is FreshCheck.Ready -> check.snapshot
+        }
+        if (!current.contains(action.startX, action.startY) || !current.contains(action.endX, action.endY)) {
+            return TransportResult.Rejected(
+                RejectionCode.INVALID_COORDINATE,
+                "Swipe coordinates are outside the ${current.width}x${current.height} display.",
+            )
+        }
+        val result = processRunner.run(
+            listOf(
+                "input",
+                "swipe",
+                action.startX.toString(),
+                action.startY.toString(),
+                action.endX.toString(),
+                action.endY.toString(),
+                action.durationMs.toString(),
+            ),
+        )
+        return commandResult(
+            result,
+            successMessage = "Swiped from ${action.startX},${action.startY} to ${action.endX},${action.endY}: ${action.metadata.purpose}",
+        )
+    }
+
+    private suspend fun back(
+        action: BackAction,
+        observation: ObservationSnapshot,
+    ): TransportResult {
+        return keypress(
+            KeypressAction(KeypressKey.BACK, action.metadata),
+            observation,
+            displayName = "Pressed Back",
+        )
+    }
+
+    private suspend fun keypress(
+        action: KeypressAction,
+        observation: ObservationSnapshot,
+        displayName: String = "Pressed ${action.key.name}",
+    ): TransportResult {
+        when (val check = freshCheck(action, observation)) {
+            is FreshCheck.Rejected -> return check.result
+            is FreshCheck.Ready -> Unit
+        }
+        val keyCode = when (action.key) {
+            KeypressKey.BACK -> "KEYCODE_BACK"
+            KeypressKey.HOME -> "KEYCODE_HOME"
+            KeypressKey.ENTER -> "KEYCODE_ENTER"
+            KeypressKey.DELETE -> "KEYCODE_DEL"
+        }
+        val result = processRunner.run(listOf("input", "keyevent", keyCode))
+        return commandResult(result, successMessage = "$displayName: ${action.metadata.purpose}")
+    }
+
+    private suspend fun scroll(
+        action: ScrollAction,
+        observation: ObservationSnapshot,
+    ): TransportResult {
+        val current = when (val check = freshCheck(action, observation)) {
+            is FreshCheck.Rejected -> return check.result
+            is FreshCheck.Ready -> check.snapshot
+        }
+        val gesture = scrollGesture(current, action.direction, action.amount)
+        val result = processRunner.run(
+            listOf(
+                "input",
+                "swipe",
+                gesture.startX.toString(),
+                gesture.startY.toString(),
+                gesture.endX.toString(),
+                gesture.endY.toString(),
+                SCROLL_DURATION_MS.toString(),
+            ),
+        )
+        return commandResult(
+            result,
+            successMessage = "Scrolled ${action.direction.name.lowercase()} (${action.amount.name.lowercase()}): ${action.metadata.purpose}",
+        )
+    }
+
+    private suspend fun wait(
+        action: WaitAction,
+        observation: ObservationSnapshot,
+    ): TransportResult {
+        when (val check = freshCheck(action, observation)) {
+            is FreshCheck.Rejected -> return check.result
+            is FreshCheck.Ready -> Unit
+        }
+        delay(action.durationMs)
+        return TransportResult.Succeeded("Waited ${action.durationMs} ms: ${action.metadata.purpose}")
+    }
+
+    private suspend fun freshCheck(
+        action: PhoneAction,
+        observation: ObservationSnapshot,
+    ): FreshCheck {
+        val fresh = observationProvider.capture(
+            expectedPackageName = observation.packageName,
+            guardRegions = action.metadata.guardRegions,
+        )
+        val current = when (fresh) {
+            is ObservationCaptureResult.Failed -> {
+                return FreshCheck.Rejected(
+                    TransportResult.Rejected(RejectionCode.FOREGROUND_CHANGED, fresh.message),
+                )
+            }
+
+            is ObservationCaptureResult.Succeeded -> fresh.snapshot
+        }
+        if (isStale(observation, current, action.metadata.guardRegions)) {
+            return FreshCheck.Rejected(
+                TransportResult.Rejected(
+                    RejectionCode.STALE_OBSERVATION,
+                    "The approved screen changed before ${action.type.name.lowercase().replace('_', ' ')}; no input was sent.",
+                ),
+            )
+        }
+        return FreshCheck.Ready(current)
     }
 
     private fun isStale(
@@ -183,5 +331,82 @@ class ShizukuActionTransport(
             )
         }
         return TransportResult.Succeeded(successMessage)
+    }
+
+    private sealed interface FreshCheck {
+        data class Ready(val snapshot: ObservationSnapshot) : FreshCheck
+        data class Rejected(val result: TransportResult.Rejected) : FreshCheck
+    }
+
+    private fun ObservationSnapshot.contains(x: Int, y: Int): Boolean =
+        x in 0 until width && y in 0 until height
+
+    private fun encodeInputText(text: String): String {
+        require(text.none { it == '%' }) {
+            "Android input text cannot safely encode '%' in this v0 transport."
+        }
+        require(text.none { it.code < 0x20 || it.code == 0x7f }) {
+            "Android input text does not accept control characters."
+        }
+        // `input text` uses `%s` as its documented space escape. The argv is
+        // passed directly through Shizuku, so shell quoting is neither needed
+        // nor permitted here.
+        return text.replace(" ", "%s")
+    }
+
+    private fun scrollGesture(
+        observation: ObservationSnapshot,
+        direction: ScrollDirection,
+        amount: ScrollAmount,
+    ): Gesture {
+        val distance = when (amount) {
+            ScrollAmount.SMALL -> 0.22f
+            ScrollAmount.MEDIUM -> 0.42f
+            ScrollAmount.LARGE -> 0.62f
+        }
+        val centerX = observation.width / 2
+        val centerY = observation.height / 2
+        val horizontalDistance = (observation.width * distance).toInt().coerceAtLeast(1)
+        val verticalDistance = (observation.height * distance).toInt().coerceAtLeast(1)
+        return when (direction) {
+            ScrollDirection.UP -> Gesture(
+                centerX,
+                (centerY + verticalDistance / 2).coerceAtMost(observation.height - 1),
+                centerX,
+                (centerY - verticalDistance / 2).coerceAtLeast(0),
+            )
+
+            ScrollDirection.DOWN -> Gesture(
+                centerX,
+                (centerY - verticalDistance / 2).coerceAtLeast(0),
+                centerX,
+                (centerY + verticalDistance / 2).coerceAtMost(observation.height - 1),
+            )
+
+            ScrollDirection.LEFT -> Gesture(
+                (centerX + horizontalDistance / 2).coerceAtMost(observation.width - 1),
+                centerY,
+                (centerX - horizontalDistance / 2).coerceAtLeast(0),
+                centerY,
+            )
+
+            ScrollDirection.RIGHT -> Gesture(
+                (centerX - horizontalDistance / 2).coerceAtLeast(0),
+                centerY,
+                (centerX + horizontalDistance / 2).coerceAtMost(observation.width - 1),
+                centerY,
+            )
+        }
+    }
+
+    private data class Gesture(
+        val startX: Int,
+        val startY: Int,
+        val endX: Int,
+        val endY: Int,
+    )
+
+    private companion object {
+        const val SCROLL_DURATION_MS = 400L
     }
 }

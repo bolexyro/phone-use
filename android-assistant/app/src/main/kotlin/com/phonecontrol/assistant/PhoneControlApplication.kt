@@ -44,8 +44,10 @@ class PhoneControlApplication : Application() {
         // development sessions. It is deliberately not a production network
         // endpoint or an MCP server by itself.
         devBridgeServer = DevBridgeServer(
+            context = this,
             coordinator = sessionCoordinator,
             observationProvider = observationProvider,
+            allowedPackagesProvider = appPermissionRepository::enabledPackages,
         ).also { it.start() }
     }
 }

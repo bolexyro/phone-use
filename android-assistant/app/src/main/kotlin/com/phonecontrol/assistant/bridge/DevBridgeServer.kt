@@ -1,11 +1,27 @@
 package com.phonecontrol.assistant.bridge
 
+import android.util.Base64
+import android.content.Context
+import android.content.Intent
 import com.phonecontrol.assistant.domain.ActionMetadata
+import com.phonecontrol.assistant.domain.BackAction
 import com.phonecontrol.assistant.domain.GuardRegion
+import com.phonecontrol.assistant.domain.KeypressAction
+import com.phonecontrol.assistant.domain.KeypressKey
 import com.phonecontrol.assistant.domain.OpenAppAction
+import com.phonecontrol.assistant.domain.ObservationSnapshot
+import com.phonecontrol.assistant.domain.PhoneAction
+import com.phonecontrol.assistant.domain.ScrollAction
+import com.phonecontrol.assistant.domain.ScrollAmount
+import com.phonecontrol.assistant.domain.ScrollDirection
+import com.phonecontrol.assistant.domain.SwipeAction
 import com.phonecontrol.assistant.domain.TapAction
+import com.phonecontrol.assistant.domain.TypeAction
+import com.phonecontrol.assistant.domain.WaitAction
 import com.phonecontrol.assistant.session.ActionExecutionResult
+import com.phonecontrol.assistant.session.AssistantForegroundService
 import com.phonecontrol.assistant.session.SessionCoordinator
+import com.phonecontrol.assistant.session.SessionState
 import com.phonecontrol.assistant.shizuku.ObservationCaptureResult
 import com.phonecontrol.assistant.shizuku.ShizukuObservationProvider
 import com.phonecontrol.assistant.shizuku.TransportResult
@@ -17,6 +33,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.UUID
+import java.util.Collections
+import java.util.LinkedHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,18 +50,26 @@ import org.json.JSONObject
  * Localhost-only NDJSON bridge used by the development desktop companion.
  *
  * The desktop reaches this socket through `adb forward`, so no phone port is
- * exposed on the LAN. It accepts one deliberately narrow demo request and
- * runs the same phone-owned policy/observation/transport path as a future
- * Codex action stream. This is not a production network protocol.
+ * exposed on the LAN. It accepts the typed development requests used by the
+ * local Codex MCP adapter and runs the phone-owned policy/observation/
+ * transport path. This is not a production network protocol.
  */
 class DevBridgeServer(
+    private val context: Context,
     private val coordinator: SessionCoordinator,
     private val observationProvider: ShizukuObservationProvider,
+    private val allowedPackagesProvider: () -> Set<String>,
     private val port: Int = DEFAULT_PORT,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var started = false
+    private val observations = Collections.synchronizedMap(
+        object : LinkedHashMap<String, ObservationSnapshot>(MAX_OBSERVATIONS + 1, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ObservationSnapshot>?): Boolean =
+                size > MAX_OBSERVATIONS
+        },
+    )
 
     fun start() {
         if (started) return
@@ -88,32 +114,360 @@ class DevBridgeServer(
                 write(writer, errorResponse(null, "The bridge request is too large."))
                 return
             }
-            val request = try {
-                parseRequest(JSONObject(line))
+            val json = try {
+                JSONObject(line)
             } catch (error: IllegalArgumentException) {
-                write(writer, errorResponse(null, error.message ?: "Invalid demo request."))
+                write(writer, errorResponse(null, error.message ?: "Invalid bridge request."))
                 return
             } catch (error: JSONException) {
                 write(writer, errorResponse(null, "The bridge request must be valid JSON."))
                 return
             }
+            val requestId = json.optString("requestId").ifBlank { UUID.randomUUID().toString() }
 
             write(
                 writer,
                 JSONObject()
                     .put("type", "accepted")
-                    .put("requestId", request.requestId)
-                    .put("message", "Demo sequence accepted by the phone."),
+                    .put("requestId", requestId)
+                    .put("message", "${json.optString("type", "bridge")} accepted by the phone."),
             )
             try {
-                runDemo(request, writer)
+                when (json.optString("type")) {
+                    "demo_run" -> runDemo(parseRequest(json), writer)
+                    "start_session" -> startSession(requestId, json, writer)
+                    "status" -> status(requestId, writer)
+                    "allowed_apps" -> allowedApps(requestId, writer)
+                    "observe" -> observe(requestId, json, writer)
+                    "execute_action" -> executeAction(requestId, json, writer)
+                    "stop_session" -> stopSession(requestId, json, writer)
+                    else -> write(writer, errorResponse(requestId, "Unsupported bridge request type."))
+                }
             } catch (error: Throwable) {
                 val message = error.message ?: error::class.java.simpleName
-                android.util.Log.e(TAG, "Demo request failed", error)
-                coordinator.stop("Demo failed unexpectedly: $message")
-                write(writer, errorResponse(request.requestId, "The phone bridge failed: $message"))
+                android.util.Log.e(TAG, "Bridge request failed", error)
+                write(writer, errorResponse(requestId, "The phone bridge failed: $message"))
             }
         }
+    }
+
+    private fun startSession(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val request = json.optString("request").trim()
+        require(request.isNotEmpty() && request.length <= MAX_REQUEST_CHARS) {
+            "request must be 1-$MAX_REQUEST_CHARS characters."
+        }
+        if (!coordinator.start(request)) {
+            write(writer, errorResponse(requestId, "The phone already has an active session."))
+            return
+        }
+        val state = coordinator.state.value
+        val sessionId = (state as? SessionState.Running)?.sessionId
+        require(sessionId != null) { "The phone session did not enter the running state." }
+        // A desktop-originated session must get the same persistent foreground
+        // notification as a session started from the Compose Run button.
+        runCatching {
+            androidx.core.content.ContextCompat.startForegroundService(
+                context,
+                Intent(context, AssistantForegroundService::class.java)
+                    .setAction(AssistantForegroundService.ACTION_START)
+                    .putExtra(AssistantForegroundService.EXTRA_REQUEST, request),
+            )
+        }.onFailure { error ->
+            android.util.Log.w(TAG, "Could not start the foreground notification for the bridge session", error)
+        }
+        write(
+            writer,
+            JSONObject()
+                .put("type", "started")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("sessionId", sessionId)
+                .put("message", "Phone assistant session started."),
+        )
+    }
+
+    private fun status(
+        requestId: String,
+        writer: BufferedWriter,
+    ) {
+        val state = coordinator.state.value
+        val response = JSONObject()
+            .put("type", "status")
+            .put("requestId", requestId)
+            .put("ok", true)
+            .put("state", stateName(state))
+            .put("active", state is SessionState.Running || state is SessionState.Paused)
+        when (state) {
+            is SessionState.Running -> response
+                .put("sessionId", state.sessionId)
+                .put("currentPurpose", state.currentPurpose)
+            is SessionState.Paused -> response
+                .put("sessionId", state.sessionId)
+                .put("currentPurpose", state.currentPurpose)
+            else -> Unit
+        }
+        write(writer, response)
+    }
+
+    private fun allowedApps(
+        requestId: String,
+        writer: BufferedWriter,
+    ) {
+        val packages = allowedPackagesProvider().toList().sorted()
+        write(
+            writer,
+            JSONObject()
+                .put("type", "allowed_apps")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("allowedPackages", JSONArray(packages))
+                .put("count", packages.size),
+        )
+    }
+
+    private suspend fun observe(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val expectedPackage = json.optString("expectedPackageName").trim().ifBlank { null }
+        if (expectedPackage != null) {
+            require(PACKAGE_PATTERN.matches(expectedPackage)) {
+                "expectedPackageName is not a valid Android package name."
+            }
+        }
+        val guards = parseGuardRegions(json.optJSONArray("guardRegions"))
+        when (val captured = captureWithRetry(expectedPackage, guards)) {
+            is ObservationCaptureResult.Failed -> write(writer, errorResponse(requestId, captured.message))
+            is ObservationCaptureResult.Succeeded -> {
+                remember(captured.snapshot)
+                writeObservation(writer, requestId, captured.snapshot, captured.screenshot)
+            }
+        }
+    }
+
+    private suspend fun executeAction(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val actionJson = json.optJSONObject("action")
+            ?: throw IllegalArgumentException("action must be an object.")
+        val action = parsePhoneAction(actionJson)
+        val observation = observations[action.metadata.observationId]
+            ?: throw IllegalArgumentException(
+                "Observation ${action.metadata.observationId} is unknown or expired; observe again.",
+            )
+        val result = coordinator.executeAction(action, observation)
+        writeActionResult(writer, requestId, wireActionName(action), result)
+        if (!result.isSuccessful()) {
+            val response = JSONObject()
+                .put("type", "completed")
+                .put("requestId", requestId)
+                .put("ok", false)
+                .put("action", wireActionName(action))
+                .put("message", result.failureMessage())
+            result.failureCode()?.let { response.put("code", it) }
+            if (result is ActionExecutionResult.ConfirmationRequired) {
+                response.put("category", result.category)
+            }
+            write(writer, response)
+            return
+        }
+
+        if (action is OpenAppAction) {
+            delay(OPEN_SETTLE_DELAY_MS)
+        } else if (action !is WaitAction) {
+            delay(POST_ACTION_SETTLE_DELAY_MS)
+        }
+        val expectedPackage = when (action) {
+            is OpenAppAction -> action.packageName
+            else -> observation.packageName
+        }
+        when (val captured = captureWithRetry(expectedPackage, action.metadata.guardRegions)) {
+            is ObservationCaptureResult.Failed -> {
+                coordinator.stop("Post-action observation failed: ${captured.message}")
+                write(
+                    writer,
+                    JSONObject()
+                        .put("type", "completed")
+                        .put("requestId", requestId)
+                        .put("ok", false)
+                        .put("action", wireActionName(action))
+                        .put("outcome", "unknown")
+                        .put("code", "POST_OBSERVATION_FAILED")
+                        .put("message", "The action may have run, but the phone could not produce a fresh observation: ${captured.message}"),
+                )
+            }
+
+            is ObservationCaptureResult.Succeeded -> {
+                remember(captured.snapshot)
+                write(
+                    writer,
+                    JSONObject()
+                        .put("type", "completed")
+                        .put("requestId", requestId)
+                        .put("ok", true)
+                        .put("action", wireActionName(action))
+                        .put("message", result.successMessage())
+                        .put("observation", snapshotJson(captured.snapshot))
+                        .put("screenshotBase64", Base64.encodeToString(captured.screenshot, Base64.NO_WRAP))
+                        .put("screenshotMimeType", "image/png"),
+                )
+            }
+        }
+    }
+
+    private fun stopSession(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val reason = json.optString("reason", "Stopped by the desktop assistant.")
+            .trim()
+            .ifBlank { "Stopped by the desktop assistant." }
+            .take(MAX_TEXT_CHARS)
+        val stopped = coordinator.stop(reason)
+        context.stopService(Intent(context, AssistantForegroundService::class.java))
+        write(
+            writer,
+            JSONObject()
+                .put("type", "stopped")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("wasActive", stopped)
+                .put("message", reason),
+        )
+    }
+
+    private fun parsePhoneAction(json: JSONObject): PhoneAction {
+        val metadata = parseMetadata(json.optJSONObject("metadata"))
+        return when (json.optString("type")) {
+            "open_app" -> {
+                val packageName = json.optString("packageName")
+                require(PACKAGE_PATTERN.matches(packageName)) { "packageName is not a valid Android package name." }
+                OpenAppAction(packageName, metadata)
+            }
+
+            "tap", "click_coordinate" -> TapAction(
+                x = json.getInt("x"),
+                y = json.getInt("y"),
+                metadata = metadata,
+            )
+
+            "type" -> TypeAction(json.getString("text"), metadata)
+
+            "swipe" -> SwipeAction(
+                startX = json.getInt("startX"),
+                startY = json.getInt("startY"),
+                endX = json.getInt("endX"),
+                endY = json.getInt("endY"),
+                durationMs = json.optLong("durationMs", 350L),
+                metadata = metadata,
+            )
+
+            "scroll" -> ScrollAction(
+                direction = enumValue<ScrollDirection>(json.getString("direction")),
+                amount = enumValue<ScrollAmount>(json.getString("amount")),
+                metadata = metadata,
+            )
+
+            "back" -> BackAction(metadata)
+
+            "keypress" -> KeypressAction(
+                key = enumValue<KeypressKey>(json.getString("key")),
+                metadata = metadata,
+            )
+
+            "wait" -> WaitAction(json.getLong("durationMs"), metadata)
+
+            else -> throw IllegalArgumentException(
+                "Unsupported action type. Use open_app, tap, type, swipe, scroll, back, keypress, or wait.",
+            )
+        }
+    }
+
+    private fun parseMetadata(json: JSONObject?): ActionMetadata {
+        require(json != null) { "action.metadata is required." }
+        val purpose = json.optString("purpose").trim()
+        val observationId = json.optString("observationId").trim()
+        val targetDescription = json.optString("targetDescription").trim()
+        require(purpose.isNotEmpty() && purpose.length <= MAX_TEXT_CHARS) {
+            "metadata.purpose must be 1-$MAX_TEXT_CHARS characters."
+        }
+        require(observationId.isNotEmpty() && observationId.length <= MAX_TEXT_CHARS) {
+            "metadata.observationId is invalid."
+        }
+        require(targetDescription.isNotEmpty() && targetDescription.length <= MAX_TEXT_CHARS) {
+            "metadata.targetDescription must be 1-$MAX_TEXT_CHARS characters."
+        }
+        return ActionMetadata(
+            purpose = purpose,
+            observationId = observationId,
+            targetDescription = targetDescription,
+            guardRegions = parseGuardRegions(json.optJSONArray("guardRegions")),
+        )
+    }
+
+    private inline fun <reified T : Enum<T>> enumValue(value: String): T =
+        enumValues<T>().firstOrNull { it.name.equals(value, ignoreCase = true) }
+            ?: throw IllegalArgumentException("Unsupported enum value: $value")
+
+    private fun wireActionName(action: PhoneAction): String = when (action) {
+        is OpenAppAction -> "open_app"
+        is TapAction -> "tap"
+        is TypeAction -> "type"
+        is SwipeAction -> "swipe"
+        is ScrollAction -> "scroll"
+        is BackAction -> "back"
+        is KeypressAction -> "keypress"
+        is WaitAction -> "wait"
+    }
+
+    private fun remember(snapshot: ObservationSnapshot) {
+        synchronized(observations) {
+            observations[snapshot.id] = snapshot
+        }
+    }
+
+    private fun writeObservation(
+        writer: BufferedWriter,
+        requestId: String,
+        snapshot: ObservationSnapshot,
+        screenshot: ByteArray,
+    ) {
+        write(
+            writer,
+            JSONObject()
+                .put("type", "observation")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("observation", snapshotJson(snapshot))
+                .put("screenshotBase64", Base64.encodeToString(screenshot, Base64.NO_WRAP))
+                .put("screenshotMimeType", "image/png"),
+        )
+    }
+
+    private fun snapshotJson(snapshot: ObservationSnapshot): JSONObject = JSONObject()
+        .put("id", snapshot.id)
+        .put("packageName", snapshot.packageName)
+        .put("activityName", snapshot.activityName ?: JSONObject.NULL)
+        .put("displayId", snapshot.displayId)
+        .put("rotation", snapshot.rotation)
+        .put("width", snapshot.width)
+        .put("height", snapshot.height)
+        .put("screenshotFingerprint", snapshot.screenshotFingerprint)
+
+    private fun stateName(state: SessionState): String = when (state) {
+        SessionState.Idle -> "idle"
+        is SessionState.Running -> "running"
+        is SessionState.Paused -> "paused"
+        is SessionState.Stopped -> "stopped"
+        is SessionState.Completed -> "completed"
     }
 
     private suspend fun runDemo(request: DemoRequest, writer: BufferedWriter) {
@@ -199,7 +553,7 @@ class DevBridgeServer(
     }
 
     private suspend fun captureWithRetry(
-        expectedPackageName: String,
+        expectedPackageName: String?,
         guardRegions: List<GuardRegion>,
     ): ObservationCaptureResult {
         var last: ObservationCaptureResult = ObservationCaptureResult.Failed("No capture attempted.")
@@ -326,6 +680,7 @@ class DevBridgeServer(
         const val MAX_REQUEST_CHARS = 16_384
         const val MAX_TEXT_CHARS = 240
         const val MAX_GUARD_REGIONS = 8
+        const val MAX_OBSERVATIONS = 64
         const val OPEN_SETTLE_DELAY_MS = 750L
         const val POST_ACTION_SETTLE_DELAY_MS = 350L
         const val CAPTURE_ATTEMPTS = 5
@@ -346,4 +701,26 @@ private fun ActionExecutionResult.failureMessage(): String = when (this) {
     is ActionExecutionResult.ConfirmationRequired -> message
     is ActionExecutionResult.PolicyRejected -> message
     ActionExecutionResult.SessionNotRunning -> "The phone session is no longer running."
+}
+
+private fun ActionExecutionResult.successMessage(): String = when (this) {
+    is ActionExecutionResult.TransportFinished -> when (val result = result) {
+        is TransportResult.Succeeded -> result.message
+        is TransportResult.Rejected -> result.message
+        is TransportResult.Unsupported -> result.message
+    }
+    is ActionExecutionResult.ConfirmationRequired -> message
+    is ActionExecutionResult.PolicyRejected -> message
+    ActionExecutionResult.SessionNotRunning -> "The phone session is no longer running."
+}
+
+private fun ActionExecutionResult.failureCode(): String? = when (this) {
+    is ActionExecutionResult.TransportFinished -> when (val result = result) {
+        is TransportResult.Rejected -> result.code.name
+        is TransportResult.Unsupported -> "UNSUPPORTED_ACTION"
+        is TransportResult.Succeeded -> null
+    }
+    is ActionExecutionResult.ConfirmationRequired -> "CONFIRMATION_REQUIRED"
+    is ActionExecutionResult.PolicyRejected -> "POLICY_REJECTED"
+    ActionExecutionResult.SessionNotRunning -> "SESSION_NOT_RUNNING"
 }
