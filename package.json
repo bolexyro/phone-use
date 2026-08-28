@@ -14,7 +14,8 @@
     "test": "vitest run",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "viewer": "electron dist/viewer/main.js"
+    "viewer": "electron dist/viewer/main.js",
+    "bridge:demo": "tsx src/desktop-codex-bridge-demo.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

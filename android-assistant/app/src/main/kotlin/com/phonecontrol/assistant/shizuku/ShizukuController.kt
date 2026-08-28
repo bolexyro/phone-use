@@ -69,7 +69,7 @@ class ShizukuController {
             privilegedApiReady = ready,
             message = when {
                 preV11 -> "This Shizuku service is too old; API v11+ is required."
-                permissionGranted -> "Shizuku is ready. Input execution remains unverified."
+                permissionGranted -> "Shizuku is ready. Typed open/tap execution is available for device validation."
                 else -> "Shizuku is running; permission is required."
             },
         )

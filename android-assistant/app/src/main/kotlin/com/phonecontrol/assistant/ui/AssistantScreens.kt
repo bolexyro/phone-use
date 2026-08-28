@@ -248,7 +248,7 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    "This only reports the service and permission state. Input injection is intentionally not enabled until verified on the target phone.",
+                    "The development bridge can now try typed open/tap actions. We still fail closed when the screen or Shizuku capability cannot be verified on this phone.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),

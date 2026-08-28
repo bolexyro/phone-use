@@ -22,13 +22,16 @@ notifications and (eventually) observation/action execution.
   observation IDs and confirmation categories: send, purchase, transfer,
   delete and submit.
 - Official Shizuku API lifecycle and capability detection, plus a typed
-  transport boundary. The transport currently fails closed after detection;
-  it does not inject input or execute raw shell commands.
+  transport for `am start` and `input tap`. The app builds those argv arrays
+  itself; no raw provider/model shell command is accepted. Before a tap, the
+  phone captures a fresh shell screenshot and rejects stale package, activity,
+  display, full-screen, or declared guard-region state.
 
-The current Run flow records a session and displays that it is waiting for the
-desktop Codex bridge. Codex App Server, the desktop companion, screenshot
-capture, regional freshness comparison and real Shizuku input injection are
-not implemented in this milestone.
+The current Run flow still records a session for the eventual Codex path. A
+localhost-only development bridge is now available so the typed execution
+path can be tested independently of the planner. It accepts one explicit
+`demo_run` request, opens an allowlisted package, observes it, taps the given
+coordinate, observes again, and streams NDJSON progress to the desktop.
 
 ## Build
 
@@ -66,10 +69,33 @@ launch Phone Control Assistant, and open Settings. The app reports binder
 availability and permission state and can request the Shizuku API permission.
 
 This repository has not validated physical execution on an S23. A Shizuku
-service being detected is not evidence that taps, typing or swipes work on a
-particular One UI/device build. The transport therefore returns an explicit
-unsupported result for every action until a separate device-validation step
-proves the exact operation safely.
+service being detected is not evidence that taps work on a particular One
+UI/device build. The first physical validation target is the typed open/tap
+demo below; typing, swipes, back, and waits remain unsupported.
+
+## Dummy desktop bridge (open -> observe -> tap)
+
+The Android app starts a loopback-only NDJSON listener on port `8765` while its
+process is alive. Keep the app open, connect it to the development machine,
+and forward that port:
+
+```powershell
+adb forward tcp:8765 tcp:8765
+```
+
+From the repository root, send the deterministic demo plan (the benchmark
+package is the safe default; pass another package only after enabling it in
+the app's Approved apps settings):
+
+```powershell
+pnpm bridge:demo -- --package com.phonecontrol.coordinatebenchmark --x 500 --y 900
+```
+
+Optional flags are `--host`, `--port`, `--purpose`, and `--target`. The phone
+is still the authority: it checks Shizuku state, the per-app allowlist, the
+fresh observation binding, coordinate bounds, and screen/guard freshness
+before it sends `input tap`. The desktop script is only a hard-coded Codex
+bridge stub; it does not authenticate to Codex App Server yet.
 
 ## Planned bridge
 
@@ -88,6 +114,10 @@ The desktop side will provide Codex authentication and the agent loop. The
 phone will remain the final authority for per-app permissions, confirmation,
 stale observations and cancellation. Raw model/provider payloads must not be
 treated as phone commands.
+
+The dummy bridge exercises the final two arrows today. The next desktop slice
+will replace its hard-coded request with a Codex App Server/MCP adapter while
+keeping this same typed phone protocol.
 
 ## Explicitly out of scope for this milestone
 

@@ -118,6 +118,12 @@ data class ObservationSnapshot(
     val width: Int,
     val height: Int,
     val screenshotFingerprint: String,
+    /**
+     * Fingerprints for the stable regions supplied with a coordinate action.
+     * The raw screenshot is deliberately not kept in the domain model; the
+     * observation provider owns the capture bytes and derives these hashes.
+     */
+    val guardFingerprints: Map<GuardRegion, String> = emptyMap(),
 )
 
 enum class ActivityEventKind {
