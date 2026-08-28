@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -41,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.phonecontrol.assistant.apps.AppPermissionRepository
 import com.phonecontrol.assistant.apps.InstalledUserApp
@@ -121,13 +123,18 @@ fun AssistantScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Activity", style = MaterialTheme.typography.titleLarge)
+                Text("Conversation", style = MaterialTheme.typography.titleLarge)
                 Text(
                     "${events.size} events",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            Text(
+                "Tool steps are summarized here; private Codex reasoning is not shown.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             ActivityTimeline(events = events, modifier = Modifier.weight(1f))
         }
     }
@@ -149,7 +156,12 @@ private fun SessionStatusCard(
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, fontWeight = FontWeight.SemiBold)
-            Text(detail, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                detail,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = if (state is SessionState.Completed) 4 else Int.MAX_VALUE,
+                overflow = TextOverflow.Ellipsis,
+            )
             if (state is SessionState.Running || state is SessionState.Paused) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { onPauseResume() }) {
@@ -189,21 +201,46 @@ private fun ActivityTimeline(
 @Composable
 private fun ActivityEventRow(event: ActivityEvent) {
     val markerColor = when (event.kind) {
-        ActivityEventKind.ACTION_FAILED -> MaterialTheme.colorScheme.error
+        ActivityEventKind.ACTION_FAILED,
+        ActivityEventKind.ATTENTION_REQUIRED -> MaterialTheme.colorScheme.error
         ActivityEventKind.CONFIRMATION_REQUIRED -> MaterialTheme.colorScheme.tertiary
+        ActivityEventKind.AGENT_MESSAGE -> MaterialTheme.colorScheme.primary
         ActivityEventKind.ACTION_SUCCEEDED,
         ActivityEventKind.SESSION_COMPLETED -> Color(0xFF16724A)
         else -> MaterialTheme.colorScheme.primary
     }
-    Card(modifier = Modifier.fillMaxWidth()) {
+    val cardColor = when (event.kind) {
+        ActivityEventKind.AGENT_MESSAGE -> MaterialTheme.colorScheme.primaryContainer
+        ActivityEventKind.ATTENTION_REQUIRED -> MaterialTheme.colorScheme.errorContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = cardColor),
+    ) {
         Row(
             modifier = Modifier.padding(12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Top,
         ) {
-            Surface(color = markerColor, modifier = Modifier.size(8.dp)) {}
+            Surface(
+                color = markerColor,
+                contentColor = Color.White,
+                modifier = Modifier.size(34.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(eventBadge(event), style = MaterialTheme.typography.labelMedium)
+                }
+            }
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(event.message, style = MaterialTheme.typography.bodyMedium)
+                event.actionType?.let { actionType ->
+                    Text(
+                        actionTypeLabel(actionType),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text(
                     DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(event.timestampEpochMs)),
                     style = MaterialTheme.typography.labelSmall,
@@ -212,6 +249,33 @@ private fun ActivityEventRow(event: ActivityEvent) {
             }
         }
     }
+}
+
+private fun eventBadge(event: ActivityEvent): String = when (event.kind) {
+    ActivityEventKind.AGENT_MESSAGE -> "AI"
+    ActivityEventKind.ATTENTION_REQUIRED -> "!"
+    ActivityEventKind.CONFIRMATION_REQUIRED -> "?"
+    ActivityEventKind.ACTION_SUCCEEDED -> "✓"
+    ActivityEventKind.ACTION_FAILED -> "×"
+    ActivityEventKind.ACTION_STARTED -> "…"
+    ActivityEventKind.ACTION_PROPOSED -> "→"
+    ActivityEventKind.SESSION_COMPLETED -> "✓"
+    ActivityEventKind.SESSION_STARTED -> "▶"
+    ActivityEventKind.SESSION_PAUSED -> "Ⅱ"
+    ActivityEventKind.SESSION_RESUMED -> "▶"
+    ActivityEventKind.SESSION_STOPPED -> "■"
+    ActivityEventKind.SYSTEM -> "•"
+}
+
+private fun actionTypeLabel(actionType: com.phonecontrol.assistant.domain.ActionType): String = when (actionType) {
+    com.phonecontrol.assistant.domain.ActionType.OPEN_APP -> "📱 Open app"
+    com.phonecontrol.assistant.domain.ActionType.TAP -> "👆 Tap"
+    com.phonecontrol.assistant.domain.ActionType.TYPE -> "⌨ Type"
+    com.phonecontrol.assistant.domain.ActionType.SWIPE -> "↕ Swipe"
+    com.phonecontrol.assistant.domain.ActionType.SCROLL -> "↕ Scroll"
+    com.phonecontrol.assistant.domain.ActionType.BACK -> "← Back"
+    com.phonecontrol.assistant.domain.ActionType.KEYPRESS -> "⌨ Keypress"
+    com.phonecontrol.assistant.domain.ActionType.WAIT -> "◷ Wait"
 }
 
 @Composable

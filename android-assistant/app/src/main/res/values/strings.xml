@@ -2,4 +2,8 @@
     <string name="app_name">Phone Control Assistant</string>
     <string name="notification_channel_name">Assistant sessions</string>
     <string name="notification_channel_description">Live status for Phone Control Assistant sessions</string>
+    <string name="notification_result_channel_name">Assistant results</string>
+    <string name="notification_result_channel_description">Completion messages from Phone Control Assistant</string>
+    <string name="notification_attention_channel_name">Assistant attention</string>
+    <string name="notification_attention_channel_description">Important requests for your attention from Phone Control Assistant</string>
 </resources>

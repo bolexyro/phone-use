@@ -31,6 +31,7 @@ const TERMINAL_MESSAGE_TYPES = new Set([
   "pending_request",
   "request_claimed",
   "request_released",
+  "attention_requested",
   "session_completed",
   "allowed_apps",
   "observation",

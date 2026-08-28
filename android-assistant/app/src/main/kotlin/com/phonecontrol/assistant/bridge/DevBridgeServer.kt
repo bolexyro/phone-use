@@ -144,6 +144,7 @@ class DevBridgeServer(
                     "allowed_apps" -> allowedApps(requestId, writer)
                     "observe" -> observe(requestId, json, writer)
                     "execute_action" -> executeAction(requestId, json, writer)
+                    "request_attention" -> requestAttention(requestId, json, writer)
                     "stop_session" -> stopSession(requestId, json, writer)
                     else -> write(writer, errorResponse(requestId, "Unsupported bridge request type."))
                 }
@@ -295,6 +296,10 @@ class DevBridgeServer(
             .trim()
             .ifBlank { "Codex completed the phone request." }
             .take(MAX_TEXT_CHARS)
+        val feedback = json.optString("feedback")
+            .trim()
+            .ifBlank { null }
+            ?.take(MAX_AGENT_FEEDBACK_CHARS)
         val activeSessionId = coordinator.state.value.sessionIdOrNullForBridge()
         if (activeSessionId != sessionId) {
             write(
@@ -304,7 +309,11 @@ class DevBridgeServer(
             )
             return
         }
-        val completed = coordinator.complete(message)
+        val completionMessage = feedback ?: message
+        val completed = coordinator.complete(completionMessage, agentFeedback = feedback)
+        if (completed) {
+            AssistantForegroundService.showCompletionNotification(context, completionMessage)
+        }
         context.stopService(Intent(context, AssistantForegroundService::class.java))
         write(
             writer,
@@ -313,7 +322,36 @@ class DevBridgeServer(
                 .put("requestId", requestId)
                 .put("ok", completed)
                 .put("sessionId", sessionId)
-                .put("message", message),
+                .put("message", completionMessage)
+                .put("feedback", feedback ?: JSONObject.NULL),
+        )
+    }
+
+    private fun requestAttention(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val reason = json.optString("reason")
+            .trim()
+            .ifBlank { "The phone assistant needs your attention." }
+            .take(MAX_TEXT_CHARS)
+        if (!coordinator.requestAttention(reason)) {
+            write(
+                writer,
+                errorResponse(requestId, "The phone assistant has no active session to interrupt.")
+                    .put("code", "SESSION_NOT_RUNNING"),
+            )
+            return
+        }
+        AssistantForegroundService.showAttentionNotification(context, reason)
+        write(
+            writer,
+            JSONObject()
+                .put("type", "attention_requested")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("message", reason),
         )
     }
 
@@ -783,6 +821,7 @@ class DevBridgeServer(
         const val DEFAULT_PORT = 8765
         const val MAX_REQUEST_CHARS = 16_384
         const val MAX_TEXT_CHARS = 240
+        const val MAX_AGENT_FEEDBACK_CHARS = 4_000
         const val MAX_GUARD_REGIONS = 8
         const val MAX_OBSERVATIONS = 64
         const val OPEN_SETTLE_DELAY_MS = 750L

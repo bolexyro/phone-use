@@ -76,6 +76,40 @@ class SessionCoordinatorTest {
         assertEquals(pending, coordinator.pendingRequest())
     }
 
+    @Test
+    fun `agent feedback is kept as a conversation message when completed`() {
+        val coordinator = coordinator()
+        coordinator.start("Find a restaurant")
+
+        assertTrue(
+            coordinator.complete(
+                message = "Fallback completion",
+                agentFeedback = "I stopped because the screen changed before the tap.",
+            ),
+        )
+
+        val state = coordinator.state.value as SessionState.Completed
+        assertEquals("I stopped because the screen changed before the tap.", state.message)
+        assertTrue(coordinator.events.value.any {
+            it.kind == com.phonecontrol.assistant.domain.ActivityEventKind.AGENT_MESSAGE &&
+                it.message == state.message
+        })
+    }
+
+    @Test
+    fun `attention request creates a user-visible attention event`() {
+        val coordinator = coordinator()
+        coordinator.start("Find a restaurant")
+
+        assertTrue(coordinator.requestAttention("The screen changed; please review the phone."))
+
+        assertTrue(coordinator.state.value is SessionState.Running)
+        assertEquals("Needs your attention", (coordinator.state.value as SessionState.Running).currentPurpose)
+        assertTrue(coordinator.events.value.any {
+            it.kind == com.phonecontrol.assistant.domain.ActivityEventKind.ATTENTION_REQUIRED
+        })
+    }
+
     private fun coordinator(): SessionCoordinator = SessionCoordinator(
         enabledPackagesProvider = { setOf("com.example.shop") },
         policyEngine = PolicyEngine(),

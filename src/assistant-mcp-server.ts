@@ -114,7 +114,7 @@ export const phoneAssistantActionSchema = z.discriminatedUnion("type", [
     .strict()
 ]);
 
-const observeInputSchema = z
+export const observeInputSchema = z
   .object({
     expectedPackageName: packageNameSchema.optional(),
     guardRegions: z.array(guardRegionSchema).max(8).optional()
@@ -128,6 +128,7 @@ export const PHONE_ASSISTANT_TOOL_NAMES = [
   "phone_assistant_start",
   "phone_assistant_observe",
   "phone_assistant_execute",
+  "phone_assistant_request_attention",
   "phone_assistant_stop"
 ] as const;
 
@@ -148,7 +149,14 @@ function withoutScreenshot(message: BridgeMessage): Record<string, unknown> {
 type AssistantTextContent = { type: "text"; text: string };
 type AssistantImageContent = { type: "image"; data: string; mimeType: "image/png" };
 
-function toMcpResult(message: BridgeMessage, error?: unknown) {
+export interface PhoneAssistantToolResult {
+  [key: string]: unknown;
+  isError?: boolean;
+  content: Array<AssistantTextContent | AssistantImageContent>;
+  structuredContent?: Record<string, unknown>;
+}
+
+function toMcpResult(message: BridgeMessage, error?: unknown): PhoneAssistantToolResult {
   const isError = Boolean(error) || message.ok === false;
   const content: Array<AssistantTextContent | AssistantImageContent> = [
     {
@@ -178,6 +186,76 @@ async function safely(work: () => Promise<BridgeMessage>) {
   }
 }
 
+/**
+ * Invoke one of the phone tools without going through a second MCP transport.
+ *
+ * The companion registers these same operations as App Server dynamic tools so
+ * a Codex turn can call the phone directly. Keeping this dispatcher beside the
+ * MCP registrations prevents the two tool surfaces from drifting apart.
+ */
+export async function invokePhoneAssistantTool(
+  name: string,
+  input: unknown
+): Promise<PhoneAssistantToolResult> {
+  switch (name) {
+    case "phone_assistant_status":
+      return safely(() => requestBridge({ type: "status", requestId: randomUUID() }));
+    case "phone_assistant_pending_request":
+      return safely(() => requestBridge({ type: "pending_request", requestId: randomUUID() }));
+    case "phone_assistant_list_allowed_apps":
+      return safely(() => requestBridge({ type: "allowed_apps", requestId: randomUUID() }));
+    case "phone_assistant_start":
+      return safely(() => {
+        const request = parseInput(z.string().min(1).max(16_384), readRecord(input).request);
+        return requestBridge({
+          type: "start_session",
+          requestId: randomUUID(),
+          request
+        });
+      });
+    case "phone_assistant_observe":
+      return safely(() => {
+        const parsed = parseInput(observeInputSchema, input);
+        return requestBridge({
+          type: "observe",
+          requestId: randomUUID(),
+          ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {}),
+          ...(parsed.guardRegions ? { guardRegions: parsed.guardRegions } : {})
+        });
+      });
+    case "phone_assistant_execute":
+      return safely(() => {
+        const action = parseInput(phoneAssistantActionSchema, readRecord(input).action);
+        return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
+      });
+    case "phone_assistant_request_attention":
+      return safely(() => {
+        const reason = parseInput(z.string().min(1).max(240), readRecord(input).reason);
+        return requestBridge({ type: "request_attention", requestId: randomUUID(), reason });
+      });
+    case "phone_assistant_stop":
+      return safely(() => {
+        const record = readRecord(input);
+        const reason = record.reason === undefined
+          ? undefined
+          : parseInput(z.string().min(1).max(240), record.reason);
+        return requestBridge({
+          type: "stop_session",
+          requestId: randomUUID(),
+          ...(reason ? { reason } : {})
+        });
+      });
+    default:
+      throw new Error(`Unknown phone assistant tool: ${name}`);
+  }
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
 export function createPhoneAssistantMcpServer(
   serverName = "phone-assistant",
   version = "0.1.0"
@@ -190,7 +268,7 @@ export function createPhoneAssistantMcpServer(
       description: "Report whether the phone-side assistant session is idle, running, paused, stopped, or completed.",
       inputSchema: {}
     },
-    async () => safely(() => requestBridge({ type: "status", requestId: randomUUID() }))
+    async () => invokePhoneAssistantTool("phone_assistant_status", {})
   );
 
   server.registerTool(
@@ -199,7 +277,7 @@ export function createPhoneAssistantMcpServer(
       description: "Check whether the phone has a typed request waiting for the desktop Codex companion. This is read-only; the companion claims requests separately.",
       inputSchema: {}
     },
-    async () => safely(() => requestBridge({ type: "pending_request", requestId: randomUUID() }))
+    async () => invokePhoneAssistantTool("phone_assistant_pending_request", {})
   );
 
   server.registerTool(
@@ -208,7 +286,7 @@ export function createPhoneAssistantMcpServer(
       description: "List the installed Android packages currently enabled in the phone-side per-app allowlist. Apps are off by default; use the phone settings screen to change this list.",
       inputSchema: {}
     },
-    async () => safely(() => requestBridge({ type: "allowed_apps", requestId: randomUUID() }))
+    async () => invokePhoneAssistantTool("phone_assistant_list_allowed_apps", {})
   );
 
   server.registerTool(
@@ -217,11 +295,7 @@ export function createPhoneAssistantMcpServer(
       description: "Start a phone-assistant session for a natural-language request. The phone remains the authority for app permissions, stale observations, confirmations, and cancellation.",
       inputSchema: { request: z.string().min(1).max(16_384) }
     },
-    async (input) => safely(() => requestBridge({
-      type: "start_session",
-      requestId: randomUUID(),
-      request: parseInput(z.string().min(1).max(16_384), input.request)
-    }))
+    async (input) => invokePhoneAssistantTool("phone_assistant_start", input)
   );
 
   server.registerTool(
@@ -230,15 +304,7 @@ export function createPhoneAssistantMcpServer(
       description: "Capture the current physical phone display as a PNG plus a fresh observationId. Call this before proposing an action and use the returned observationId in that action's metadata.",
       inputSchema: observeInputSchema.shape
     },
-    async (input) => safely(() => {
-      const parsed = parseInput(observeInputSchema, input);
-      return requestBridge({
-        type: "observe",
-        requestId: randomUUID(),
-        ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {}),
-        ...(parsed.guardRegions ? { guardRegions: parsed.guardRegions } : {})
-      });
-    })
+    async (input) => invokePhoneAssistantTool("phone_assistant_observe", input)
   );
 
   server.registerTool(
@@ -247,10 +313,16 @@ export function createPhoneAssistantMcpServer(
       description: "Execute one typed phone action against the exact observationId supplied in its metadata, then return a fresh post-action screenshot. Include a concise human-readable purpose such as 'Searching for jollof rice' or 'Selecting the delivery address'. Do not send shell commands.",
       inputSchema: { action: phoneAssistantActionSchema }
     },
-    async (input) => safely(() => {
-      const action = parseInput(phoneAssistantActionSchema, input.action);
-      return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
-    })
+    async (input) => invokePhoneAssistantTool("phone_assistant_execute", input)
+  );
+
+  server.registerTool(
+    "phone_assistant_request_attention",
+    {
+      description: "Notify the user that the phone assistant needs their attention. This does not open the app automatically.",
+      inputSchema: { reason: z.string().min(1).max(240) }
+    },
+    async (input) => invokePhoneAssistantTool("phone_assistant_request_attention", input)
   );
 
   server.registerTool(
@@ -259,16 +331,7 @@ export function createPhoneAssistantMcpServer(
       description: "Stop the active phone-assistant session and cancel further execution.",
       inputSchema: { reason: z.string().min(1).max(240).optional() }
     },
-    async (input) => safely(() => {
-      const reason = input.reason === undefined
-        ? undefined
-        : parseInput(z.string().min(1).max(240), input.reason);
-      return requestBridge({
-        type: "stop_session",
-        requestId: randomUUID(),
-        ...(reason ? { reason } : {})
-      });
-    })
+    async (input) => invokePhoneAssistantTool("phone_assistant_stop", input)
   );
 
   return server;

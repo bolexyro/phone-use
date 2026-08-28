@@ -49,8 +49,14 @@ Use `PHONE_CONTROL_DEVICE_SERIAL` when more than one authorized device is connec
 ## Phone-assistant pivot
 
 The standalone `android-assistant/` app is now the phone-side Watch-mode
-authority. Codex App Server can load the desktop adapter with the configured
-`phone_assistant` MCP server; setup and the typed action contract are in
+authority. The companion registers direct `phone_control_*` tools with each
+Codex App Server turn (and the reusable `phone_assistant` MCP adapter remains
+available for manual MCP clients); setup and the typed action contract are in
 [`docs/codex-app-server-phone-assistant.md`](docs/codex-app-server-phone-assistant.md).
 Run `pnpm assistant:companion` after forwarding port `8765` to let requests
 typed in the phone app start Codex turns automatically.
+
+The phone conversation shows user-facing completion feedback and summarized
+tool steps. Completion and attention notifications open the conversation when
+tapped; the assistant does not automatically steal the foreground from the
+app being operated.

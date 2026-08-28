@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -27,7 +28,7 @@ class AssistantForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        createNotificationChannels()
         startForegroundCompat(buildNotification(coordinator.state.value))
         serviceScope.launch {
             coordinator.state.collectLatest { state ->
@@ -122,20 +123,12 @@ class AssistantForegroundService : Service() {
         }
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.notification_channel_name),
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply {
-            description = getString(R.string.notification_channel_description)
-        }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    private fun createNotificationChannels() {
+        createNotificationChannels(this)
     }
 
     private fun pendingIntentImmutableFlag(): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+        pendingIntentFlags()
 
     companion object {
         const val ACTION_START = "com.phonecontrol.assistant.action.START"
@@ -144,9 +137,95 @@ class AssistantForegroundService : Service() {
         const val EXTRA_REQUEST = "com.phonecontrol.assistant.extra.REQUEST"
 
         private const val CHANNEL_ID = "assistant_sessions"
+        private const val RESULT_CHANNEL_ID = "assistant_results"
+        private const val ATTENTION_CHANNEL_ID = "assistant_attention"
         private const val NOTIFICATION_ID = 4201
         private const val REQUEST_OPEN_APP = 4202
         private const val REQUEST_TOGGLE_PAUSE = 4203
         private const val REQUEST_STOP = 4204
+        private const val COMPLETION_NOTIFICATION_ID = 4205
+        private const val ATTENTION_NOTIFICATION_ID = 4206
+        private const val MAX_NOTIFICATION_TEXT_CHARS = 240
+
+        /** Post a result notification without bringing the assistant to the foreground. */
+        fun showCompletionNotification(context: Context, message: String) {
+            createNotificationChannels(context)
+            val safeMessage = message.trim()
+                .ifBlank { "Codex completed the phone request." }
+                .take(MAX_NOTIFICATION_TEXT_CHARS)
+            val notification = NotificationCompat.Builder(context, RESULT_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(context.getString(R.string.app_name))
+                .setContentText("Task complete")
+                .setStyle(NotificationCompat.BigTextStyle().bigText(safeMessage))
+                .setContentIntent(openAssistantIntent(context, REQUEST_OPEN_APP + 1))
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .build()
+            context.getSystemService(NotificationManager::class.java)
+                .notify(COMPLETION_NOTIFICATION_ID, notification)
+        }
+
+        /** Notify the user without launching an Activity or interrupting Watch mode. */
+        fun showAttentionNotification(context: Context, reason: String) {
+            createNotificationChannels(context)
+            val safeReason = reason.trim()
+                .ifBlank { "The phone assistant needs your attention." }
+                .take(MAX_NOTIFICATION_TEXT_CHARS)
+            val notification = NotificationCompat.Builder(context, ATTENTION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setContentTitle("Phone assistant needs your attention")
+                .setContentText(safeReason)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(safeReason))
+                .setContentIntent(openAssistantIntent(context, REQUEST_OPEN_APP + 2))
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .build()
+            context.getSystemService(NotificationManager::class.java)
+                .notify(ATTENTION_NOTIFICATION_ID, notification)
+        }
+
+        private fun createNotificationChannels(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val notificationManager = context.getSystemService(NotificationManager::class.java)
+            notificationManager.createNotificationChannels(
+                listOf(
+                    NotificationChannel(
+                        CHANNEL_ID,
+                        context.getString(R.string.notification_channel_name),
+                        NotificationManager.IMPORTANCE_LOW,
+                    ).apply {
+                        description = context.getString(R.string.notification_channel_description)
+                    },
+                    NotificationChannel(
+                        RESULT_CHANNEL_ID,
+                        context.getString(R.string.notification_result_channel_name),
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    ).apply {
+                        description = context.getString(R.string.notification_result_channel_description)
+                    },
+                    NotificationChannel(
+                        ATTENTION_CHANNEL_ID,
+                        context.getString(R.string.notification_attention_channel_name),
+                        NotificationManager.IMPORTANCE_HIGH,
+                    ).apply {
+                        description = context.getString(R.string.notification_attention_channel_description)
+                    },
+                ),
+            )
+        }
+
+        private fun openAssistantIntent(context: Context, requestCode: Int): PendingIntent =
+            PendingIntent.getActivity(
+                context,
+                requestCode,
+                Intent(context, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentFlags(),
+            )
+
+        private fun pendingIntentFlags(): Int =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     }
 }

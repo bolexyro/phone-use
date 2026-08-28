@@ -190,12 +190,45 @@ class SessionCoordinator(
         true
     }
 
-    fun complete(message: String = "Session completed."): Boolean = synchronized(lock) {
+    /**
+     * Record a user-facing message from the desktop agent without exposing its
+     * private reasoning stream. The message is kept in the local conversation
+     * timeline and becomes the completed-session result.
+     */
+    fun complete(
+        message: String = "Session completed.",
+        agentFeedback: String? = null,
+    ): Boolean = synchronized(lock) {
         val sessionId = _state.value.sessionIdOrNull ?: return false
+        val feedback = agentFeedback
+            ?.trim()
+            ?.take(MAX_AGENT_FEEDBACK_CHARS)
+            ?.ifBlank { null }
+        val displayMessage = feedback ?: message.trim().take(MAX_TEXT_CHARS).ifBlank { "Session completed." }
         sessionJob = null
         claimedRequestSessionId = null
-        _state.value = SessionState.Completed(sessionId, message)
-        appendEvent(ActivityEventKind.SESSION_COMPLETED, message, sessionId)
+        _state.value = SessionState.Completed(sessionId, displayMessage)
+        if (feedback != null) {
+            appendEvent(ActivityEventKind.AGENT_MESSAGE, feedback, sessionId)
+        }
+        appendEvent(
+            ActivityEventKind.SESSION_COMPLETED,
+            if (feedback != null) "Task completed." else displayMessage,
+            sessionId,
+        )
+        true
+    }
+
+    /** Mark that the user should review the phone without launching an Activity. */
+    fun requestAttention(reason: String): Boolean = synchronized(lock) {
+        val current = _state.value
+        val sessionId = current.sessionIdOrNull ?: return@synchronized false
+        if (current !is SessionState.Running && current !is SessionState.Paused) {
+            return@synchronized false
+        }
+        val message = reason.trim().take(MAX_TEXT_CHARS).ifBlank { "The phone assistant needs your attention." }
+        setCurrentPurpose("Needs your attention")
+        appendEvent(ActivityEventKind.ATTENTION_REQUIRED, message, sessionId)
         true
     }
 
@@ -329,6 +362,8 @@ class SessionCoordinator(
 
     private companion object {
         const val MAX_EVENTS = 100
+        const val MAX_TEXT_CHARS = 240
+        const val MAX_AGENT_FEEDBACK_CHARS = 4_000
     }
 }
 

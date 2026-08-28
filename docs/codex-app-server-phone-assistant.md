@@ -4,8 +4,9 @@ The desktop side of the pivot has two small local processes:
 
 1. `assistant:companion` watches the phone for a request typed in the Android
    app and starts one Codex App Server turn for it.
-2. Codex App Server loads `assistant:mcp`, which forwards the model's typed
-   actions over the USB/ADB-forwarded loopback socket to the Android app.
+2. `assistant:mcp` is the reusable MCP adapter for manual Codex/MCP clients.
+   The companion uses the same phone-tool dispatcher directly, so a normal
+   companion turn does not depend on a second MCP stdio process.
 
 The Android app remains the authority for Shizuku, app allowlisting, stale
 observations, confirmation boundaries, and stop/pause state. The companion
@@ -23,9 +24,9 @@ pnpm assistant:companion
         v
 Codex App Server (ChatGPT/Codex login)
         |
-        | configured local MCP server
+        | direct dynamic phone_control_* tools
         v
-pnpm assistant:mcp (desktop adapter)
+phone-tool dispatcher (shared with assistant:mcp)
         |
         | adb forward tcp:8765 tcp:8765
         v
@@ -70,13 +71,20 @@ MCP server:
 - `phone_assistant_observe` — return a fresh observation ID and PNG screenshot.
 - `phone_assistant_execute` — execute one typed action and return a fresh PNG
   observation after it.
+- `phone_assistant_request_attention` — post an attention notification without
+  opening the assistant Activity.
 - `phone_assistant_status` — read the phone session state/current purpose.
 - `phone_assistant_pending_request` — inspect whether a phone request is
   waiting for the companion (read-only; the companion performs the claim).
 - `phone_assistant_stop` — cancel the active session.
 
-This uses the stable configured-MCP path. Codex App Server's dynamic tool
-registration is experimental and is not needed for this adapter.
+The configured MCP server remains available for direct MCP clients and for
+backwards-compatible/manual use. The phone companion additionally registers
+`phone_control_*` dynamic tools on each App Server thread and maps them to the
+same dispatcher. In current Codex App Server builds those calls are delivered
+through the bundled Code Mode host, which the companion enables by default.
+Setting `PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST=false` intentionally disables
+that route and therefore prevents dynamic phone actions from executing.
 
 ## Action coverage
 
@@ -95,8 +103,16 @@ The bridge preserves the pre-pivot MCP primitives in phone-owned form:
 
 Each action includes `metadata.purpose`, for example `Searching for jollof
 rice` or `Selecting the delivery address`. That purpose is safe to show in the
-foreground notification and the in-app activity timeline. Sensitive text and
-provider payloads are not written to that timeline.
+foreground notification and the in-app conversation timeline. The companion
+also forwards the final user-facing Codex message as `feedback` on
+`complete_session`; the phone renders it as an assistant message and sends a
+separate completion notification. Sensitive action payloads and private
+reasoning are not written to the timeline.
+
+When the model needs a human to look at the phone, it can call
+`phone_control_request_attention` with a short reason. The phone posts a
+high-priority notification and updates the conversation, but does not force the
+assistant Activity over whatever app is visible in Watch mode.
 
 The old semantic `elementRef` click/scroll path is intentionally not claimed by
 this phone-local visual bridge yet. The Android observer currently returns a
@@ -120,15 +136,19 @@ pnpm assistant:companion
 ```
 
 Now type a request in the Android app and press Run. The companion claims that
-request, starts a Codex App Server turn, and the model calls the MCP tools. The
-phone stays in Watch mode: the target app opens and receives visible taps,
+request, starts a Codex App Server turn, and the model calls the phone tools.
+The phone stays in Watch mode: the target app opens and receives visible taps,
 typing, swipes, keypresses, and waits. The foreground notification and the
 in-app timeline show each action's `metadata.purpose`, such as “Searching for
 jollof rice”. When the turn finishes, the companion marks the phone session
 completed. Set `PHONE_ASSISTANT_CODEX_MODEL` if you want to pin a model; when
 unset, App Server uses the Codex CLI's configured default. The companion runs
-`codex app-server --listen stdio://`; set `PHONE_ASSISTANT_CODEX_BIN` when the
-Codex executable is not available through the desktop PATH.
+`codex app-server --listen stdio:// --enable code_mode_host` so the App Server's
+dynamic-tool router can deliver calls to the direct `phone_control_*` tools.
+Set `PHONE_ASSISTANT_CODEX_BIN` when the Codex executable is not available
+through the desktop PATH. Set `PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST=false`
+only when intentionally testing a configuration without the bundled host; phone
+turns will not be able to execute dynamic actions in that mode.
 
 This route uses the Codex CLI/App Server's existing ChatGPT-managed login and
 subscription. It does not copy cookies, call private ChatGPT endpoints, or
