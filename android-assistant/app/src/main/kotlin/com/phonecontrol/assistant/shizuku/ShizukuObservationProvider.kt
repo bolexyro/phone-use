@@ -84,7 +84,10 @@ class ShizukuObservationProvider(
     }
 
     private suspend fun readFocusedWindow(): FocusedWindow? {
-        val result = processRunner.run(listOf("dumpsys", "window", "windows"))
+        // One UI's `dumpsys window windows` omits the focus summary. The
+        // top-level `window` dump includes mCurrentFocus/mFocusedApp while
+        // retaining the same shell permission boundary.
+        val result = processRunner.run(listOf("dumpsys", "window"))
         if (result.timedOut || result.exitCode != 0) return null
         val text = result.stdout.toString(Charsets.UTF_8)
         val match = FOCUS_REGEX.find(text) ?: return null

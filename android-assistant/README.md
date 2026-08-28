@@ -94,7 +94,9 @@ pnpm bridge:demo -- --package com.phonecontrol.coordinatebenchmark --x 500 --y 9
 Optional flags are `--host`, `--port`, `--purpose`, and `--target`. The phone
 is still the authority: it checks Shizuku state, the per-app allowlist, the
 fresh observation binding, coordinate bounds, and screen/guard freshness
-before it sends `input tap`. The desktop script is only a hard-coded Codex
+before it sends `input tap`. Use the benchmark app for repeatable tests: a
+coordinate chosen in a real app can activate a real control (for example,
+copying an authenticator code). The desktop script is only a hard-coded Codex
 bridge stub; it does not authenticate to Codex App Server yet.
 
 ## Planned bridge

@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
+import rikka.shizuku.ShizukuRemoteProcess
 
 /** Result of one fixed, typed command dispatched through the Shizuku shell. */
 data class ShizukuProcessResult(
@@ -64,7 +65,11 @@ class ShizukuProcessRunner(
                 val stderr = async(Dispatchers.IO) {
                     process.errorStream.use { it.readBytes().toString(Charsets.UTF_8) }
                 }
-                val completed = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+                val completed = if (process is ShizukuRemoteProcess) {
+                    process.waitForTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                } else {
+                    process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+                }
                 if (!completed) {
                     process.destroy()
                     // Do not wait indefinitely for a broken shell process. The
@@ -77,7 +82,15 @@ class ShizukuProcessRunner(
                     )
                 }
                 ShizukuProcessResult(
-                    exitCode = process.exitValue(),
+                    // ShizukuRemoteProcess can report a completed timed wait
+                    // while its remote exitValue call still races. A direct
+                    // waitFor asks the remote process for the authoritative
+                    // status and returns immediately after completion.
+                    exitCode = if (process is ShizukuRemoteProcess) {
+                        process.waitFor()
+                    } else {
+                        process.waitFor()
+                    },
                     stdout = stdout.await(),
                     stderr = stderr.await().trim(),
                 )

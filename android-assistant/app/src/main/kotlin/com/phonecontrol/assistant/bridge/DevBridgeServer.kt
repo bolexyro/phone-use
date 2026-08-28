@@ -105,7 +105,14 @@ class DevBridgeServer(
                     .put("requestId", request.requestId)
                     .put("message", "Demo sequence accepted by the phone."),
             )
-            runDemo(request, writer)
+            try {
+                runDemo(request, writer)
+            } catch (error: Throwable) {
+                val message = error.message ?: error::class.java.simpleName
+                android.util.Log.e(TAG, "Demo request failed", error)
+                coordinator.stop("Demo failed unexpectedly: $message")
+                write(writer, errorResponse(request.requestId, "The phone bridge failed: $message"))
+            }
         }
     }
 
