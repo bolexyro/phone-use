@@ -137,6 +137,10 @@ class DevBridgeServer(
                     "demo_run" -> runDemo(parseRequest(json), writer)
                     "start_session" -> startSession(requestId, json, writer)
                     "status" -> status(requestId, writer)
+                    "pending_request" -> pendingRequest(requestId, writer)
+                    "claim_request" -> claimRequest(requestId, json, writer)
+                    "release_request" -> releaseRequest(requestId, json, writer)
+                    "complete_session" -> completeSession(requestId, json, writer)
                     "allowed_apps" -> allowedApps(requestId, writer)
                     "observe" -> observe(requestId, json, writer)
                     "execute_action" -> executeAction(requestId, json, writer)
@@ -204,13 +208,113 @@ class DevBridgeServer(
         when (state) {
             is SessionState.Running -> response
                 .put("sessionId", state.sessionId)
+                .put("request", state.request)
                 .put("currentPurpose", state.currentPurpose)
+                .put("requestAvailable", coordinator.pendingRequest()?.sessionId == state.sessionId)
             is SessionState.Paused -> response
                 .put("sessionId", state.sessionId)
+                .put("request", state.request)
                 .put("currentPurpose", state.currentPurpose)
             else -> Unit
         }
         write(writer, response)
+    }
+
+    private fun pendingRequest(
+        requestId: String,
+        writer: BufferedWriter,
+    ) {
+        val pending = coordinator.pendingRequest()
+        val response = JSONObject()
+            .put("type", "pending_request")
+            .put("requestId", requestId)
+            .put("ok", true)
+            .put("available", pending != null)
+        if (pending != null) {
+            response
+                .put("sessionId", pending.sessionId)
+                .put("request", pending.request)
+        }
+        write(writer, response)
+    }
+
+    private fun claimRequest(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val expectedSessionId = json.optString("sessionId").trim().ifBlank { null }
+        val claimed = coordinator.claimRequest(expectedSessionId)
+        if (claimed == null) {
+            write(
+                writer,
+                errorResponse(requestId, "No unclaimed running phone request matched the supplied sessionId.")
+                    .put("code", "REQUEST_NOT_AVAILABLE"),
+            )
+            return
+        }
+        write(
+            writer,
+            JSONObject()
+                .put("type", "request_claimed")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("sessionId", claimed.sessionId)
+                .put("request", claimed.request)
+                .put("message", "Phone request claimed by the desktop Codex companion."),
+        )
+    }
+
+    private fun releaseRequest(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val sessionId = json.optString("sessionId").trim()
+        require(sessionId.isNotEmpty()) { "sessionId is required." }
+        val released = coordinator.releaseRequest(sessionId)
+        write(
+            writer,
+            JSONObject()
+                .put("type", "request_released")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("sessionId", sessionId)
+                .put("released", released),
+        )
+    }
+
+    private fun completeSession(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val sessionId = json.optString("sessionId").trim()
+        require(sessionId.isNotEmpty()) { "sessionId is required." }
+        val message = json.optString("message", "Codex completed the phone request.")
+            .trim()
+            .ifBlank { "Codex completed the phone request." }
+            .take(MAX_TEXT_CHARS)
+        val activeSessionId = coordinator.state.value.sessionIdOrNullForBridge()
+        if (activeSessionId != sessionId) {
+            write(
+                writer,
+                errorResponse(requestId, "The phone session is no longer active.")
+                    .put("code", "SESSION_NOT_RUNNING"),
+            )
+            return
+        }
+        val completed = coordinator.complete(message)
+        context.stopService(Intent(context, AssistantForegroundService::class.java))
+        write(
+            writer,
+            JSONObject()
+                .put("type", "session_completed")
+                .put("requestId", requestId)
+                .put("ok", completed)
+                .put("sessionId", sessionId)
+                .put("message", message),
+        )
     }
 
     private fun allowedApps(
@@ -723,4 +827,12 @@ private fun ActionExecutionResult.failureCode(): String? = when (this) {
     is ActionExecutionResult.ConfirmationRequired -> "CONFIRMATION_REQUIRED"
     is ActionExecutionResult.PolicyRejected -> "POLICY_REJECTED"
     ActionExecutionResult.SessionNotRunning -> "SESSION_NOT_RUNNING"
+}
+
+private fun SessionState.sessionIdOrNullForBridge(): String? = when (this) {
+    SessionState.Idle -> null
+    is SessionState.Running -> sessionId
+    is SessionState.Paused -> sessionId
+    is SessionState.Stopped -> sessionId
+    is SessionState.Completed -> sessionId
 }

@@ -1,14 +1,11 @@
-import net from "node:net";
 import { randomUUID } from "node:crypto";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const DEFAULT_BRIDGE_HOST = "127.0.0.1";
-const DEFAULT_BRIDGE_PORT = 8765;
-const BRIDGE_TIMEOUT_MS = 45_000;
-const MAX_BRIDGE_RESPONSE_BYTES = 16 * 1024 * 1024;
+import { requestBridge, type BridgeMessage } from "./phone-assistant-bridge.js";
+
 
 const packageNameSchema = z
   .string()
@@ -124,23 +121,9 @@ const observeInputSchema = z
   })
   .strict();
 
-const bridgeHost = process.env.PHONE_ASSISTANT_BRIDGE_HOST?.trim() || DEFAULT_BRIDGE_HOST;
-const bridgePort = parsePort(process.env.PHONE_ASSISTANT_BRIDGE_PORT ?? `${DEFAULT_BRIDGE_PORT}`);
-
-interface BridgeMessage {
-  type?: string;
-  ok?: boolean;
-  [key: string]: unknown;
-}
-
-interface BridgeRequest {
-  type: string;
-  requestId: string;
-  [key: string]: unknown;
-}
-
 export const PHONE_ASSISTANT_TOOL_NAMES = [
   "phone_assistant_status",
+  "phone_assistant_pending_request",
   "phone_assistant_list_allowed_apps",
   "phone_assistant_start",
   "phone_assistant_observe",
@@ -148,88 +131,12 @@ export const PHONE_ASSISTANT_TOOL_NAMES = [
   "phone_assistant_stop"
 ] as const;
 
-function parsePort(value: string): number {
-  if (!/^\d+$/.test(value)) throw new Error("PHONE_ASSISTANT_BRIDGE_PORT must be an integer.");
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("PHONE_ASSISTANT_BRIDGE_PORT must be between 1 and 65535.");
-  }
-  return port;
-}
-
 function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
   const parsed = schema.safeParse(input);
   if (!parsed.success) {
     throw new Error(`Invalid phone assistant input: ${parsed.error.message}`);
   }
   return parsed.data;
-}
-
-function requestBridge(request: BridgeRequest): Promise<BridgeMessage> {
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: bridgeHost, port: bridgePort });
-    let buffer = "";
-    let responseBytes = 0;
-    let settled = false;
-
-    const finish = (error?: Error, message?: BridgeMessage) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      if (error) reject(error);
-      else resolve(message!);
-    };
-
-    socket.setTimeout(BRIDGE_TIMEOUT_MS, () => {
-      finish(new Error("Timed out waiting for the phone assistant bridge."));
-    });
-    socket.once("error", (error) => {
-      finish(new Error(`Could not connect to the phone assistant bridge at ${bridgeHost}:${bridgePort}: ${error.message}`));
-    });
-    socket.once("close", () => {
-      if (!settled) finish(new Error("The phone assistant bridge closed before completing the request."));
-    });
-    socket.once("connect", () => {
-      socket.write(`${JSON.stringify(request)}\n`);
-    });
-    socket.on("data", (chunk: Buffer) => {
-      responseBytes += chunk.byteLength;
-      if (responseBytes > MAX_BRIDGE_RESPONSE_BYTES) {
-        finish(new Error("The phone assistant bridge response is too large."));
-        return;
-      }
-      buffer += chunk.toString("utf8");
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        newline = buffer.indexOf("\n");
-        if (!line) continue;
-        let message: BridgeMessage;
-        try {
-          message = JSON.parse(line) as BridgeMessage;
-        } catch {
-          finish(new Error("The phone assistant bridge returned invalid JSON."));
-          return;
-        }
-        // The phone sends an accepted progress line first. Resolve only on a
-        // terminal response so execute_action can return its fresh screenshot.
-        if (message.type === "error" ||
-            message.type === "started" ||
-            message.type === "status" ||
-            message.type === "allowed_apps" ||
-            message.type === "observation" ||
-            message.type === "completed" ||
-            message.type === "stopped") {
-          // A terminal `ok:false` is still useful structured information for
-          // the model (for example CONFIRMATION_REQUIRED or STALE_OBSERVATION).
-          // Only transport/connection failures reject this promise.
-          finish(undefined, message);
-          return;
-        }
-      }
-    });
-  });
 }
 
 function withoutScreenshot(message: BridgeMessage): Record<string, unknown> {
@@ -284,6 +191,15 @@ export function createPhoneAssistantMcpServer(
       inputSchema: {}
     },
     async () => safely(() => requestBridge({ type: "status", requestId: randomUUID() }))
+  );
+
+  server.registerTool(
+    "phone_assistant_pending_request",
+    {
+      description: "Check whether the phone has a typed request waiting for the desktop Codex companion. This is read-only; the companion claims requests separately.",
+      inputSchema: {}
+    },
+    async () => safely(() => requestBridge({ type: "pending_request", requestId: randomUUID() }))
   );
 
   server.registerTool(

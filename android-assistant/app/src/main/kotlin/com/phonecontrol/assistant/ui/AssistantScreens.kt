@@ -81,7 +81,7 @@ fun AssistantScreen(
         ) {
             Text("Watch mode", style = MaterialTheme.typography.headlineSmall)
             Text(
-                "The assistant will operate the phone’s main display. When execution is wired, you will see the approved app move live.",
+                "The assistant operates the phone’s main display in Watch mode. Start the desktop Codex companion, then watch the approved app move live.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

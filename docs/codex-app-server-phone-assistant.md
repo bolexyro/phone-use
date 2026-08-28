@@ -1,12 +1,26 @@
 # Codex App Server + Phone Assistant
 
-The desktop side of the pivot is a normal local MCP server. Codex App Server
-loads it from its configured `mcp_servers` table; the MCP process then forwards
-typed requests over the USB/ADB-forwarded loopback socket to the Android app.
+The desktop side of the pivot has two small local processes:
+
+1. `assistant:companion` watches the phone for a request typed in the Android
+   app and starts one Codex App Server turn for it.
+2. Codex App Server loads `assistant:mcp`, which forwards the model's typed
+   actions over the USB/ADB-forwarded loopback socket to the Android app.
+
 The Android app remains the authority for Shizuku, app allowlisting, stale
-observations, confirmation boundaries, and stop/pause state.
+observations, confirmation boundaries, and stop/pause state. The companion
+claims a request before starting a turn and releases it if the desktop side
+fails, so a temporary disconnect does not silently lose the user's request.
 
 ```text
+Android app (typed request)
+        |
+        | adb forward / localhost NDJSON
+        v
+pnpm assistant:companion
+        |
+        | initialize -> thread/start -> turn/start
+        v
 Codex App Server (ChatGPT/Codex login)
         |
         | configured local MCP server
@@ -57,6 +71,8 @@ MCP server:
 - `phone_assistant_execute` — execute one typed action and return a fresh PNG
   observation after it.
 - `phone_assistant_status` — read the phone session state/current purpose.
+- `phone_assistant_pending_request` — inspect whether a phone request is
+  waiting for the companion (read-only; the companion performs the claim).
 - `phone_assistant_stop` — cancel the active session.
 
 This uses the stable configured-MCP path. Codex App Server's dynamic tool
@@ -88,6 +104,38 @@ screen PNG and foreground binding, not a display-scoped UI Automator tree. A
 future accessibility adapter can add semantic targets without weakening the
 typed action boundary.
 
+## Phone-first run
+
+Install the sideloaded Android debug build, enable the apps you want in its
+allowlist, and forward the phone bridge:
+
+```powershell
+adb forward tcp:8765 tcp:8765
+```
+
+Start the companion in a second terminal:
+
+```powershell
+pnpm assistant:companion
+```
+
+Now type a request in the Android app and press Run. The companion claims that
+request, starts a Codex App Server turn, and the model calls the MCP tools. The
+phone stays in Watch mode: the target app opens and receives visible taps,
+typing, swipes, keypresses, and waits. The foreground notification and the
+in-app timeline show each action's `metadata.purpose`, such as “Searching for
+jollof rice”. When the turn finishes, the companion marks the phone session
+completed. Set `PHONE_ASSISTANT_CODEX_MODEL` if you want to pin a model; when
+unset, App Server uses the Codex CLI's configured default. The companion runs
+`codex app-server --listen stdio://`; set `PHONE_ASSISTANT_CODEX_BIN` when the
+Codex executable is not available through the desktop PATH.
+
+This route uses the Codex CLI/App Server's existing ChatGPT-managed login and
+subscription. It does not copy cookies, call private ChatGPT endpoints, or
+assume native Codex execution on Android. See the official
+[Codex App Server documentation](https://learn.chatgpt.com/docs/app-server) for
+the JSON-RPC lifecycle used by the companion.
+
 ## Run a local smoke check
 
 Build the desktop adapter, then ask the MCP client to call
@@ -101,3 +149,10 @@ pnpm assistant:mcp
 
 The process communicates on stdio; its phone connection is opened only when a
 tool is called. Do not expose port `8765` directly on the LAN.
+
+For a deterministic bridge-only check, the older development stub remains
+available:
+
+```powershell
+pnpm bridge:demo -- --package com.phonecontrol.coordinatebenchmark --x 500 --y 900
+```

@@ -3,7 +3,7 @@
 This directory is a standalone native Android app for the Phone Control pivot.
 It is intentionally separate from `benchmark-app/` and the TypeScript MCP
 server. The app is the phone-side authority for permissions, session state,
-notifications and (eventually) observation/action execution.
+notifications, request handoff, and observation/action execution.
 
 ## Current v0 surface
 
@@ -29,11 +29,12 @@ notifications and (eventually) observation/action execution.
   phone captures a fresh shell screenshot and rejects stale package, activity,
   display, full-screen, or declared guard-region state.
 
-The current Run flow still records a session for the eventual Codex path. A
-localhost-only development bridge is now available so the typed execution
-path can be exercised by the desktop MCP adapter. It accepts session, allowlist,
-observation, typed-action, status, and stop requests over NDJSON. The legacy
-`demo_run` request remains available for the open -> observe -> tap smoke test.
+Run now creates a phone-owned request that the desktop Codex companion can
+claim. A localhost-only development bridge carries that handoff and the typed
+execution path: the companion starts a Codex App Server turn, while the
+configured MCP adapter sends allowlist, observation, and action requests back
+to this app over NDJSON. The legacy `demo_run` request remains available for
+the open -> observe -> tap smoke test.
 
 ## Build
 
@@ -100,26 +101,29 @@ fresh observation binding, coordinate bounds, and screen/guard freshness
 before it sends `input tap`. Use the Coordinate Benchmark app for repeatable
 tests; it is the only package enabled in the current physical smoke setup.
 The desktop script is only a hard-coded demo.
-The real Codex-facing adapter is `pnpm assistant:mcp`, documented in
-`../docs/codex-app-server-phone-assistant.md`.
+The real Codex-facing adapter is `pnpm assistant:mcp`; run
+`pnpm assistant:companion` to pick up requests typed in the phone app. Both are
+documented in `../docs/codex-app-server-phone-assistant.md`.
 
-## Planned bridge
+## Bridge architecture
 
-The intended flow is:
+The current flow is:
 
 ```text
-Codex App Server
-        -> desktop companion / local MCP adapter
+Phone typed request
+        -> desktop companion
+        -> Codex App Server
+        -> local MCP adapter
         -> authenticated phone link
         -> this app's SessionCoordinator and PolicyEngine
         -> observation/guard validation
         -> Shizuku transport
 ```
 
-The desktop side will provide Codex authentication and the agent loop. The
-phone will remain the final authority for per-app permissions, confirmation,
-stale observations and cancellation. Raw model/provider payloads must not be
-treated as phone commands.
+The desktop side uses the Codex CLI's existing authentication and subscription
+through App Server. The phone remains the final authority for per-app
+permissions, confirmation, stale observations and cancellation. Raw
+model/provider payloads must not be treated as phone commands.
 
 The MCP adapter exercises the same typed phone protocol today. Codex App
 Server loads it as a configured local MCP server; it does not need a raw ADB

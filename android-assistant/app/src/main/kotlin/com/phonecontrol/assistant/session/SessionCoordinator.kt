@@ -52,8 +52,19 @@ sealed interface ActionExecutionResult {
 }
 
 /**
- * Process-local session state shared by the Compose activity and foreground
- * service. A future Codex bridge can feed typed observations/actions here.
+ * A phone-originated request waiting for the desktop Codex companion to
+ * accept it. The session id makes the handoff idempotent across polling and
+ * prevents a stale desktop response from being applied to a newer session.
+ */
+data class PendingRequest(
+    val sessionId: String,
+    val request: String,
+)
+
+/**
+ * Process-local session state shared by the Compose activity, foreground
+ * service, and desktop Codex bridge. The phone owns the handoff and all typed
+ * observation/action policy decisions.
  */
 class SessionCoordinator(
     private val enabledPackagesProvider: () -> Set<String>,
@@ -64,6 +75,7 @@ class SessionCoordinator(
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
     private val _events = MutableStateFlow<List<ActivityEvent>>(emptyList())
     private var sessionJob: Job? = null
+    private var claimedRequestSessionId: String? = null
 
     val state: StateFlow<SessionState> = _state.asStateFlow()
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
@@ -73,6 +85,7 @@ class SessionCoordinator(
 
         val sessionId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
+        claimedRequestSessionId = null
         _state.value = SessionState.Running(
             sessionId = sessionId,
             request = request.trim(),
@@ -84,6 +97,54 @@ class SessionCoordinator(
         appendEvent(
             ActivityEventKind.SESSION_STARTED,
             "Request accepted. Waiting for the desktop Codex bridge.",
+            sessionId = sessionId,
+        )
+        true
+    }
+
+    /** Return the active phone request until a desktop companion claims it. */
+    fun pendingRequest(): PendingRequest? = synchronized(lock) {
+        val running = _state.value as? SessionState.Running ?: return@synchronized null
+        if (claimedRequestSessionId == running.sessionId) return@synchronized null
+        PendingRequest(running.sessionId, running.request)
+    }
+
+    /**
+     * Atomically claim the current phone request. Pollers can pass the session
+     * id they observed so a delayed claim cannot attach to a newer request.
+     */
+    fun claimRequest(expectedSessionId: String? = null): PendingRequest? = synchronized(lock) {
+        val running = _state.value as? SessionState.Running ?: return@synchronized null
+        if (expectedSessionId != null && expectedSessionId != running.sessionId) {
+            return@synchronized null
+        }
+        if (claimedRequestSessionId == running.sessionId) return@synchronized null
+        claimedRequestSessionId = running.sessionId
+        _state.value = running.copy(currentPurpose = "Codex is planning")
+        appendEvent(
+            ActivityEventKind.SYSTEM,
+            "Desktop Codex companion claimed the request.",
+            sessionId = running.sessionId,
+        )
+        PendingRequest(running.sessionId, running.request)
+    }
+
+    /** Release a claim after a desktop-side failure so the user can retry. */
+    fun releaseRequest(sessionId: String): Boolean = synchronized(lock) {
+        if (claimedRequestSessionId != sessionId) return@synchronized false
+        val activeSessionId = _state.value.sessionIdOrNull
+        if (activeSessionId != sessionId) {
+            claimedRequestSessionId = null
+            return@synchronized false
+        }
+        claimedRequestSessionId = null
+        if (_state.value is SessionState.Running) {
+            val running = _state.value as SessionState.Running
+            _state.value = running.copy(currentPurpose = "Waiting for desktop Codex bridge")
+        }
+        appendEvent(
+            ActivityEventKind.SYSTEM,
+            "Desktop Codex companion released the request; waiting for retry.",
             sessionId = sessionId,
         )
         true
@@ -123,6 +184,7 @@ class SessionCoordinator(
         val sessionId = _state.value.sessionIdOrNull ?: return false
         sessionJob?.cancel()
         sessionJob = null
+        claimedRequestSessionId = null
         _state.value = SessionState.Stopped(sessionId, reason)
         appendEvent(ActivityEventKind.SESSION_STOPPED, reason, sessionId)
         true
@@ -131,6 +193,7 @@ class SessionCoordinator(
     fun complete(message: String = "Session completed."): Boolean = synchronized(lock) {
         val sessionId = _state.value.sessionIdOrNull ?: return false
         sessionJob = null
+        claimedRequestSessionId = null
         _state.value = SessionState.Completed(sessionId, message)
         appendEvent(ActivityEventKind.SESSION_COMPLETED, message, sessionId)
         true

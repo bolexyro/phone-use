@@ -17,7 +17,8 @@
     "viewer": "electron dist/viewer/main.js",
     "bridge:demo": "tsx src/desktop-codex-bridge-demo.ts",
     "assistant:mcp": "tsx src/assistant-mcp-server.ts",
-    "assistant:app-server": "codex app-server --listen stdio://"
+    "assistant:app-server": "codex app-server --listen stdio://",
+    "assistant:companion": "tsx src/assistant-companion.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

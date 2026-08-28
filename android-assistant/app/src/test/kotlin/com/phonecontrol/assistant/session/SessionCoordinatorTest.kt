@@ -8,6 +8,8 @@ import com.phonecontrol.assistant.shizuku.PhoneActionTransport
 import com.phonecontrol.assistant.shizuku.TransportResult
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -56,6 +58,22 @@ class SessionCoordinatorTest {
 
         assertTrue(result is ActionExecutionResult.ConfirmationRequired)
         assertTrue(coordinator.events.value.any { it.kind.name == "CONFIRMATION_REQUIRED" })
+    }
+
+    @Test
+    fun `desktop request can be claimed once and released for retry`() {
+        val coordinator = coordinator()
+        coordinator.start("Find a restaurant")
+
+        val pending = coordinator.pendingRequest()
+        assertNotNull(pending)
+        val claimed = coordinator.claimRequest(pending!!.sessionId)
+        assertEquals(pending, claimed)
+        assertNull(coordinator.pendingRequest())
+        assertNull(coordinator.claimRequest(pending.sessionId))
+
+        assertTrue(coordinator.releaseRequest(pending.sessionId))
+        assertEquals(pending, coordinator.pendingRequest())
     }
 
     private fun coordinator(): SessionCoordinator = SessionCoordinator(

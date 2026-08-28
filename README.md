@@ -52,3 +52,5 @@ The standalone `android-assistant/` app is now the phone-side Watch-mode
 authority. Codex App Server can load the desktop adapter with the configured
 `phone_assistant` MCP server; setup and the typed action contract are in
 [`docs/codex-app-server-phone-assistant.md`](docs/codex-app-server-phone-assistant.md).
+Run `pnpm assistant:companion` after forwarding port `8765` to let requests
+typed in the phone app start Codex turns automatically.
