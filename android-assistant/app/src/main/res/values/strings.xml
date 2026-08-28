@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Phone Control Assistant</string>
+    <string name="notification_channel_name">Assistant sessions</string>
+    <string name="notification_channel_description">Live status for Phone Control Assistant sessions</string>
+</resources>
