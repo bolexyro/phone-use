@@ -15,6 +15,7 @@ import {
 } from "../src/adb/process-adapter.js";
 
 import {
+  parseDisplaySnapshotForId,
   parseDisplaysList,
   parseForegroundForDisplay
 } from "../src/adb/process-parsers.js";
@@ -282,6 +283,21 @@ Display: mDisplayId=2 init=1920x1080 320dpi cur=1920x1080 app=1920x1080 mCurrent
       height: 1080,
       rotation: 1
     });
+  });
+
+  it("fails closed instead of relabeling primary geometry for a missing secondary display", () => {
+    expect(() =>
+      parseDisplaySnapshotForId(
+        "Physical size: 1080x2400",
+        "Display: mDisplayId=0 init=1080x2400 420dpi cur=1080x2400 app=1080x2400 mCurrentRotation=0",
+        2
+      )
+    ).toThrowError(
+      expect.objectContaining({
+        code: "OBSERVATION_FAILED",
+        details: { displayId: 2, availableDisplayIds: [0] }
+      })
+    );
   });
 
   it("parses foreground activity for specific displayId", () => {

@@ -21,7 +21,9 @@ describe("policy configuration", () => {
     expect(policy.profile).toBe("local");
     expect(policy.allowedApps).toEqual([
       "com.sec.android.app.popupcalculator",
-      "com.spotify.music"
+      "com.spotify.music",
+      "org.telegram.messenger",
+      "com.phonecontrol.coordinatebenchmark"
     ]);
   });
 

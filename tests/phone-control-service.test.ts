@@ -28,6 +28,10 @@ const PNG_2X3 = Buffer.from(
   "89504e470d0a1a0a0000000d4948445200000002000000030806000000",
   "hex"
 );
+const PNG_1080X2400 = Buffer.from(
+  "89504e470d0a1a0a0000000d4948445200000438000009600806000000",
+  "hex"
+);
 
 const XML = `<hierarchy rotation="0"><node text="Calculate" content-desc="calc" resource-id="com.sec.android.app.popupcalculator:id/calculate" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/><node text="" class="android.widget.TextView" checked="false" bounds="[0,0][2,2]"/></hierarchy>`;
 const SEQUENCE_XML = `<hierarchy rotation="0"><node text="Menu" content-desc="menu" resource-id="com.example:id/menu" class="android.widget.Button" clickable="true" enabled="true" bounds="[10,20][110,80]"/><node text="One" content-desc="one" resource-id="com.example:id/key" class="android.widget.Button" clickable="true" enabled="true" bounds="[120,20][220,80]"/></hierarchy>`;
@@ -64,7 +68,7 @@ class FakeAdb implements FixedAdbAdapter {
     rotation: 0
   };
   xml = XML;
-  screenshot = Uint8Array.from(PNG_2X3);
+  screenshot = Uint8Array.from(PNG_1080X2400);
   taps: Array<{ x: number; y: number; displayId: number }> = [];
   swipes: Array<SwipeGesture & { displayId: number }> = [];
   typed: Array<{ text: string; displayId: number }> = [];
@@ -416,10 +420,244 @@ describe("phone-control service safety", () => {
     const result = await service.openApp(POLICY.allowedApps[0]);
 
     expect(result.data.observation.displayId).toBe(2);
+    expect(result.data.observation.mode).toBe("visual");
     expect(result.data.observation.elements).toEqual([]);
     // The secondary capture is visual-only, so the fake's unscoped dump is
     // never even requested.
     expect(adb.calls.dumpUiAutomatorXml).toBe(0);
+
+    const action = await service.execute({
+      observationId: result.data.observation.observationId,
+      action: { type: "click_coordinate", x: 60, y: 50 }
+    });
+    expect(adb.taps).toEqual([{ x: 60, y: 50, displayId: 2 }]);
+    expect(action.data.observation.displayId).toBe(2);
+    expect(action.data.observation.mode).toBe("visual");
+    expect(adb.calls.dumpUiAutomatorXml).toBe(0);
+  });
+
+  it("runs a screenshot-only observation and coordinate action without UI Automator", async () => {
+    const adb = new FakeAdb();
+    const service = createService(adb);
+
+    const observed = await service.observe({ mode: "visual" });
+    const reference = observed.data.observation;
+    const afterObserve = { ...adb.calls };
+    expect(reference.mode).toBe("visual");
+    expect(reference.elements).toEqual([]);
+    expect(reference.uiHash).toBeUndefined();
+    expect(reference.screenshotHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(adb.calls.dumpUiAutomatorXml).toBe(0);
+
+    const result = await service.execute({
+      observationId: reference.observationId,
+      action: { type: "click_coordinate", x: 60, y: 50 }
+    });
+
+    expect(adb.calls.dumpUiAutomatorXml).toBe(afterObserve.dumpUiAutomatorXml);
+    expect(adb.calls.captureScreenshot - afterObserve.captureScreenshot).toBe(2);
+    expect(adb.taps).toEqual([{ x: 60, y: 50, displayId: 0 }]);
+    expect(result.data.observation.mode).toBe("visual");
+    expect(result.data.observation.uiHash).toBeUndefined();
+    expect(result.data.observation.screenshotHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.data.timing).toMatchObject({
+      mode: "visual",
+      preflightMs: expect.any(Number),
+      dispatchMs: expect.any(Number),
+      observationMs: expect.any(Number),
+      totalMs: expect.any(Number)
+    });
+    expect(result.data.pointerEvent).toMatchObject({
+      mode: "visual",
+      observationId: reference.observationId,
+      serial: "phone-1",
+      displayId: 0,
+      packageName: POLICY.allowedApps[0],
+      activity: `${POLICY.allowedApps[0]}/.MainActivity`,
+      rotation: 0,
+      displayWidth: 1080,
+      displayHeight: 2400,
+      screenshotDimensions: { width: 1080, height: 2400 },
+      screenshotHash: reference.screenshotHash
+    });
+    expect(
+      service.observationStore.get(result.data.observation.observationId)
+    ).toBeDefined();
+    expect(service.observationStore.get(reference.observationId)).toBeUndefined();
+  });
+
+  it("rejects a changed visual screenshot before coordinate dispatch without UI Automator", async () => {
+    const adb = new FakeAdb();
+    const service = createService(adb);
+    const observed = await service.observe({ mode: "visual" });
+    const observationId = observed.data.observation.observationId;
+    adb.screenshot = Uint8Array.from([...PNG_1080X2400, 0]);
+
+    await expect(
+      service.execute({
+        observationId,
+        action: { type: "click_coordinate", x: 60, y: 50 }
+      })
+    ).rejects.toMatchObject({
+      code: "STALE_OBSERVATION",
+      details: { changed: ["screenshotHash"] }
+    });
+    expect(adb.taps).toHaveLength(0);
+    expect(adb.calls.dumpUiAutomatorXml).toBe(0);
+    expect(service.observationStore.get(observationId)).toBeUndefined();
+  });
+
+  it("rejects visual screenshots whose dimensions do not match the display", async () => {
+    const adb = new FakeAdb();
+    adb.screenshot = Uint8Array.from(PNG_2X3);
+    const service = createService(adb);
+
+    await expect(service.observe({ mode: "visual" })).rejects.toMatchObject({
+      code: "OBSERVATION_FAILED",
+      details: {
+        displayId: 0,
+        displayDimensions: { width: 1080, height: 2400 },
+        screenshotDimensions: { width: 2, height: 3 }
+      }
+    });
+    expect(adb.calls.dumpUiAutomatorXml).toBe(0);
+  });
+
+  it("rejects mismatched screenshot geometry for a coordinate action on a semantic observation", async () => {
+    const adb = new FakeAdb();
+    adb.screenshot = Uint8Array.from(PNG_2X3);
+    const service = createService(adb);
+    const observed = await service.observe();
+
+    await expect(
+      service.execute({
+        observationId: observed.data.observation.observationId,
+        action: { type: "click_coordinate", x: 1, y: 1 }
+      })
+    ).rejects.toMatchObject({
+      code: "OBSERVATION_FAILED",
+      details: {
+        displayDimensions: { width: 1080, height: 2400 },
+        screenshotDimensions: { width: 2, height: 3 }
+      }
+    });
+    expect(adb.taps).toHaveLength(0);
+  });
+
+  it("requires an explicit displayId for visual observation with multiple sessions", async () => {
+    const adb = new FakeAdb();
+    const vdManager = new FakeVirtualDisplayManager(adb);
+    const service = createService(adb, undefined, {
+      virtualDisplayManager: vdManager
+    });
+
+    await service.openApp(POLICY.allowedApps[0]);
+    await service.openApp(POLICY.allowedApps[0], { newInstance: true });
+
+    await expect(service.observe({ mode: "visual" })).rejects.toMatchObject({
+      code: "INVALID_ACTION",
+      details: { displayIds: [2, 3], mode: "visual" }
+    });
+  });
+
+  it("verifies a packageName and explicit displayId refer to the same foreground", async () => {
+    const adb = new FakeAdb();
+    const service = createService(adb);
+
+    await expect(
+      service.observe({
+        displayId: 0,
+        mode: "visual",
+        packageName: "com.spotify.music"
+      })
+    ).rejects.toMatchObject({
+      code: "STALE_OBSERVATION",
+      details: {
+        displayId: 0,
+        requestedPackage: "com.spotify.music",
+        currentPackage: POLICY.allowedApps[0]
+      }
+    });
+  });
+
+  it("rechecks visual foreground identity after taking the screenshot", async () => {
+    const adb = new FakeAdb();
+    const originalCapture = adb.captureScreenshot.bind(adb);
+    adb.captureScreenshot = async () => {
+      const screenshot = await originalCapture();
+      adb.foreground = {
+        packageName: "com.android.settings",
+        activity: "com.android.settings/.Settings"
+      };
+      return screenshot;
+    };
+    const service = createService(adb);
+
+    await expect(service.observe({ mode: "visual" })).rejects.toMatchObject({
+      code: "OBSERVATION_FAILED",
+      details: { phase: "after_screenshot", changed: ["packageName", "activity"] }
+    });
+    expect(adb.calls.dumpUiAutomatorXml).toBe(0);
+  });
+
+  it("serializes concurrent action and sequence execution so only one tap is sent", async () => {
+    const adb = new FakeAdb();
+    let tapStarted!: () => void;
+    const tapEntered = new Promise<void>((resolve) => {
+      tapStarted = resolve;
+    });
+    let releaseTap!: () => void;
+    const tapRelease = new Promise<void>((resolve) => {
+      releaseTap = resolve;
+    });
+    adb.tap = async (_serial, x, y, displayId = 0) => {
+      adb.taps.push({ x, y, displayId });
+      tapStarted();
+      await tapRelease;
+    };
+    const service = createService(adb, undefined, {
+      sleep: async () => undefined
+    });
+    const observed = await service.observe({ mode: "visual" });
+    const request = {
+      observationId: observed.data.observation.observationId,
+      action: { type: "click_coordinate" as const, x: 60, y: 50 }
+    };
+
+    const first = service.execute(request);
+    await tapEntered;
+    const second = service.execute(request);
+    const sequence = service.executeSequence({
+      observationId: request.observationId,
+      actions: [{ type: "keypress", key: "ENTER" }]
+    });
+    releaseTap();
+
+    await expect(first).resolves.toBeDefined();
+    await expect(second).rejects.toMatchObject({ code: "INVALID_OBSERVATION" });
+    await expect(sequence).rejects.toMatchObject({
+      code: "INVALID_OBSERVATION"
+    });
+    expect(adb.taps).toHaveLength(1);
+  });
+
+  it("requires screenshot freshness for coordinate actions on semantic observations", async () => {
+    const adb = new FakeAdb();
+    const service = createService(adb);
+    const observed = await service.observe();
+    const observationId = observed.data.observation.observationId;
+    adb.screenshot = Uint8Array.from([...PNG_1080X2400, 0]);
+
+    await expect(
+      service.execute({
+        observationId,
+        action: { type: "click_coordinate", x: 60, y: 50 }
+      })
+    ).rejects.toMatchObject({
+      code: "STALE_OBSERVATION",
+      details: { changed: ["screenshotHash"] }
+    });
+    expect(adb.taps).toHaveLength(0);
   });
 
   it("reuses the existing package session unless newInstance is requested", async () => {
@@ -610,25 +848,45 @@ describe("phone-control service safety", () => {
     ]);
   });
 
-  it("returns active virtual displays in status", async () => {
+  it("returns device connection, foreground, and foregroundAllowed in status", async () => {
+    const adb = new FakeAdb();
+    const service = createService(adb);
+
+    const status = await service.status();
+    expect(status.data.device.authorized).toBe(true);
+    expect(status.data.foreground).toBeDefined();
+    expect(status.data.foregroundAllowed).toBe(true);
+  });
+
+  it("returns active sessions and count in listActiveApps", async () => {
     const adb = new FakeAdb();
     const vdManager = new FakeVirtualDisplayManager(adb);
     const service = createService(adb, undefined, {
       virtualDisplayManager: vdManager
     });
 
-    await service.openApp(POLICY.allowedApps[0]);
-    await service.openApp(POLICY.allowedApps[0], { newInstance: true });
-    const status = await service.status();
+    const initial = service.listActiveApps();
+    expect(initial.data.count).toBe(0);
+    expect(initial.data.activeSessions).toHaveLength(0);
 
-    expect(status.data.virtualDisplays).toHaveLength(2);
-    expect(status.data.virtualDisplays?.map((session) => session.displayId)).toEqual([
-      2,
-      3
-    ]);
-    expect(status.data.virtualDisplays?.every((session) =>
-      session.packageName === POLICY.allowedApps[0]
-    )).toBe(true);
+    await service.openApp(POLICY.allowedApps[0]);
+    const updated = service.listActiveApps();
+    expect(updated.data.count).toBe(1);
+    expect(updated.data.activeSessions[0]).toMatchObject({
+      displayId: 2,
+      packageName: POLICY.allowedApps[0]
+    });
+  });
+
+  it("throws NO_ACTIVE_SESSION when observing an app that has no active session", async () => {
+    const adb = new FakeAdb();
+    const service = createService(adb);
+
+    await expect(
+      service.observe({ packageName: POLICY.allowedApps[0] })
+    ).rejects.toMatchObject({
+      code: "NO_ACTIVE_SESSION"
+    });
   });
 
   it("denies a package outside the server-side policy", () => {

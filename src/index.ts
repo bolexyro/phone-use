@@ -50,15 +50,10 @@ export async function startPhoneControlServer(
   env: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd()
 ) {
-  const policy = loadPolicy({ env, cwd });
-  const auditLogPath = resolveAuditLogPath(env, cwd);
-  const adbPath = resolveAdbPath({ env, cwd });
-  const service = new PhoneControlService({
-    adb: new AdbProcessAdapter({ adbPath }),
-    policy,
-    environment: env,
-    auditLogger: new NdjsonActionLogger(auditLogPath)
-  });
+  console.error(
+    `[phone-control] stdio server started pid=${process.pid} at=${new Date().toISOString()}`
+  );
+  const service = createPhoneControlService(env, cwd);
   const server = createMcpServer(service);
   await server.connect(new StdioServerTransport());
   return server;

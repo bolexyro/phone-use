@@ -23,6 +23,7 @@ import { buildOverlayHtml } from "./overlay-html.js";
 import { buildScrcpyArgs } from "./scrcpy-args.js";
 import { resolveScrcpyPath } from "./scrcpy-path.js";
 import { fitDipRectToWorkArea } from "./window-geometry.js";
+import { parsePackageFromWindowTitle } from "./window-title.js";
 import { Win32ClientWindowRectProvider } from "./win32-window.js";
 
 if (process.platform === "win32" && typeof app !== "undefined") {
@@ -164,11 +165,6 @@ function showCursor(
         }`
       );
     });
-}
-
-export function parsePackageFromWindowTitle(title: string): string | undefined {
-  const match = title.match(/^Phone Control:\s*([a-zA-Z0-9_.-]+)$/i);
-  return match ? match[1].trim() : undefined;
 }
 
 export interface OverlaySession {

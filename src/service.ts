@@ -13,7 +13,7 @@ import {
   asPhoneControlError,
   PhoneControlError
 } from "./errors.js";
-import { ObservationStore } from "./observation-store.js";
+import { hashScreenshot, ObservationStore } from "./observation-store.js";
 import {
   assertAllowedForeground,
   assertAllowedTarget,
@@ -31,6 +31,8 @@ import { VirtualDisplayManager } from "./virtual-display.js";
 import { MAX_SEQUENCE_ACTIONS } from "./types.js";
 import type {
   ActionData,
+  ActionTiming,
+  ActiveAppsData,
   AllowedAppsData,
   Bounds,
   CloseAppData,
@@ -38,6 +40,7 @@ import type {
   ForegroundState,
   Observation,
   ObservationCapture,
+  ObservationMode,
   OpenAppOptions,
   PhoneAction,
   PhoneExecuteRequest,
@@ -73,6 +76,8 @@ export interface PhoneControlServiceOptions {
 interface CaptureOptions {
   includeScreenshot?: boolean;
   fallback?: Observation | ObservationCapture;
+  mode?: ObservationMode;
+  requireScreenshotGeometry?: boolean;
 }
 
 interface PreparedSequenceAction {
@@ -118,6 +123,7 @@ export class PhoneControlService {
   readonly #auditLogger?: ActionAuditLogger;
   readonly #now: () => number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
+  readonly #observationLocks = new Map<string, Promise<void>>();
 
   public constructor(options: PhoneControlServiceOptions) {
     this.#adb = options.adb;
@@ -162,15 +168,12 @@ export class PhoneControlService {
     return {
       ok: true,
       data: {
-        profile: policy.profile,
-        allowedApps: policy.allowedApps,
         device,
         foreground,
         foregroundAllowed: isAllowedPackage(
           policy,
           foreground.packageName
-        ),
-        virtualDisplays: this.#virtualDisplays.sessions
+        )
       }
     };
   }
@@ -182,6 +185,17 @@ export class PhoneControlService {
       data: {
         profile: policy.profile,
         allowedApps: policy.allowedApps
+      }
+    };
+  }
+
+  public listActiveApps(): ToolSuccessResult<ActiveAppsData> {
+    const sessions = this.#virtualDisplays.sessions;
+    return {
+      ok: true,
+      data: {
+        activeSessions: sessions,
+        count: sessions.length
       }
     };
   }
@@ -267,6 +281,15 @@ export class PhoneControlService {
     }
 
     try {
+      const observationMode =
+        options.mode ?? (targetDisplayId > 0 ? "visual" : "semantic");
+      if (targetDisplayId > 0 && observationMode === "semantic") {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          "Semantic observations are not available for secondary displays until a display-scoped UI adapter is installed. Use mode 'visual'.",
+          { displayId: targetDisplayId, mode: observationMode, visualOnly: true }
+        );
+      }
       const startMs = this.#now();
       const timeoutMs = 6000;
       let capture: ObservationCapture | undefined;
@@ -274,14 +297,18 @@ export class PhoneControlService {
       while (this.#now() - startMs <= timeoutMs) {
         const fg = await this.#adb.getForeground(device.serial, targetDisplayId);
         if (fg.packageName === packageName) {
-          capture = await this.#capture(device.serial, targetDisplayId);
+          capture = await this.#capture(device.serial, targetDisplayId, {
+            mode: observationMode
+          });
           break;
         }
         await this.#sleep(DEFAULT_POLL_INTERVAL_MS);
       }
 
       if (!capture) {
-        capture = await this.#capture(device.serial, targetDisplayId);
+        capture = await this.#capture(device.serial, targetDisplayId, {
+          mode: observationMode
+        });
       }
 
       assertAllowedForeground(policy, capture);
@@ -359,33 +386,81 @@ export class PhoneControlService {
   public async observe(options?: {
     displayId?: number;
     packageName?: string;
+    mode?: ObservationMode;
   }): Promise<
     ToolSuccessResult<{ observation: ReturnType<ObservationStore["summary"]> }>
   > {
     const policy = this.#getPolicy();
     const device = await this.#selectedDevice();
+    const explicitDisplayId = options?.displayId !== undefined;
+    const activeSessions = this.#virtualDisplays.sessions;
 
     let displayId = options?.displayId;
     if (displayId === undefined && options?.packageName) {
       const session = this.#uniquePackageSession(options.packageName);
       if (session) {
         displayId = session.displayId;
+      } else {
+        throw new PhoneControlError(
+          "NO_ACTIVE_SESSION",
+          `No active virtual display session found for package '${options.packageName}'. Use phone_open_app to launch the app before observing it.`,
+          { packageName: options.packageName }
+        );
       }
     }
     if (displayId === undefined) {
-      const activeSessions = this.#virtualDisplays.sessions;
       displayId =
         activeSessions.length > 0
           ? activeSessions[activeSessions.length - 1].displayId
           : 0;
     }
 
+    const observationMode =
+      options?.mode ?? (displayId > 0 ? "visual" : "semantic");
+    if (
+      observationMode === "visual" &&
+      !explicitDisplayId &&
+      activeSessions.length > 1
+    ) {
+      throw new PhoneControlError(
+        "INVALID_ACTION",
+        "Visual observations require an explicit displayId when multiple virtual display sessions are active.",
+        {
+          displayIds: activeSessions.map((session) => session.displayId),
+          mode: observationMode
+        }
+      );
+    }
+    if (displayId > 0 && observationMode === "semantic") {
+      throw new PhoneControlError(
+        "OBSERVATION_FAILED",
+        "Semantic observations are not available for secondary displays until a display-scoped UI adapter is installed. Use mode 'visual'.",
+        { displayId, mode: observationMode, visualOnly: true }
+      );
+    }
+
     assertAllowedForeground(
       policy,
       await this.#adb.getForeground(device.serial, displayId)
     );
-    const capture = await this.#capture(device.serial, displayId);
+    const capture = await this.#capture(device.serial, displayId, {
+      mode: observationMode
+    });
     assertAllowedForeground(policy, capture);
+    if (
+      options?.packageName !== undefined &&
+      capture.packageName !== options.packageName
+    ) {
+      throw new PhoneControlError(
+        "STALE_OBSERVATION",
+        `The requested package '${options.packageName}' is not foreground on display ${displayId}.`,
+        {
+          displayId,
+          requestedPackage: options.packageName,
+          currentPackage: capture.packageName
+        }
+      );
+    }
     const observation = this.#observations.create(capture);
     return { ok: true, data: { observation: this.#observations.summary(observation) } };
   }
@@ -393,10 +468,12 @@ export class PhoneControlService {
   public async execute(
     request: PhoneExecuteRequest
   ): Promise<ToolSuccessResult<ActionData>> {
-    const policy = this.#getPolicy();
-    const device = await this.#selectedDevice();
-    const observation = this.#observations.require(request.observationId);
-    return this.#executeAction(policy, device, observation, request.action);
+    return this.#withObservationLock(request.observationId, async () => {
+      const policy = this.#getPolicy();
+      const device = await this.#selectedDevice();
+      const observation = this.#observations.require(request.observationId);
+      return this.#executeAction(policy, device, observation, request.action);
+    });
   }
 
   /**
@@ -421,12 +498,14 @@ export class PhoneControlService {
       );
     }
 
-    const executionMode: SequenceExecutionMode =
-      request.executionMode ?? "validated";
-    if (executionMode === "stable_surface") {
-      return this.#executeStableSurfaceSequence(request);
-    }
-    return this.#executeValidatedSequence(request);
+    return this.#withObservationLock(request.observationId, async () => {
+      const executionMode: SequenceExecutionMode =
+        request.executionMode ?? "validated";
+      if (executionMode === "stable_surface") {
+        return this.#executeStableSurfaceSequence(request);
+      }
+      return this.#executeValidatedSequence(request);
+    });
   }
 
   async #executeValidatedSequence(
@@ -447,12 +526,14 @@ export class PhoneControlService {
 
     const initialStarted = performance.now();
     try {
-      // The initial capture is fresh for foreground, display, and UI metadata.
-      // Reuse the supplied screenshot bytes because it is not returned for an
-      // intermediate sequence result; the final step gets a native screenshot.
+      // The initial capture is fresh for foreground, display, and the selected
+      // observation mode. Visual mode also takes a fresh screenshot here;
+      // semantic mode may reuse the supplied screenshot for intermediate
+      // sequence results and takes a native screenshot for the final step.
       currentCapture = await this.#capture(device.serial, displayId, {
         includeScreenshot: false,
-        fallback: reference
+        fallback: reference,
+        mode: reference.binding.mode
       });
       assertAllowedForeground(policy, currentCapture);
       initialCaptureMs = elapsedMilliseconds(initialStarted);
@@ -620,7 +701,8 @@ export class PhoneControlService {
     try {
       surface = await this.#capture(device.serial, displayId, {
         includeScreenshot: false,
-        fallback: reference
+        fallback: reference,
+        mode: reference.binding.mode
       });
       assertAllowedForeground(policy, surface);
       const comparison = this.#observations.compare(reference, surface);
@@ -866,7 +948,9 @@ export class PhoneControlService {
 
     const finalCaptureStarted = performance.now();
     try {
-      const after = await this.#capture(device.serial, displayId);
+      const after = await this.#capture(device.serial, displayId, {
+        mode: reference.binding.mode
+      });
       assertAllowedForeground(policy, after);
       const observation = this.#observations.create(after);
       finalObservation = this.#observations.summary(observation);
@@ -984,7 +1068,9 @@ export class PhoneControlService {
     const deadline = this.#now() + timeoutMs;
 
     while (true) {
-      const capture = await this.#capture(device.serial, displayId);
+      const capture = await this.#capture(device.serial, displayId, {
+        mode: baseline.binding.mode
+      });
       assertAllowedForeground(policy, capture);
       const matched = this.#waitConditionMatches(condition, capture, baseline);
       if (matched) {
@@ -1041,7 +1127,8 @@ export class PhoneControlService {
     try {
       const capture = await this.#capture(
         device.serial,
-        baseline.binding.displayId ?? 0
+        baseline.binding.displayId ?? 0,
+        { mode: baseline.binding.mode }
       );
       assertAllowedForeground(policy, capture);
       const observation = this.#observations.create(capture);
@@ -1272,7 +1359,8 @@ export class PhoneControlService {
     const observationStarted = performance.now();
     const after = await this.#capture(device.serial, current.displayId ?? 0, {
       includeScreenshot,
-      fallback: observation
+      fallback: observation,
+      mode: observation.binding.mode
     });
     const observationMs = elapsedMilliseconds(observationStarted);
     assertAllowedForeground(policy, after);
@@ -1369,14 +1457,20 @@ export class PhoneControlService {
     observation: Observation,
     action: PhoneAction
   ): Promise<ToolSuccessResult<ActionData>> {
+    const actionStarted = performance.now();
+    const preflightStarted = performance.now();
     const displayId = observation.binding.displayId ?? 0;
+    const mode = observation.binding.mode ?? "semantic";
 
     assertAllowedForeground(
       policy,
       await this.#adb.getForeground(device.serial, displayId)
     );
 
-    const current = await this.#capture(device.serial, displayId);
+    const current = await this.#capture(device.serial, displayId, {
+      mode: observation.binding.mode,
+      requireScreenshotGeometry: action.type === "click_coordinate"
+    });
     const targetRef =
       action.type === "click"
         ? action.elementRef
@@ -1385,7 +1479,9 @@ export class PhoneControlService {
           : undefined;
     const comparison = targetRef
       ? this.#observations.compareElementAction(observation, current, targetRef)
-      : this.#observations.compare(observation, current);
+      : action.type === "click_coordinate"
+        ? this.#observations.compareCoordinateAction(observation, current)
+        : this.#observations.compare(observation, current);
     if (!comparison.matches) {
       this.#observations.invalidate(observation.observationId);
       throw new PhoneControlError(
@@ -1428,6 +1524,9 @@ export class PhoneControlService {
       await this.#sleep(POINTER_START_DELAY_MS);
     }
 
+    const preflightMs = elapsedMilliseconds(preflightStarted);
+    const dispatchStarted = performance.now();
+
     try {
       await resolved.perform();
     } catch (error) {
@@ -1440,11 +1539,24 @@ export class PhoneControlService {
       });
       throw normalized;
     }
+    const dispatchMs = elapsedMilliseconds(dispatchStarted);
 
     await this.#appendAudit({ ...auditBase, phase: "result", outcome: "success" });
-    const after = await this.#capture(device.serial, displayId);
+    const observationStarted = performance.now();
+    const after = await this.#capture(device.serial, displayId, {
+      mode,
+      requireScreenshotGeometry: action.type === "click_coordinate"
+    });
+    const observationMs = elapsedMilliseconds(observationStarted);
     assertAllowedForeground(policy, after);
     const freshObservation = this.#observations.create(after);
+    const timing: ActionTiming = {
+      mode,
+      preflightMs,
+      dispatchMs,
+      observationMs,
+      totalMs: elapsedMilliseconds(actionStarted)
+    };
     return {
       ok: true,
       data: {
@@ -1453,6 +1565,7 @@ export class PhoneControlService {
           ? { textLength: action.text.length }
           : {}),
         ...(resolved.pointerEvent ? { pointerEvent: resolved.pointerEvent } : {}),
+        timing,
         observation: this.#observations.summary(freshObservation)
       }
     };
@@ -1463,6 +1576,33 @@ export class PhoneControlService {
       await this.#adb.listDevices(),
       this.#environment
     );
+  }
+
+  /**
+   * Serialize every dispatch path that can consume an observation. This also
+   * covers sequences, so a queued phone_execute_sequence cannot start after a
+   * concurrent single action has consumed the same observation.
+   */
+  async #withObservationLock<T>(
+    observationId: string,
+    work: () => Promise<T>
+  ): Promise<T> {
+    const previous = this.#observationLocks.get(observationId);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = (previous ?? Promise.resolve()).then(() => gate);
+    this.#observationLocks.set(observationId, tail);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.#observationLocks.get(observationId) === tail) {
+        this.#observationLocks.delete(observationId);
+      }
+    }
   }
 
   #uniquePackageSession(
@@ -1490,8 +1630,29 @@ export class PhoneControlService {
     options: CaptureOptions = {}
   ): Promise<ObservationCapture> {
     try {
-      const includeScreenshot = options.includeScreenshot !== false;
       const fallback = options.fallback;
+      const fallbackMode = fallback
+        ? "binding" in fallback
+          ? fallback.binding.mode
+          : fallback.mode
+        : undefined;
+      const mode =
+        options.mode ?? fallbackMode ?? (displayId > 0 ? "visual" : "semantic");
+      if (displayId > 0 && mode === "semantic") {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          "Semantic observations are not available for secondary displays until a display-scoped UI adapter is installed. Use mode 'visual'.",
+          { displayId, mode, visualOnly: true }
+        );
+      }
+      // A visual capture always takes a new screenshot. In particular, an
+      // intermediate sequence capture must not reuse its fallback bytes: the
+      // screenshot fingerprint is the visual freshness check for coordinate
+      // actions.
+      const includeScreenshot =
+        mode === "visual" || options.includeScreenshot !== false;
+      const requireScreenshotGeometry =
+        mode === "visual" || options.requireScreenshotGeometry === true;
       if (!includeScreenshot && !fallback) {
         throw new PhoneControlError(
           "INTERNAL_ERROR",
@@ -1505,14 +1666,128 @@ export class PhoneControlService {
         // display-scoped. Never attach that primary-display hierarchy to a
         // secondary observation; those observations intentionally remain
         // visual-only until the adapter can prove UI provenance.
-        displayId === 0
+        mode === "semantic"
           ? this.#adb.dumpUiAutomatorXml(serial, displayId).catch(() => null)
           : Promise.resolve<string | null>(null),
         includeScreenshot
           ? this.#adb.captureScreenshot(serial, displayId)
           : Promise.resolve<Uint8Array | undefined>(undefined)
       ]);
-      const elements = xml ? parseUiAutomatorXml(xml) : [];
+      if (
+        foreground.displayId === undefined &&
+        displayId > 0
+      ) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          `Android did not prove that the foreground app belongs to logical display ${displayId}.`,
+          {
+            requestedDisplayId: displayId,
+            foregroundDisplayId: foreground.displayId,
+            visualOnly: true
+          }
+        );
+      }
+      if (
+        foreground.displayId !== undefined &&
+        foreground.displayId !== displayId
+      ) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          `Android returned foreground metadata for display ${foreground.displayId} while display ${displayId} was requested.`,
+          {
+            requestedDisplayId: displayId,
+            foregroundDisplayId: foreground.displayId
+          }
+        );
+      }
+      const snapshotDisplayId =
+        display.displayId ?? display.display.displayId;
+      if (
+        snapshotDisplayId === undefined &&
+        displayId > 0
+      ) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          `Android did not prove that geometry belongs to logical display ${displayId}.`,
+          {
+            requestedDisplayId: displayId,
+            snapshotDisplayId,
+            visualOnly: true
+          }
+        );
+      }
+      if (
+        snapshotDisplayId !== undefined &&
+        snapshotDisplayId !== displayId
+      ) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          `Android returned display metadata for display ${snapshotDisplayId} while display ${displayId} was requested.`,
+          {
+            requestedDisplayId: displayId,
+            snapshotDisplayId
+          }
+        );
+      }
+      if (mode === "visual") {
+        // A screenshot is only usable for a coordinate action if the app and
+        // logical display remained the same for the entire capture window.
+        // Recheck after the screenshot so a task relocation or app takeover
+        // cannot be silently paired with the earlier pixels.
+        const [afterForeground, afterDisplay] = await Promise.all([
+          this.#adb.getForeground(serial, displayId),
+          this.#adb.getDisplay(serial, displayId)
+        ]);
+        const afterSnapshotDisplayId =
+          afterDisplay.displayId ?? afterDisplay.display.displayId;
+        if (
+          (afterForeground.displayId === undefined && displayId > 0) ||
+          (afterForeground.displayId !== undefined &&
+            afterForeground.displayId !== displayId) ||
+          (afterSnapshotDisplayId === undefined && displayId > 0) ||
+          (afterSnapshotDisplayId !== undefined &&
+            afterSnapshotDisplayId !== displayId)
+        ) {
+          throw new PhoneControlError(
+            "OBSERVATION_FAILED",
+            "The logical display identity changed while the screenshot was captured.",
+            {
+              phase: "after_screenshot",
+              requestedDisplayId: displayId,
+              foregroundDisplayId: afterForeground.displayId,
+              snapshotDisplayId: afterSnapshotDisplayId
+            }
+          );
+        }
+        const changedAfterScreenshot: string[] = [];
+        if (foreground.packageName !== afterForeground.packageName) {
+          changedAfterScreenshot.push("packageName");
+        }
+        if (foreground.activity !== afterForeground.activity) {
+          changedAfterScreenshot.push("activity");
+        }
+        if (
+          display.display.width !== afterDisplay.display.width ||
+          display.display.height !== afterDisplay.display.height
+        ) {
+          changedAfterScreenshot.push("display");
+        }
+        if (display.rotation !== afterDisplay.rotation) {
+          changedAfterScreenshot.push("rotation");
+        }
+        if (changedAfterScreenshot.length > 0) {
+          throw new PhoneControlError(
+            "OBSERVATION_FAILED",
+            "The foreground app or display geometry changed while the screenshot was captured.",
+            {
+              phase: "after_screenshot",
+              displayId,
+              changed: changedAfterScreenshot
+            }
+          );
+        }
+      }
+      const elements = mode === "semantic" && xml ? parseUiAutomatorXml(xml) : [];
       const fallbackScreenshotDimensions = fallback
         ? "binding" in fallback
           ? fallback.binding.screenshotDimensions
@@ -1528,14 +1803,37 @@ export class PhoneControlService {
       const screenshotDimensions = screenshot
         ? parsePngDimensions(screenshot)
         : fallbackScreenshotDimensions!;
+      if (
+        requireScreenshotGeometry &&
+        (screenshotDimensions.width !== display.display.width ||
+          screenshotDimensions.height !== display.display.height)
+      ) {
+        throw new PhoneControlError(
+          "OBSERVATION_FAILED",
+          "The screenshot dimensions do not match the requested display geometry; no coordinate transform is configured.",
+          {
+            displayId,
+            displayDimensions: {
+              width: display.display.width,
+              height: display.display.height
+            },
+            screenshotDimensions
+          }
+        );
+      }
       return {
         serial,
         displayId,
+        mode,
         packageName: foreground.packageName,
         activity: foreground.activity,
-        display: display.display,
+        display: {
+          ...display.display,
+          displayId: display.display.displayId ?? displayId
+        },
         rotation: display.rotation,
-        uiHash: hashUiTree(elements),
+        ...(mode === "semantic" ? { uiHash: hashUiTree(elements) } : {}),
+        screenshotHash: hashScreenshot(screenshotBytes),
         screenshotDimensions,
         observedAt: this.#now(),
         elements,
@@ -1567,6 +1865,15 @@ export class PhoneControlService {
     pointerEvent?: PointerEvent;
   } {
     const displayId = current.displayId ?? 0;
+    const mode = current.mode ?? "semantic";
+    const screenshotHash = hashScreenshot(current.screenshot);
+    const pointerContext = {
+      mode,
+      activity: current.activity,
+      rotation: current.rotation,
+      screenshotDimensions: { ...current.screenshotDimensions },
+      screenshotHash
+    };
     if (action.type === "click") {
       const element = rematchedTarget ?? observation.elements.find(
         (candidate: UiElement) => candidate.elementRef === action.elementRef
@@ -1603,6 +1910,7 @@ export class PhoneControlService {
         observationId: observation.observationId,
         serial: current.serial,
         displayId,
+        ...pointerContext,
         packageName: current.packageName,
         displayWidth: current.display.width,
         displayHeight: current.display.height,
@@ -1627,6 +1935,7 @@ export class PhoneControlService {
           observationId: observation.observationId,
           serial: current.serial,
           displayId,
+          ...pointerContext,
           packageName: current.packageName,
           displayWidth: current.display.width,
           displayHeight: current.display.height,
@@ -1688,6 +1997,7 @@ export class PhoneControlService {
         observationId: observation.observationId,
         serial: current.serial,
         displayId,
+        ...pointerContext,
         packageName: current.packageName,
         displayWidth: current.display.width,
         displayHeight: current.display.height,

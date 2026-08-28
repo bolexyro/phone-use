@@ -43,24 +43,35 @@ export function selectAuthorizedDevice(
 ): DeviceInfo {
   const serial = configuredSerial?.trim();
   if (serial) {
-    const configured = devices.find((device) => device.serial === serial);
-    if (!configured || !configured.authorized) {
-      throw new PhoneControlError(
-        "DEVICE_NOT_FOUND",
-        `Configured device '${serial}' is not an authorized device.`,
-        {
-          configuredSerial: serial,
-          availableDevices: devices.map(({ serial: value, state }) => ({
-            serial: value,
-            state
-          }))
-        }
-      );
+    const configured = devices.find(
+      (device) =>
+        device.serial === serial ||
+        device.serial.includes(serial)
+    );
+    if (configured && configured.authorized) {
+      return configured;
     }
-    return configured;
   }
 
   const authorized = devices.filter((device) => device.authorized);
+  if (authorized.length === 1) {
+    return authorized[0];
+  }
+
+  if (serial) {
+    throw new PhoneControlError(
+      "DEVICE_NOT_FOUND",
+      `Configured device '${serial}' is not an authorized device.`,
+      {
+        configuredSerial: serial,
+        availableDevices: devices.map(({ serial: value, state }) => ({
+          serial: value,
+          state
+        }))
+      }
+    );
+  }
+
   if (authorized.length === 0) {
     throw new PhoneControlError(
       "NO_AUTHORIZED_DEVICE",
@@ -69,15 +80,11 @@ export function selectAuthorizedDevice(
     );
   }
 
-  if (authorized.length !== 1) {
-    throw new PhoneControlError(
-      "MULTIPLE_AUTHORIZED_DEVICES",
-      "PHONE_CONTROL_DEVICE_SERIAL is required when more than one authorized Android device is connected.",
-      { devices: authorized }
-    );
-  }
-
-  return authorized[0];
+  throw new PhoneControlError(
+    "MULTIPLE_AUTHORIZED_DEVICES",
+    "PHONE_CONTROL_DEVICE_SERIAL is required when more than one authorized Android device is connected.",
+    { devices: authorized }
+  );
 }
 
 export function selectDeviceFromEnvironment(

@@ -208,11 +208,18 @@ export function parseDisplaySnapshotForId(
       displayId
     };
   }
-  return {
-    display: { ...parseDisplayMetrics(sizeOutput, windowOutput), displayId },
-    rotation: parseRotation(windowOutput),
-    displayId
-  };
+  // A primary-display fallback here would relabel its geometry as the
+  // requested secondary display. That makes coordinate actions unsafe: the
+  // screenshot and input could be bound to one display while the dimensions
+  // describe another. Fail closed until this display is explicitly listed.
+  throw new PhoneControlError(
+    "OBSERVATION_FAILED",
+    `ADB did not return geometry for logical display ${displayId}.`,
+    {
+      displayId,
+      availableDisplayIds: displays.map((candidate) => candidate.displayId)
+    }
+  );
 }
 
 export function parsePngDimensions(bytes: Uint8Array): ScreenshotDimensions {

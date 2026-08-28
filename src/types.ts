@@ -62,6 +62,9 @@ export interface ScreenshotDimensions {
   height: number;
 }
 
+/** The source of semantic metadata associated with an observation. */
+export type ObservationMode = "semantic" | "visual";
+
 export interface ForegroundState {
   packageName: string | null;
   activity: string | null;
@@ -71,11 +74,16 @@ export interface ForegroundState {
 export interface ObservationBinding {
   serial: string;
   displayId?: number;
+  /** Defaults to semantic for observations created by older callers. */
+  mode?: ObservationMode;
   packageName: string | null;
   activity: string | null;
   display: DisplayInfo;
   rotation: number;
-  uiHash: string;
+  /** Absent when this is an explicit screenshot-only observation. */
+  uiHash?: string;
+  /** SHA-256 of the exact PNG bytes used for this observation. */
+  screenshotHash: string;
   screenshotDimensions: ScreenshotDimensions;
   observedAt: number;
 }
@@ -90,11 +98,16 @@ export interface Observation {
 export interface ObservationCapture {
   serial: string;
   displayId?: number;
+  /** Defaults to semantic for captures created by older callers. */
+  mode?: ObservationMode;
   packageName: string | null;
   activity: string | null;
   display: DisplayInfo;
   rotation: number;
-  uiHash: string;
+  /** Absent when this is an explicit screenshot-only observation. */
+  uiHash?: string;
+  /** Filled by the capture path; the store computes it for legacy callers. */
+  screenshotHash?: string;
   screenshotDimensions: ScreenshotDimensions;
   observedAt: number;
   elements: readonly UiElement[];
@@ -176,9 +189,14 @@ export interface ClickPointerEvent {
   observationId: string;
   serial: string;
   displayId?: number;
+  mode: ObservationMode;
   packageName: string | null;
+  activity: string | null;
+  rotation: number;
   displayWidth: number;
   displayHeight: number;
+  screenshotDimensions: ScreenshotDimensions;
+  screenshotHash: string;
   timestamp: number;
 }
 
@@ -197,9 +215,14 @@ export interface ScrollPointerEvent {
   observationId: string;
   serial: string;
   displayId?: number;
+  mode: ObservationMode;
   packageName: string | null;
+  activity: string | null;
+  rotation: number;
   displayWidth: number;
   displayHeight: number;
+  screenshotDimensions: ScreenshotDimensions;
+  screenshotHash: string;
   timestamp: number;
 }
 
@@ -220,11 +243,13 @@ export interface ObservationSummary {
   observationId: string;
   serial: string;
   displayId?: number;
+  mode: ObservationMode;
   packageName: string | null;
   activity: string | null;
   display: DisplayInfo;
   rotation: number;
-  uiHash: string;
+  uiHash?: string;
+  screenshotHash: string;
   screenshot: {
     mimeType: "image/png";
     width: number;
@@ -253,15 +278,13 @@ export interface CloseAppData {
 export interface OpenAppOptions {
   useVirtualDisplay?: boolean;
   newInstance?: boolean;
+  mode?: ObservationMode;
 }
 
 export interface PhoneStatusData {
-  profile: string;
-  allowedApps: readonly string[];
   device: DeviceInfo;
   foreground: ForegroundState;
   foregroundAllowed: boolean;
-  virtualDisplays?: readonly VirtualDisplaySession[];
 }
 
 export interface AllowedAppsData {
@@ -269,11 +292,25 @@ export interface AllowedAppsData {
   allowedApps: readonly string[];
 }
 
+export interface ActiveAppsData {
+  activeSessions: readonly VirtualDisplaySession[];
+  count: number;
+}
+
 export interface ActionData {
   action: PhoneAction["type"];
   textLength?: number;
   pointerEvent?: PointerEvent;
+  timing?: ActionTiming;
   observation: ObservationSummary;
+}
+
+export interface ActionTiming {
+  mode: ObservationMode;
+  preflightMs: number;
+  dispatchMs: number;
+  observationMs: number;
+  totalMs: number;
 }
 
 export interface SequenceStepSuccess {

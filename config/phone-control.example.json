@@ -3,7 +3,9 @@
     "local": {
       "allowedApps": [
         "com.sec.android.app.popupcalculator",
-        "com.spotify.music"
+        "com.spotify.music",
+        "org.telegram.messenger",
+        "com.phonecontrol.coordinatebenchmark"
       ]
     }
   }

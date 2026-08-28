@@ -8,6 +8,7 @@ import { ObservationStore } from "./observation-store.js";
 import { MAX_SEQUENCE_ACTIONS } from "./types.js";
 import type {
   ActionData,
+  ActiveAppsData,
   AllowedAppsData,
   CloseAppData,
   ObservationSummary,
@@ -15,6 +16,7 @@ import type {
   PhoneExecuteSequenceRequest,
   PhoneSequenceAction,
   PhoneStatusData,
+  ObservationMode,
   SequenceExecutionMode,
   SequenceData,
   ToolSuccessResult,
@@ -24,9 +26,10 @@ import type {
 export const PHONE_CONTROL_TOOL_NAMES = [
   "phone_status",
   "phone_list_allowed_apps",
+  "phone_list_active_apps",
   "phone_open_app",
   "phone_close_app",
-  "phone_observe",
+  "phone_observe_app",
   "phone_execute",
   "phone_execute_sequence",
   "phone_wait_for"
@@ -151,6 +154,7 @@ export const phoneObserveInputSchema = z
   .object({
     displayId: z.number().int().min(0).optional(),
     packageName: packageNameSchema.optional(),
+    mode: z.enum(["semantic", "visual"]).optional(),
     includeScreenshot: z.boolean().optional()
   })
   .strict();
@@ -193,7 +197,8 @@ export const phoneOpenAppInputSchema = z
   .object({
     packageName: packageNameSchema,
     useVirtualDisplay: z.boolean().optional(),
-    newInstance: z.boolean().optional()
+    newInstance: z.boolean().optional(),
+    mode: z.enum(["semantic", "visual"]).optional()
   })
   .strict();
 
@@ -208,9 +213,14 @@ export interface PhoneControlToolService {
   readonly observationStore: ObservationStore;
   status(): Promise<ToolSuccessResult<PhoneStatusData>>;
   allowedApps(): ToolSuccessResult<AllowedAppsData>;
+  listActiveApps(): ToolSuccessResult<ActiveAppsData>;
   openApp(
     packageName: string,
-    options?: { useVirtualDisplay?: boolean; newInstance?: boolean }
+    options?: {
+      useVirtualDisplay?: boolean;
+      newInstance?: boolean;
+      mode?: ObservationMode;
+    }
   ): Promise<ToolSuccessResult<{ observation: ObservationSummary }>>;
   closeApp(target: {
     packageName?: string;
@@ -219,6 +229,7 @@ export interface PhoneControlToolService {
   observe(options?: {
     displayId?: number;
     packageName?: string;
+    mode?: ObservationMode;
   }): Promise<ToolSuccessResult<{ observation: ObservationSummary }>>;
   execute(request: PhoneExecuteRequest): Promise<ToolSuccessResult<ActionData>>;
   executeSequence(
@@ -314,7 +325,7 @@ function resolveScreenshot(
   })?.data;
   const summary = data?.observation ?? data?.finalObservation;
   if (!summary) return undefined;
-  if (includeScreenshot || summary.elements.length === 0) {
+  if (includeScreenshot || summary.mode === "visual") {
     return service.observationStore.get(summary.observationId)?.screenshot;
   }
   return undefined;
@@ -327,7 +338,7 @@ export function registerPhoneControlTools(
   server.registerTool(
     "phone_status",
     {
-      description: "Report the selected Android device and current foreground app.",
+      description: "Report the selected Android device connection, authorization state, and physical screen foreground status.",
       inputSchema: {}
     },
     async () => safely(() => service.status())
@@ -343,10 +354,19 @@ export function registerPhoneControlTools(
   );
 
   server.registerTool(
+    "phone_list_active_apps",
+    {
+      description: "List all currently running app sessions, their virtual display IDs, and dimensions.",
+      inputSchema: {}
+    },
+    async () => safely(() => service.listActiveApps())
+  );
+
+  server.registerTool(
     "phone_open_app",
     {
       description:
-        "Launch one allowlisted package in a virtual display. Reuses an existing package session by default; set newInstance true to request another Android task. If the app reuses or moves its existing task, the call fails as unsupported. Use displayId to target an instance.",
+        "Launch an allowlisted package in an isolated virtual display. This is the required first step to interact with an app; it returns an initial observation with observationId. Reuses an existing session for the package by default; set newInstance true to request another display. Use mode 'visual' for a screenshot-only observation/action loop; semantic remains the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists.",
       inputSchema: phoneOpenAppInputSchema.shape
     },
     async (input) => {
@@ -355,7 +375,8 @@ export function registerPhoneControlTools(
           const parsed = parseInput(phoneOpenAppInputSchema, input);
           return service.openApp(parsed.packageName, {
             useVirtualDisplay: parsed.useVirtualDisplay,
-            newInstance: parsed.newInstance
+            newInstance: parsed.newInstance,
+            ...(parsed.mode ? { mode: parsed.mode as ObservationMode } : {})
           });
         },
         (result) => resolveScreenshot(service, result)
@@ -378,10 +399,10 @@ export function registerPhoneControlTools(
   );
 
   server.registerTool(
-    "phone_observe",
+    "phone_observe_app",
     {
       description:
-        "Capture a fresh UI observation and native PNG screenshot from a virtual display or primary screen.",
+        "Capture a fresh observation and native PNG screenshot from an active app session or display. Use mode 'visual' for screenshot-only capture (no shell UI Automator call); its screenshot fingerprint is checked before coordinate actions and a fresh screenshot observation is returned after every action. Pass displayId explicitly when multiple virtual display sessions are active; visual coordinates require exact screenshot/display dimensions with no implicit transform. Semantic is the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists. Do not use this to launch apps; call phone_open_app first.",
       inputSchema: phoneObserveInputSchema.shape
     },
     async (input) => {
@@ -392,7 +413,8 @@ export function registerPhoneControlTools(
           includeScreenshot = parsed.includeScreenshot === true;
           return service.observe({
             displayId: parsed.displayId,
-            packageName: parsed.packageName
+            packageName: parsed.packageName,
+            ...(parsed.mode ? { mode: parsed.mode as ObservationMode } : {})
           });
         },
         (result) => resolveScreenshot(service, result, includeScreenshot)

@@ -20,7 +20,7 @@ import {
   parseListWindowsResponse,
   parseWindowChangedEvent
 } from "../src/viewer/win32-window.js";
-import { parsePackageFromWindowTitle } from "../src/viewer/main.js";
+import { parsePackageFromWindowTitle } from "../src/viewer/window-title.js";
 
 const clickLine = JSON.stringify({
   at: 123,

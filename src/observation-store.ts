@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { PhoneControlError } from "./errors.js";
 import type {
@@ -29,15 +29,30 @@ function createOpaqueObservationId(): string {
   return `obs_${randomBytes(18).toString("base64url")}`;
 }
 
+/** Fingerprint the exact PNG bytes shown to the agent and used for a visual action. */
+export function hashScreenshot(screenshot: Uint8Array): string {
+  return createHash("sha256").update(screenshot).digest("hex");
+}
+
 function bindingFromCapture(capture: ObservationCapture): ObservationBinding {
+  const displayId = capture.displayId ?? 0;
+  const mode = capture.mode ?? "semantic";
   return {
     serial: capture.serial,
-    displayId: capture.displayId ?? 0,
+    displayId,
+    mode,
     packageName: capture.packageName,
     activity: capture.activity,
-    display: { ...capture.display },
+    display: {
+      ...capture.display,
+      displayId: capture.display.displayId ?? displayId
+    },
     rotation: capture.rotation,
-    uiHash: capture.uiHash,
+    ...(capture.uiHash !== undefined ? { uiHash: capture.uiHash } : {}),
+    // Derive the fingerprint from the bytes rather than trusting metadata
+    // supplied by a caller. The binding must describe the exact PNG retained
+    // in the store.
+    screenshotHash: hashScreenshot(capture.screenshot),
     screenshotDimensions: { ...capture.screenshotDimensions },
     observedAt: capture.observedAt
   };
@@ -101,8 +116,14 @@ export class ObservationStore {
   ): ObservationComparison {
     const changed: string[] = [];
     const binding = observation.binding;
+    const bindingMode = binding.mode ?? "semantic";
+    // Legacy callers may construct a fresh capture without the mode field.
+    // Treat that as the reference mode so a visual observation is not rejected
+    // merely because semantic metadata was not collected.
+    const currentMode = current.mode ?? bindingMode;
     if (binding.serial !== current.serial) changed.push("serial");
     if ((binding.displayId ?? 0) !== (current.displayId ?? 0)) changed.push("displayId");
+    if (bindingMode !== currentMode) changed.push("mode");
     if (binding.packageName !== current.packageName) changed.push("packageName");
     if (binding.activity !== current.activity) changed.push("activity");
     if (
@@ -112,7 +133,18 @@ export class ObservationStore {
       changed.push("display");
     }
     if (binding.rotation !== current.rotation) changed.push("rotation");
-    if (binding.uiHash !== current.uiHash) changed.push("uiHash");
+    if (bindingMode === "visual" || currentMode === "visual") {
+      const currentScreenshotHash = hashScreenshot(current.screenshot);
+      if (binding.screenshotHash !== currentScreenshotHash) {
+        changed.push("screenshotHash");
+      }
+    } else if (
+      binding.uiHash !== undefined &&
+      current.uiHash !== undefined &&
+      binding.uiHash !== current.uiHash
+    ) {
+      changed.push("uiHash");
+    }
     if (
       binding.screenshotDimensions.width !== current.screenshotDimensions.width ||
       binding.screenshotDimensions.height !== current.screenshotDimensions.height
@@ -168,16 +200,42 @@ export class ObservationStore {
     return { matches: changed.length === 0, changed, target: rematched };
   }
 
+  /**
+   * Coordinate actions are grounded in pixels, so the exact screenshot must
+   * remain unchanged even when a semantic observation also has a matching UI
+   * tree. This is deliberately stricter than element-targeted actions, which
+   * may rematch an unchanged target after unrelated semantic mutations.
+   */
+  public compareCoordinateAction(
+    observation: Observation,
+    current: ObservationCapture
+  ): ObservationComparison {
+    const comparison = this.compare(observation, current);
+    const changed = [...comparison.changed];
+    const currentScreenshotHash = hashScreenshot(current.screenshot);
+    if (
+      observation.binding.screenshotHash !== currentScreenshotHash &&
+      !changed.includes("screenshotHash")
+    ) {
+      changed.push("screenshotHash");
+    }
+    return { matches: changed.length === 0, changed };
+  }
+
   public summary(observation: Observation): ObservationSummary {
     return {
       observationId: observation.observationId,
       serial: observation.binding.serial,
       displayId: observation.binding.displayId ?? 0,
+      mode: observation.binding.mode ?? "semantic",
       packageName: observation.binding.packageName,
       activity: observation.binding.activity,
       display: { ...observation.binding.display },
       rotation: observation.binding.rotation,
-      uiHash: observation.binding.uiHash,
+      ...(observation.binding.uiHash !== undefined
+        ? { uiHash: observation.binding.uiHash }
+        : {}),
+      screenshotHash: observation.binding.screenshotHash,
       screenshot: {
         mimeType: "image/png",
         width: observation.binding.screenshotDimensions.width,
