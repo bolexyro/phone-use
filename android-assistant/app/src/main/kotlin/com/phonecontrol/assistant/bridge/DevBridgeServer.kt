@@ -382,8 +382,10 @@ class DevBridgeServer(
                 "expectedPackageName is not a valid Android package name."
             }
         }
-        val guards = parseGuardRegions(json.optJSONArray("guardRegions"))
-        when (val captured = captureWithRetry(expectedPackage, guards)) {
+        // Screenshots are still returned for the model's visual context, but
+        // the assistant path no longer fingerprints guard regions or rejects
+        // actions because the screen changed between calls.
+        when (val captured = captureWithRetry(expectedPackage, emptyList())) {
             is ObservationCaptureResult.Failed -> write(writer, errorResponse(requestId, captured.message))
             is ObservationCaptureResult.Succeeded -> {
                 remember(captured.snapshot)
@@ -400,10 +402,18 @@ class DevBridgeServer(
         val actionJson = json.optJSONObject("action")
             ?: throw IllegalArgumentException("action must be an object.")
         val action = parsePhoneAction(actionJson)
-        val observation = observations[action.metadata.observationId]
-            ?: throw IllegalArgumentException(
-                "Observation ${action.metadata.observationId} is unknown or expired; observe again.",
+        val observation = synchronized(observations) {
+            action.metadata.observationId
+                .takeIf { it.isNotBlank() }
+                ?.let { observations[it] }
+                ?: observations.values.lastOrNull()
+        } ?: when (val captured = captureWithRetry(null, emptyList())) {
+            is ObservationCaptureResult.Failed -> throw IllegalArgumentException(
+                "The action could not get a current phone screenshot: ${captured.message}",
             )
+
+            is ObservationCaptureResult.Succeeded -> captured.snapshot.also(::remember)
+        }
         val result = coordinator.executeAction(action, observation)
         writeActionResult(writer, requestId, wireActionName(action), result)
         if (!result.isSuccessful()) {
@@ -430,7 +440,7 @@ class DevBridgeServer(
             is OpenAppAction -> action.packageName
             else -> observation.packageName
         }
-        when (val captured = captureWithRetry(expectedPackage, action.metadata.guardRegions)) {
+        when (val captured = captureWithRetry(expectedPackage, emptyList())) {
             is ObservationCaptureResult.Failed -> {
                 coordinator.stop("Post-action observation failed: ${captured.message}")
                 write(
@@ -442,7 +452,7 @@ class DevBridgeServer(
                         .put("action", wireActionName(action))
                         .put("outcome", "unknown")
                         .put("code", "POST_OBSERVATION_FAILED")
-                        .put("message", "The action may have run, but the phone could not produce a fresh observation: ${captured.message}"),
+                        .put("message", "The action may have run, but the phone could not produce a post-action screenshot: ${captured.message}"),
                 )
             }
 
@@ -536,13 +546,12 @@ class DevBridgeServer(
     private fun parseMetadata(json: JSONObject?): ActionMetadata {
         require(json != null) { "action.metadata is required." }
         val purpose = json.optString("purpose").trim()
-        val observationId = json.optString("observationId").trim()
+        // observationId and guardRegions remain accepted for compatibility with
+        // older callers, but are optional while freshness enforcement is off.
+        val observationId = json.optString("observationId").trim().take(MAX_TEXT_CHARS)
         val targetDescription = json.optString("targetDescription").trim()
         require(purpose.isNotEmpty() && purpose.length <= MAX_TEXT_CHARS) {
             "metadata.purpose must be 1-$MAX_TEXT_CHARS characters."
-        }
-        require(observationId.isNotEmpty() && observationId.length <= MAX_TEXT_CHARS) {
-            "metadata.observationId is invalid."
         }
         require(targetDescription.isNotEmpty() && targetDescription.length <= MAX_TEXT_CHARS) {
             "metadata.targetDescription must be 1-$MAX_TEXT_CHARS characters."

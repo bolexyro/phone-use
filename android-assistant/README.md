@@ -17,17 +17,18 @@ notifications, request handoff, and observation/action execution.
   the Activity timeline.
 - Typed action models for `open_app`, `tap`, `type`, `swipe`, `scroll`,
   `keypress`, `back` and `wait`.
-  Each action carries a purpose, observation ID, target description and
-  optional screenshot guard regions.
-- Phone-authoritative `PolicyEngine` skeleton for app allowlisting, fresh
-  observation IDs and confirmation categories: send, purchase, transfer,
-  delete and submit.
+  Each action carries a purpose and target description. Observation IDs and
+  screenshot guard regions remain in the internal model for a future safety
+  pass, but are not required by the current assistant bridge.
+- Phone-authoritative `PolicyEngine` for app allowlisting and confirmation
+  categories: send, purchase, transfer, delete and submit.
 - Official Shizuku API lifecycle and capability detection, plus a typed
   transport for `am start`, `input tap`, `input text`, `input swipe`, and
   `input keyevent`. The app builds those argv arrays itself; no raw
-  provider/model shell command is accepted. Before every input action, the
-  phone captures a fresh shell screenshot and rejects stale package, activity,
-  display, full-screen, or declared guard-region state.
+  provider/model shell command is accepted. Before an input action, the phone
+  captures a current shell screenshot for foreground binding and coordinate
+  bounds. Screenshot fingerprint/guard freshness rejection is deferred while
+  the first assistant prototype is tuned.
 
 Run now creates a phone-owned request that the desktop Codex companion can
 claim. A localhost-only development bridge carries that handoff and the typed
@@ -96,8 +97,8 @@ pnpm bridge:demo -- --package com.phonecontrol.coordinatebenchmark --x 500 --y 9
 ```
 
 Optional flags are `--host`, `--port`, `--purpose`, and `--target`. The phone
-is still the authority: it checks Shizuku state, the per-app allowlist, the
-fresh observation binding, coordinate bounds, and screen/guard freshness
+is still the authority: it checks Shizuku state, the per-app allowlist,
+foreground binding, and coordinate bounds
 before it sends `input tap`. Use the Coordinate Benchmark app for repeatable
 tests; it is the only package enabled in the current physical smoke setup.
 The desktop script is only a hard-coded demo.
@@ -116,13 +117,13 @@ Phone typed request
         -> local MCP adapter
         -> authenticated phone link
         -> this app's SessionCoordinator and PolicyEngine
-        -> observation/guard validation
+        -> screenshot context and foreground/bounds validation
         -> Shizuku transport
 ```
 
 The desktop side uses the Codex CLI's existing authentication and subscription
 through App Server. The phone remains the final authority for per-app
-permissions, confirmation, stale observations and cancellation. Raw
+permissions, confirmation and cancellation. Raw
 model/provider payloads must not be treated as phone commands.
 
 The MCP adapter exercises the same typed phone protocol today. Codex App

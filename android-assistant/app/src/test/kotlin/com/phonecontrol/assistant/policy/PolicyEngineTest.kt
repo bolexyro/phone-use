@@ -11,7 +11,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PolicyEngineTest {
-    private val engine = PolicyEngine()
+    // Keep coverage for the deferred guard layer while the app runtime uses
+    // the relaxed prototype configuration.
+    private val engine = PolicyEngine(enforceObservationFreshness = true)
+    private val relaxedEngine = PolicyEngine()
     private val observation = ObservationSnapshot(
         id = "obs-1",
         packageName = "com.example.shop",
@@ -115,6 +118,16 @@ class PolicyEngineTest {
                 metadata = metadata("Open shop"),
             ),
             context(foregroundPackage = null),
+        )
+
+        assertEquals(PolicyDecision.Allowed, decision)
+    }
+
+    @Test
+    fun `allows action without observation when freshness is disabled`() {
+        val decision = relaxedEngine.evaluate(
+            TapAction(500, 900, metadata("Select restaurant", observationId = "")),
+            context().copy(currentObservationId = null),
         )
 
         assertEquals(PolicyDecision.Allowed, decision)

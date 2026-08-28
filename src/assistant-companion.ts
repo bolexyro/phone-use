@@ -362,26 +362,13 @@ type DynamicToolSpec = Record<string, unknown>;
  * request path through the bundled Code Mode host.
  */
 export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
-  const guardRegion = {
-    type: "object",
-    properties: {
-      left: { type: "integer", minimum: 0 },
-      top: { type: "integer", minimum: 0 },
-      right: { type: "integer", minimum: 1 },
-      bottom: { type: "integer", minimum: 1 }
-    },
-    required: ["left", "top", "right", "bottom"],
-    additionalProperties: false
-  };
   const metadata = {
     type: "object",
     properties: {
       purpose: { type: "string", minLength: 1, maxLength: 240 },
-      observationId: { type: "string", minLength: 1, maxLength: 240 },
-      targetDescription: { type: "string", minLength: 1, maxLength: 240 },
-      guardRegions: { type: "array", items: guardRegion, maxItems: 8 }
+      targetDescription: { type: "string", minLength: 1, maxLength: 240 }
     },
-    required: ["purpose", "observationId", "targetDescription"],
+    required: ["purpose", "targetDescription"],
     additionalProperties: false
   };
   const actionObject = (
@@ -470,19 +457,18 @@ export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
     ),
     dynamicTool(
       "phone_control_observe",
-      "Capture the physical Android display and return a fresh observationId plus screenshot.",
+      "Capture the current physical Android display and return a screenshot for visual context. Screen changes do not block a subsequent typed action.",
       {
         type: "object",
         properties: {
-          expectedPackageName: { type: "string", minLength: 1 },
-          guardRegions: { type: "array", items: guardRegion, maxItems: 8 }
+          expectedPackageName: { type: "string", minLength: 1 }
         },
         additionalProperties: false
       }
     ),
     dynamicTool(
       "phone_control_execute",
-      "Execute one typed phone action with metadata.purpose, then return a fresh post-action screenshot. Never use shell commands.",
+      "Execute one typed phone action with metadata.purpose, then return a post-action screenshot. Never use shell commands. Actions are not rejected because the screenshot changed.",
       {
         type: "object",
         properties: { action },
@@ -696,9 +682,9 @@ function buildPhonePrompt(phoneRequest: string): string {
     "A phone-side session is already running; do not call phone_assistant_start.",
     "Use only the direct phone_control_* tools exposed by this companion. Do not use arbitrary exec code, shell commands, or the configured phone_assistant_* MCP wrappers. Code Mode may be the App Server transport for these direct tools; never use it to run unrelated code.",
     "Begin with phone_control_list_allowed_apps if you need the allowlist, then phone_control_observe.",
-    "Before every phone_control_execute call, use the freshest observationId. After every action, inspect the returned fresh screenshot before proposing the next action.",
+    "Before actions, use phone_control_observe when you need visual context. After every action, inspect the returned screenshot before proposing the next action.",
     "Every action must include a concise, user-facing metadata.purpose and metadata.targetDescription. Never send shell commands or bypass a phone policy decision.",
-    "If the phone requires confirmation or reports a stale observation, use phone_control_request_attention with a concise explanation, stop taking phone actions, and explain what the user must do.",
+    "If the phone requires confirmation or asks for user attention, use phone_control_request_attention with a concise explanation, stop taking phone actions, and explain what the user must do.",
     "When the request is complete, give a short result summary; the desktop companion will close the phone session.",
     "",
     `User request: ${phoneRequest}`

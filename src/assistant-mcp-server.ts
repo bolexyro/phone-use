@@ -13,27 +13,10 @@ const packageNameSchema = z
   .max(255)
   .regex(/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/);
 
-const guardRegionSchema = z
-  .object({
-    left: z.number().int().min(0),
-    top: z.number().int().min(0),
-    right: z.number().int().min(1),
-    bottom: z.number().int().min(1)
-  })
-  .strict()
-  .refine((region) => region.right > region.left, {
-    message: "right must be greater than left"
-  })
-  .refine((region) => region.bottom > region.top, {
-    message: "bottom must be greater than top"
-  });
-
 const actionMetadataSchema = z
   .object({
     purpose: z.string().min(1).max(240),
-    observationId: z.string().min(1).max(240),
-    targetDescription: z.string().min(1).max(240),
-    guardRegions: z.array(guardRegionSchema).max(8).optional()
+    targetDescription: z.string().min(1).max(240)
   })
   .strict();
 
@@ -116,8 +99,7 @@ export const phoneAssistantActionSchema = z.discriminatedUnion("type", [
 
 export const observeInputSchema = z
   .object({
-    expectedPackageName: packageNameSchema.optional(),
-    guardRegions: z.array(guardRegionSchema).max(8).optional()
+    expectedPackageName: packageNameSchema.optional()
   })
   .strict();
 
@@ -219,8 +201,7 @@ export async function invokePhoneAssistantTool(
         return requestBridge({
           type: "observe",
           requestId: randomUUID(),
-          ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {}),
-          ...(parsed.guardRegions ? { guardRegions: parsed.guardRegions } : {})
+          ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {})
         });
       });
     case "phone_assistant_execute":
@@ -292,7 +273,7 @@ export function createPhoneAssistantMcpServer(
   server.registerTool(
     "phone_assistant_start",
     {
-      description: "Start a phone-assistant session for a natural-language request. The phone remains the authority for app permissions, stale observations, confirmations, and cancellation.",
+      description: "Start a phone-assistant session for a natural-language request. The phone remains the authority for app permissions, confirmations, and cancellation.",
       inputSchema: { request: z.string().min(1).max(16_384) }
     },
     async (input) => invokePhoneAssistantTool("phone_assistant_start", input)
@@ -301,7 +282,7 @@ export function createPhoneAssistantMcpServer(
   server.registerTool(
     "phone_assistant_observe",
     {
-      description: "Capture the current physical phone display as a PNG plus a fresh observationId. Call this before proposing an action and use the returned observationId in that action's metadata.",
+      description: "Capture the current physical phone display as a PNG for visual context. Use it to choose the next typed action; screenshots do not block an action if the screen changes.",
       inputSchema: observeInputSchema.shape
     },
     async (input) => invokePhoneAssistantTool("phone_assistant_observe", input)
@@ -310,7 +291,7 @@ export function createPhoneAssistantMcpServer(
   server.registerTool(
     "phone_assistant_execute",
     {
-      description: "Execute one typed phone action against the exact observationId supplied in its metadata, then return a fresh post-action screenshot. Include a concise human-readable purpose such as 'Searching for jollof rice' or 'Selecting the delivery address'. Do not send shell commands.",
+      description: "Execute one typed phone action and return a post-action screenshot. Include a concise human-readable purpose such as 'Searching for jollof rice' or 'Selecting the delivery address'. Do not send shell commands.",
       inputSchema: { action: phoneAssistantActionSchema }
     },
     async (input) => invokePhoneAssistantTool("phone_assistant_execute", input)

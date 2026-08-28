@@ -44,6 +44,12 @@ class ShizukuActionTransport(
     private val context: Context,
     private val observationProvider: ShizukuObservationProvider,
     private val processRunner: ShizukuProcessRunner,
+    /**
+     * Screenshot/observation freshness is deferred for the first prototype.
+     * Keep this switch so the guard layer can be re-enabled after it has been
+     * tuned against real phone UI transitions.
+     */
+    private val enforceObservationFreshness: Boolean = false,
 ) : PhoneActionTransport {
     override suspend fun execute(
         action: PhoneAction,
@@ -65,10 +71,10 @@ class ShizukuActionTransport(
         if (observation == null) {
             return TransportResult.Rejected(
                 RejectionCode.OBSERVATION_MISSING,
-                "A fresh observation is required; the action was not executed.",
+                "A current phone screenshot is required for display bounds; the action was not executed.",
             )
         }
-        if (observation.id != action.metadata.observationId) {
+        if (enforceObservationFreshness && observation.id != action.metadata.observationId) {
             return TransportResult.Rejected(
                 RejectionCode.STALE_OBSERVATION,
                 "The observation is stale; the action was not executed.",
@@ -272,7 +278,11 @@ class ShizukuActionTransport(
     ): FreshCheck {
         val fresh = observationProvider.capture(
             expectedPackageName = observation.packageName,
-            guardRegions = action.metadata.guardRegions,
+            guardRegions = if (enforceObservationFreshness) {
+                action.metadata.guardRegions
+            } else {
+                emptyList()
+            },
         )
         val current = when (fresh) {
             is ObservationCaptureResult.Failed -> {
@@ -283,7 +293,7 @@ class ShizukuActionTransport(
 
             is ObservationCaptureResult.Succeeded -> fresh.snapshot
         }
-        if (isStale(observation, current, action.metadata.guardRegions)) {
+        if (enforceObservationFreshness && isStale(observation, current, action.metadata.guardRegions)) {
             return FreshCheck.Rejected(
                 TransportResult.Rejected(
                     RejectionCode.STALE_OBSERVATION,

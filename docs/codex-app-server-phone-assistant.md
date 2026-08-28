@@ -8,8 +8,8 @@ The desktop side of the pivot has two small local processes:
    The companion uses the same phone-tool dispatcher directly, so a normal
    companion turn does not depend on a second MCP stdio process.
 
-The Android app remains the authority for Shizuku, app allowlisting, stale
-observations, confirmation boundaries, and stop/pause state. The companion
+The Android app remains the authority for Shizuku, app allowlisting,
+confirmation boundaries, and stop/pause state. The companion
 claims a request before starting a turn and releases it if the desktop side
 fails, so a temporary disconnect does not silently lose the user's request.
 
@@ -68,9 +68,10 @@ MCP server:
 - `phone_assistant_start` — create a user-requested session.
 - `phone_assistant_list_allowed_apps` — show the phone-side packages currently
   enabled in the per-app allowlist (all apps start disabled).
-- `phone_assistant_observe` — return a fresh observation ID and PNG screenshot.
-- `phone_assistant_execute` — execute one typed action and return a fresh PNG
-  observation after it.
+- `phone_assistant_observe` — return the current screenshot and foreground
+  context for the next action.
+- `phone_assistant_execute` — execute one typed action and return a post-action
+  PNG screenshot. A changed screenshot does not by itself reject the action.
 - `phone_assistant_request_attention` — post an attention notification without
   opening the assistant Activity.
 - `phone_assistant_status` — read the phone session state/current purpose.
@@ -93,13 +94,13 @@ The bridge preserves the pre-pivot MCP primitives in phone-owned form:
 | MCP-stage interaction | Phone action | Notes |
 | --- | --- | --- |
 | Open app | `open_app` | Launch component is resolved by Android; allowlist is enforced on the phone. |
-| Coordinate click | `tap` / `click_coordinate` | Requires the exact observation ID and bounds check. |
+| Coordinate click | `tap` / `click_coordinate` | Coordinates are checked against the current screenshot bounds; screenshot freshness checks are deferred. |
 | Directional scroll | `scroll` | Android derives a bounded swipe from direction + amount. |
 | Explicit gesture | `swipe` | Start/end coordinates and duration are bounds checked. |
 | Type text | `type` | Uses Android `input text`; text is never copied into the activity log. |
 | Keypress | `keypress` | Supports `BACK`, `HOME`, `ENTER`, and `DELETE`. |
 | Back shortcut | `back` | Equivalent to `keypress` with `BACK`. |
-| Wait | `wait` | Bounded to 30 seconds; the bridge still returns a fresh observation. |
+| Wait | `wait` | Bounded to 30 seconds; the bridge still returns a post-action screenshot when available. |
 
 Each action includes `metadata.purpose`, for example `Searching for jollof
 rice` or `Selecting the delivery address`. That purpose is safe to show in the

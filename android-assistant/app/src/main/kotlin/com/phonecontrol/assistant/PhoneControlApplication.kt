@@ -32,12 +32,15 @@ class PhoneControlApplication : Application() {
         observationProvider = ShizukuObservationProvider(this, shizukuProcessRunner)
         sessionCoordinator = SessionCoordinator(
             enabledPackagesProvider = { appPermissionRepository.enabledPackages() },
-            policyEngine = PolicyEngine(),
+            // Screenshot freshness/guard checks are deliberately deferred in
+            // the first assistant prototype and can be re-enabled here later.
+            policyEngine = PolicyEngine(enforceObservationFreshness = false),
             transport = ShizukuActionTransport(
                 controller = shizukuController,
                 context = this,
                 observationProvider = observationProvider,
                 processRunner = shizukuProcessRunner,
+                enforceObservationFreshness = false,
             ),
         )
         // The bridge is localhost-only and intended for adb-forwarded

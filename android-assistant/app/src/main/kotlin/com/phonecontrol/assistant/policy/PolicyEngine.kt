@@ -54,6 +54,13 @@ enum class DenialCode {
  */
 class PolicyEngine(
     private val sensitiveActionClassifier: SensitiveActionClassifier = KeywordSensitiveActionClassifier,
+    /**
+     * Screenshot/observation freshness is intentionally off for the first
+     * phone-assistant prototype. Keep the switch so the guard layer can be
+     * re-enabled without changing the policy API when its false-positive
+     * behavior is ready.
+     */
+    private val enforceObservationFreshness: Boolean = false,
 ) {
     fun evaluate(action: PhoneAction, context: PolicyContext): PolicyDecision {
         val metadataError = validateMetadata(action.metadata)
@@ -61,6 +68,7 @@ class PolicyEngine(
             return PolicyDecision.Denied(DenialCode.INVALID_ACTION_METADATA, metadataError)
         }
         if (
+            enforceObservationFreshness &&
             action is TapAction &&
             action.metadata.guardRegions.isNotEmpty() &&
             action.metadata.guardRegions.none { it.contains(action.x, action.y) }
@@ -96,16 +104,18 @@ class PolicyEngine(
             }
         }
 
-        val currentObservationId = context.currentObservationId
-            ?: return PolicyDecision.Denied(
-                DenialCode.OBSERVATION_MISSING,
-                "A fresh observation is required before an action can run.",
-            )
-        if (currentObservationId != action.metadata.observationId) {
-            return PolicyDecision.Denied(
-                DenialCode.STALE_OBSERVATION,
-                "The action was proposed from an older observation.",
-            )
+        if (enforceObservationFreshness) {
+            val currentObservationId = context.currentObservationId
+                ?: return PolicyDecision.Denied(
+                    DenialCode.OBSERVATION_MISSING,
+                    "A fresh observation is required before an action can run.",
+                )
+            if (currentObservationId != action.metadata.observationId) {
+                return PolicyDecision.Denied(
+                    DenialCode.STALE_OBSERVATION,
+                    "The action was proposed from an older observation.",
+                )
+            }
         }
 
         // Provider-authored purpose/target text may conservatively add a
@@ -125,7 +135,9 @@ class PolicyEngine(
 
     private fun validateMetadata(metadata: ActionMetadata): String? {
         if (metadata.purpose.isBlank()) return "Every action needs a user-facing purpose."
-        if (metadata.observationId.isBlank()) return "Every action needs an observation ID."
+        if (enforceObservationFreshness && metadata.observationId.isBlank()) {
+            return "Every action needs an observation ID."
+        }
         if (metadata.targetDescription.isBlank()) return "Every action needs a target description."
         return null
     }
