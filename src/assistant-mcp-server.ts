@@ -99,7 +99,9 @@ export const phoneAssistantActionSchema = z.discriminatedUnion("type", [
 
 export const observeInputSchema = z
   .object({
-    expectedPackageName: packageNameSchema.optional()
+    expectedPackageName: packageNameSchema.optional(),
+    purpose: z.string().min(1).max(240).optional(),
+    targetDescription: z.string().min(1).max(240).optional()
   })
   .strict();
 
@@ -201,7 +203,9 @@ export async function invokePhoneAssistantTool(
         return requestBridge({
           type: "observe",
           requestId: randomUUID(),
-          ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {})
+          ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {}),
+          ...(parsed.purpose ? { purpose: parsed.purpose } : {}),
+          ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {})
         });
       });
     case "phone_assistant_execute":

@@ -1,9 +1,9 @@
 <resources>
     <style name="Theme.PhoneControlAssistant" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#006C4C</item>
-        <item name="android:navigationBarColor">#F5FBF4</item>
-        <item name="android:statusBarColor">#F5FBF4</item>
+        <item name="android:colorAccent">#10A37F</item>
+        <item name="android:navigationBarColor">#F7F7F8</item>
+        <item name="android:statusBarColor">#F7F7F8</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

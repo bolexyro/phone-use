@@ -1,4 +1,4 @@
-# Phone Control Assistant (v0 foundation)
+# DHD (v0 phone assistant)
 
 This directory is a standalone native Android app for the Phone Control pivot.
 It is intentionally separate from `benchmark-app/` and the TypeScript MCP
@@ -7,14 +7,22 @@ notifications, request handoff, and observation/action execution.
 
 ## Current v0 surface
 
-- Jetpack Compose screen with a typed natural-language request field, Run
-  control, current session state and a live user-facing Activity timeline.
+- ChatGPT-inspired Jetpack Compose client branded DHD: one continuous assistant
+  timeline, a compact typed request composer, and Settings. Local request,
+  run, message and activity metadata is persisted in Room. The UI shows recent
+  activity from the last 24 hours while the underlying Codex context may span
+  much longer.
+- Activity rows are purpose-first and use the supplied connected-nodes icon.
+  Each task groups its tool activity into a compact stack. The stack can be
+  expanded and independently scrolled to show the purpose, target, status and
+  timestamp; screenshots, raw arguments and private reasoning are never
+  persisted.
 - Settings screen that lists launchable non-system user apps. Every package is
   disabled by default and each toggle is persisted locally. There is no global
   enable-all control.
 - Foreground service with a persistent notification showing the current
   purpose, Pause/Resume and Stop actions. Opening the notification returns to
-  the Activity timeline.
+  the DHD assistant timeline.
 - Typed action models for `open_app`, `tap`, `type`, `swipe`, `scroll`,
   `keypress`, `back` and `wait`.
   Each action carries a purpose and target description. Observation IDs and
@@ -36,6 +44,12 @@ execution path: the companion starts a Codex App Server turn, while the
 configured MCP adapter sends allowlist, observation, and action requests back
 to this app over NDJSON. The legacy `demo_run` request remains available for
 the open -> observe -> tap smoke test.
+
+DHD keeps one local assistant conversation. The stored Codex thread is reused
+when a new request arrives within three hours of the last activity. After three
+hours of inactivity, the phone clears only that remote thread binding; the next
+request starts a fresh Codex thread while the local activity history remains
+available in the recent-history window.
 
 ## Build
 
@@ -69,7 +83,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 Install and start the [Shizuku app](https://github.com/RikkaApps/Shizuku),
 start its service using the device-supported wireless-debugging or ADB path,
-launch Phone Control Assistant, and open Settings. The app reports binder
+launch DHD, and open Settings. The app reports binder
 availability and permission state and can request the Shizuku API permission.
 
 The typed open -> observe -> tap path has been physically smoke-tested on a

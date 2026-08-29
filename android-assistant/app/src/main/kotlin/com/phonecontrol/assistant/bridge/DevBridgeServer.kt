@@ -139,8 +139,10 @@ class DevBridgeServer(
                     "status" -> status(requestId, writer)
                     "pending_request" -> pendingRequest(requestId, writer)
                     "claim_request" -> claimRequest(requestId, json, writer)
+                    "bind_codex_thread" -> bindCodexThread(requestId, json, writer)
                     "release_request" -> releaseRequest(requestId, json, writer)
                     "complete_session" -> completeSession(requestId, json, writer)
+                    "fail_session" -> failSession(requestId, json, writer)
                     "allowed_apps" -> allowedApps(requestId, writer)
                     "observe" -> observe(requestId, json, writer)
                     "execute_action" -> executeAction(requestId, json, writer)
@@ -165,7 +167,8 @@ class DevBridgeServer(
         require(request.isNotEmpty() && request.length <= MAX_REQUEST_CHARS) {
             "request must be 1-$MAX_REQUEST_CHARS characters."
         }
-        if (!coordinator.start(request)) {
+        val conversationId = json.optString("conversationId").trim().ifBlank { null }
+        if (!coordinator.start(request, conversationId)) {
             write(writer, errorResponse(requestId, "The phone already has an active session."))
             return
         }
@@ -175,11 +178,15 @@ class DevBridgeServer(
         // A desktop-originated session must get the same persistent foreground
         // notification as a session started from the Compose Run button.
         runCatching {
+            val serviceIntent = Intent(context, AssistantForegroundService::class.java)
+                .setAction(AssistantForegroundService.ACTION_START)
+                .putExtra(AssistantForegroundService.EXTRA_REQUEST, request)
+            if (!conversationId.isNullOrBlank()) {
+                serviceIntent.putExtra(AssistantForegroundService.EXTRA_CONVERSATION_ID, conversationId)
+            }
             androidx.core.content.ContextCompat.startForegroundService(
                 context,
-                Intent(context, AssistantForegroundService::class.java)
-                    .setAction(AssistantForegroundService.ACTION_START)
-                    .putExtra(AssistantForegroundService.EXTRA_REQUEST, request),
+                serviceIntent,
             )
         }.onFailure { error ->
             android.util.Log.w(TAG, "Could not start the foreground notification for the bridge session", error)
@@ -191,6 +198,7 @@ class DevBridgeServer(
                 .put("requestId", requestId)
                 .put("ok", true)
                 .put("sessionId", sessionId)
+                .put("conversationId", (state as? SessionState.Running)?.conversationId ?: JSONObject.NULL)
                 .put("message", "Phone assistant session started."),
         )
     }
@@ -209,11 +217,13 @@ class DevBridgeServer(
         when (state) {
             is SessionState.Running -> response
                 .put("sessionId", state.sessionId)
+                .put("conversationId", state.conversationId ?: JSONObject.NULL)
                 .put("request", state.request)
                 .put("currentPurpose", state.currentPurpose)
                 .put("requestAvailable", coordinator.pendingRequest()?.sessionId == state.sessionId)
             is SessionState.Paused -> response
                 .put("sessionId", state.sessionId)
+                .put("conversationId", state.conversationId ?: JSONObject.NULL)
                 .put("request", state.request)
                 .put("currentPurpose", state.currentPurpose)
             else -> Unit
@@ -234,6 +244,8 @@ class DevBridgeServer(
         if (pending != null) {
             response
                 .put("sessionId", pending.sessionId)
+                .put("conversationId", pending.conversationId ?: JSONObject.NULL)
+                .put("codexThreadId", pending.codexThreadId ?: JSONObject.NULL)
                 .put("request", pending.request)
         }
         write(writer, response)
@@ -261,6 +273,8 @@ class DevBridgeServer(
                 .put("requestId", requestId)
                 .put("ok", true)
                 .put("sessionId", claimed.sessionId)
+                .put("conversationId", claimed.conversationId ?: JSONObject.NULL)
+                .put("codexThreadId", claimed.codexThreadId ?: JSONObject.NULL)
                 .put("request", claimed.request)
                 .put("message", "Phone request claimed by the desktop Codex companion."),
         )
@@ -282,6 +296,65 @@ class DevBridgeServer(
                 .put("ok", true)
                 .put("sessionId", sessionId)
                 .put("released", released),
+        )
+    }
+
+    private fun bindCodexThread(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val conversationId = json.optString("conversationId").trim()
+        val codexThreadId = json.optString("codexThreadId").trim()
+        require(conversationId.isNotEmpty()) { "conversationId is required." }
+        require(codexThreadId.isNotEmpty()) { "codexThreadId is required." }
+        val bound = coordinator.bindCodexThread(conversationId, codexThreadId)
+        write(
+            writer,
+            JSONObject()
+                .put("type", "codex_thread_bound")
+                .put("requestId", requestId)
+                .put("ok", bound)
+                .put("conversationId", conversationId)
+                .put("codexThreadId", codexThreadId),
+        )
+    }
+
+    private fun failSession(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val sessionId = json.optString("sessionId").trim()
+        require(sessionId.isNotEmpty()) { "sessionId is required." }
+        if (coordinator.state.value.sessionIdOrNullForBridge() != sessionId) {
+            write(
+                writer,
+                errorResponse(requestId, "The phone session is no longer active.")
+                    .put("code", "SESSION_NOT_RUNNING"),
+            )
+            return
+        }
+        val reason = json.optString("reason", "The desktop Codex turn failed.")
+            .trim()
+            .ifBlank { "The desktop Codex turn failed." }
+            .take(MAX_AGENT_FEEDBACK_CHARS)
+        val failed = coordinator.fail(reason)
+        if (failed) {
+            AssistantForegroundService.showAttentionNotification(
+                context,
+                "DHD stopped: $reason",
+                coordinator.state.value.conversationIdOrNullForBridge(),
+            )
+        }
+        context.stopService(Intent(context, AssistantForegroundService::class.java))
+        write(
+            writer,
+            JSONObject()
+                .put("type", "session_failed")
+                .put("requestId", requestId)
+                .put("ok", failed)
+                .put("message", reason),
         )
     }
 
@@ -312,7 +385,7 @@ class DevBridgeServer(
         val completionMessage = feedback ?: message
         val completed = coordinator.complete(completionMessage, agentFeedback = feedback)
         if (completed) {
-            AssistantForegroundService.showCompletionNotification(context, completionMessage)
+            AssistantForegroundService.showCompletionNotification(context, completionMessage, coordinator.state.value.conversationIdOrNullForBridge())
         }
         context.stopService(Intent(context, AssistantForegroundService::class.java))
         write(
@@ -322,6 +395,7 @@ class DevBridgeServer(
                 .put("requestId", requestId)
                 .put("ok", completed)
                 .put("sessionId", sessionId)
+                .put("conversationId", coordinator.state.value.conversationIdOrNullForBridge() ?: JSONObject.NULL)
                 .put("message", completionMessage)
                 .put("feedback", feedback ?: JSONObject.NULL),
         )
@@ -344,7 +418,7 @@ class DevBridgeServer(
             )
             return
         }
-        AssistantForegroundService.showAttentionNotification(context, reason)
+        AssistantForegroundService.showAttentionNotification(context, reason, coordinator.state.value.conversationIdOrNullForBridge())
         write(
             writer,
             JSONObject()
@@ -381,6 +455,13 @@ class DevBridgeServer(
             require(PACKAGE_PATTERN.matches(expectedPackage)) {
                 "expectedPackageName is not a valid Android package name."
             }
+        }
+        val purpose = json.optString("purpose").trim().take(MAX_TEXT_CHARS).ifBlank { null }
+        if (purpose != null) {
+            coordinator.recordPurpose(
+                purpose = purpose,
+                targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { expectedPackage },
+            )
         }
         // Screenshots are still returned for the model's visual context, but
         // the assistant path no longer fingerprints guard regions or rejects
@@ -883,4 +964,12 @@ private fun SessionState.sessionIdOrNullForBridge(): String? = when (this) {
     is SessionState.Paused -> sessionId
     is SessionState.Stopped -> sessionId
     is SessionState.Completed -> sessionId
+}
+
+private fun SessionState.conversationIdOrNullForBridge(): String? = when (this) {
+    SessionState.Idle -> null
+    is SessionState.Running -> conversationId
+    is SessionState.Paused -> conversationId
+    is SessionState.Stopped -> conversationId
+    is SessionState.Completed -> conversationId
 }

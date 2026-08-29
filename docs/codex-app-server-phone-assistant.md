@@ -140,16 +140,31 @@ Now type a request in the Android app and press Run. The companion claims that
 request, starts a Codex App Server turn, and the model calls the phone tools.
 The phone stays in Watch mode: the target app opens and receives visible taps,
 typing, swipes, keypresses, and waits. The foreground notification and the
-in-app timeline show each action's `metadata.purpose`, such as “Searching for
-jollof rice”. When the turn finishes, the companion marks the phone session
-completed. Set `PHONE_ASSISTANT_CODEX_MODEL` if you want to pin a model; when
-unset, App Server uses the Codex CLI's configured default. The companion runs
+in-app timeline show a compact, independently scrollable stack of each action's
+short label, such as “Searching for jollof rice”. Expanding an item reveals its
+target and full safe explanation. When the turn finishes, the companion marks
+the phone session completed. DHD pins its own App Server turns to `gpt-5.6-luna` with `low`
+reasoning by default, independently of the interactive Codex chat's settings.
+Set `PHONE_ASSISTANT_CODEX_MODEL` or `PHONE_ASSISTANT_CODEX_REASONING_EFFORT`
+only when intentionally overriding that development default. The companion runs
 `codex app-server --listen stdio:// --enable code_mode_host` so the App Server's
 dynamic-tool router can deliver calls to the direct `phone_control_*` tools.
 Set `PHONE_ASSISTANT_CODEX_BIN` when the Codex executable is not available
 through the desktop PATH. Set `PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST=false`
 only when intentionally testing a configuration without the bundled host; phone
 turns will not be able to execute dynamic actions in that mode.
+Phone turns have a bounded ten-minute watchdog by default because a request may
+need several observe/action cycles. Override it for a development run with
+`PHONE_ASSISTANT_TURN_TIMEOUT_MS` (5 seconds to 1 hour); when it expires, the
+companion sends `turn/interrupt` with the active thread and turn ids and reports
+the last App Server lifecycle event it saw.
+
+DHD presents one assistant timeline rather than user-facing chat threads. The
+phone stores requests and tool activity locally and only renders the most recent
+24 hours by default. The companion reuses the stored Codex thread for requests
+within three hours of the last local activity. At or after three hours idle,
+the phone removes that stored remote thread id before handoff, so the next
+request starts a new Codex App Server thread without deleting the local history.
 
 This route uses the Codex CLI/App Server's existing ChatGPT-managed login and
 subscription. It does not copy cookies, call private ChatGPT endpoints, or

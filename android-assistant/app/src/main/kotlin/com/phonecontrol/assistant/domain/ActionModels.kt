@@ -194,4 +194,109 @@ data class ActivityEvent(
     val actionType: ActionType? = null,
     val purpose: String? = null,
     val observationId: String? = null,
+    val targetDescription: String? = null,
 )
+
+/**
+ * Convert provider-authored action metadata into a compact label that reads
+ * naturally in the DHD activity stack and foreground notification. The full
+ * purpose/target text remains available in the expanded activity details.
+ */
+fun userFacingActivityLabel(
+    actionType: ActionType?,
+    purpose: String,
+    targetDescription: String? = null,
+): String {
+    val cleanPurpose = purpose.cleanActivityText()
+    // Target descriptions are nouns/labels, not instructions. Do not run the
+    // purpose gerund conversion over them ("search field" must not become
+    // "Searching field").
+    val cleanTarget = targetDescription?.cleanTargetText().orEmpty()
+    val target = cleanTarget.toArticlePhrase()
+    val label = when (actionType) {
+        ActionType.OPEN_APP -> when {
+            cleanTarget.isNotBlank() -> "Opening $cleanTarget"
+            cleanPurpose.startsWith("Opening ", ignoreCase = true) -> cleanPurpose
+            else -> "Opening $cleanPurpose"
+        }
+        ActionType.TAP -> when {
+            target.isNotBlank() -> "Tapping $target"
+            cleanPurpose.startsWith("Tapping ", ignoreCase = true) -> cleanPurpose
+            else -> "Tapping $cleanPurpose"
+        }
+        ActionType.TYPE -> when {
+            target.isNotBlank() -> "Entering text in $target"
+            cleanPurpose.startsWith("Typing ", ignoreCase = true) -> cleanPurpose
+            cleanPurpose.startsWith("Entering ", ignoreCase = true) -> cleanPurpose
+            else -> "Entering text"
+        }
+        ActionType.SWIPE, ActionType.SCROLL -> when {
+            target.isNotBlank() -> "Scrolling $target"
+            cleanPurpose.startsWith("Scrolling ", ignoreCase = true) -> cleanPurpose
+            else -> "Scrolling"
+        }
+        ActionType.BACK -> "Going back"
+        ActionType.KEYPRESS -> "Pressing ${cleanTarget.ifBlank { "the key" }}"
+        ActionType.WAIT -> "Waiting for the screen"
+        null -> cleanPurpose
+    }
+    return label
+        .trim()
+        .replace(Regex("\\s+"), " ")
+        .trimEnd('.', '!', '?')
+        .replaceFirstChar { it.uppercase() }
+        .take(MAX_ACTIVITY_LABEL_CHARS)
+        .ifBlank { "Working on the phone" }
+}
+
+private fun String.cleanActivityText(): String {
+    val normalized = trim().replace(Regex("\\s+"), " ")
+    if (normalized.isBlank()) return ""
+    val lower = normalized.lowercase()
+    val byIndex = lower.indexOf(" by ")
+    if (byIndex > 0 && lower.substringBefore(' ').let {
+            it in setOf("complete", "finish", "retry", "perform", "handle")
+        }) {
+        val afterBy = normalized.substring(byIndex + 4).trim()
+        if (afterBy.isNotBlank()) return afterBy
+    }
+    val firstWord = lower.substringBefore(' ')
+    val gerund = mapOf(
+        "complete" to "Completing",
+        "finish" to "Finishing",
+        "retry" to "Retrying",
+        "select" to "Selecting",
+        "open" to "Opening",
+        "find" to "Finding",
+        "check" to "Checking",
+        "search" to "Searching",
+        "enter" to "Entering",
+        "type" to "Typing",
+        "tap" to "Tapping",
+        "click" to "Tapping",
+        "scroll" to "Scrolling",
+        "swipe" to "Scrolling",
+        "wait" to "Waiting",
+        "press" to "Pressing",
+    )[firstWord]
+    return if (gerund != null) {
+        normalized.replaceFirst(Regex("(?i)^${Regex.escape(firstWord)}\\b"), gerund)
+    } else {
+        normalized.replaceFirstChar { it.uppercase() }
+    }
+}
+
+private fun String.cleanTargetText(): String = trim().replace(Regex("\\s+"), " ")
+
+private fun String.toArticlePhrase(): String {
+    if (isBlank()) return ""
+    val lower = lowercase()
+    val phrase = if (lower.startsWith("the ") || lower.startsWith("a ") || lower.startsWith("an ")) {
+        this
+    } else {
+        "the ${replaceFirstChar { it.lowercase() }}"
+    }
+    return phrase
+}
+
+private const val MAX_ACTIVITY_LABEL_CHARS = 80

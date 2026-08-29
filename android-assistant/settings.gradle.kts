@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "phone-control-assistant"
+rootProject.name = "dhd-phone-assistant"
 include(":app")

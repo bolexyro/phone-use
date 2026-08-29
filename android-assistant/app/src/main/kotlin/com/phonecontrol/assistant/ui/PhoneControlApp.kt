@@ -18,12 +18,14 @@ import com.phonecontrol.assistant.apps.InstalledAppsRepository
 
 @Composable
 fun PhoneControlApp(
-    onRunRequest: (String) -> Unit,
+    initialConversationId: String? = null,
+    onRunRequest: (String, String?) -> Unit,
     onStopSession: () -> Unit,
 ) {
     val context = LocalContext.current
     val application = context.applicationContext as PhoneControlApplication
     val coordinator = application.sessionCoordinator
+    val conversationStore = application.conversationStore
     val permissions = application.appPermissionRepository
     val shizukuController = application.shizukuController
     val shizukuStatus by shizukuController.status.collectAsState()
@@ -43,10 +45,12 @@ fun PhoneControlApp(
                 )
             } else {
                 AssistantScreen(
+                    store = conversationStore,
                     coordinator = coordinator,
-                    onOpenSettings = { showSettings = true },
+                    initialConversationId = initialConversationId,
                     onRunRequest = onRunRequest,
                     onStopSession = onStopSession,
+                    onOpenSettings = { showSettings = true },
                 )
             }
         }

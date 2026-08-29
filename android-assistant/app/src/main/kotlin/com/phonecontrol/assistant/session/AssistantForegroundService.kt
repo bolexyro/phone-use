@@ -47,9 +47,14 @@ class AssistantForegroundService : Service() {
             }
 
             ACTION_START, null -> {
-                intent?.getStringExtra(EXTRA_REQUEST)
+                val request = intent?.getStringExtra(EXTRA_REQUEST)
                     ?.takeIf(String::isNotBlank)
-                    ?.let(coordinator::start)
+                if (request != null) {
+                    coordinator.start(
+                        request = request,
+                        conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID),
+                    )
+                }
             }
         }
         return START_NOT_STICKY
@@ -79,7 +84,9 @@ class AssistantForegroundService : Service() {
         val contentIntent = PendingIntent.getActivity(
             this,
             REQUEST_OPEN_APP,
-            Intent(this, MainActivity::class.java),
+            Intent(this, MainActivity::class.java).apply {
+                putExtra(MainActivity.EXTRA_CONVERSATION_ID, state.conversationIdOrNull())
+            },
             PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentImmutableFlag(),
         )
         val pauseIntent = PendingIntent.getService(
@@ -135,6 +142,7 @@ class AssistantForegroundService : Service() {
         const val ACTION_TOGGLE_PAUSE = "com.phonecontrol.assistant.action.TOGGLE_PAUSE"
         const val ACTION_STOP = "com.phonecontrol.assistant.action.STOP"
         const val EXTRA_REQUEST = "com.phonecontrol.assistant.extra.REQUEST"
+        const val EXTRA_CONVERSATION_ID = "com.phonecontrol.assistant.extra.CONVERSATION_ID"
 
         private const val CHANNEL_ID = "assistant_sessions"
         private const val RESULT_CHANNEL_ID = "assistant_results"
@@ -148,7 +156,7 @@ class AssistantForegroundService : Service() {
         private const val MAX_NOTIFICATION_TEXT_CHARS = 240
 
         /** Post a result notification without bringing the assistant to the foreground. */
-        fun showCompletionNotification(context: Context, message: String) {
+        fun showCompletionNotification(context: Context, message: String, conversationId: String? = null) {
             createNotificationChannels(context)
             val safeMessage = message.trim()
                 .ifBlank { "Codex completed the phone request." }
@@ -158,7 +166,7 @@ class AssistantForegroundService : Service() {
                 .setContentTitle(context.getString(R.string.app_name))
                 .setContentText("Task complete")
                 .setStyle(NotificationCompat.BigTextStyle().bigText(safeMessage))
-                .setContentIntent(openAssistantIntent(context, REQUEST_OPEN_APP + 1))
+                .setContentIntent(openAssistantIntent(context, REQUEST_OPEN_APP + 1, conversationId))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
                 .setCategory(NotificationCompat.CATEGORY_STATUS)
@@ -168,17 +176,17 @@ class AssistantForegroundService : Service() {
         }
 
         /** Notify the user without launching an Activity or interrupting Watch mode. */
-        fun showAttentionNotification(context: Context, reason: String) {
+        fun showAttentionNotification(context: Context, reason: String, conversationId: String? = null) {
             createNotificationChannels(context)
             val safeReason = reason.trim()
                 .ifBlank { "The phone assistant needs your attention." }
                 .take(MAX_NOTIFICATION_TEXT_CHARS)
             val notification = NotificationCompat.Builder(context, ATTENTION_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentTitle("Phone assistant needs your attention")
+                .setContentTitle("DHD needs your attention")
                 .setContentText(safeReason)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(safeReason))
-                .setContentIntent(openAssistantIntent(context, REQUEST_OPEN_APP + 2))
+                .setContentIntent(openAssistantIntent(context, REQUEST_OPEN_APP + 2, conversationId))
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
@@ -217,15 +225,27 @@ class AssistantForegroundService : Service() {
             )
         }
 
-        private fun openAssistantIntent(context: Context, requestCode: Int): PendingIntent =
+        private fun openAssistantIntent(context: Context, requestCode: Int, conversationId: String? = null): PendingIntent =
             PendingIntent.getActivity(
                 context,
                 requestCode,
-                Intent(context, MainActivity::class.java),
+                Intent(context, MainActivity::class.java).apply {
+                    if (!conversationId.isNullOrBlank()) {
+                        putExtra(MainActivity.EXTRA_CONVERSATION_ID, conversationId)
+                    }
+                },
                 PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentFlags(),
             )
 
         private fun pendingIntentFlags(): Int =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     }
+}
+
+private fun SessionState.conversationIdOrNull(): String? = when (this) {
+    SessionState.Idle -> null
+    is SessionState.Running -> conversationId
+    is SessionState.Paused -> conversationId
+    is SessionState.Stopped -> conversationId
+    is SessionState.Completed -> conversationId
 }

@@ -10,9 +10,16 @@ import { requestBridge, type BridgeMessage } from "./phone-assistant-bridge.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const BRIDGE_POLL_TIMEOUT_MS = 5_000;
-const DEFAULT_TURN_TIMEOUT_MS = 120_000;
+// Phone turns can legitimately contain several observe/action cycles. Keep a
+// bounded default that is long enough for those cycles without allowing a
+// disconnected or wedged App Server process to run forever.
+const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_AGENT_FEEDBACK_CHARS = 4_000;
+// DHD owns its App Server conversation settings. These defaults deliberately
+// do not depend on the user's interactive Codex chat or global config.
+const DEFAULT_CODEX_MODEL = "gpt-5.6-luna";
+const DEFAULT_CODEX_EFFORT = "low";
 type JsonRpcId = number | string;
 
 interface JsonRpcMessage {
@@ -39,6 +46,7 @@ export interface DynamicToolCallResponse {
 
 interface TurnResult {
   text: string;
+  threadId: string;
 }
 
 /**
@@ -56,14 +64,17 @@ export class CodexAppServerClient {
     text: string;
   } | null = null;
   private activeThreadId: string | null = null;
+  private activeTurnId: string | null = null;
+  private turnStartedAt: number | null = null;
+  private lastServerEvent: string | null = null;
 
-  async runTurn(phoneRequest: string): Promise<TurnResult> {
+  async runTurn(phoneRequest: string, existingThreadId?: string, threadTitle?: string): Promise<TurnResult> {
     this.startProcess();
     try {
       await this.request("initialize", {
         clientInfo: {
-          name: "phone-control-assistant",
-          title: "Phone Control Assistant",
+          name: "dhd-phone-assistant",
+          title: "DHD phone assistant",
           version: "0.1.0"
         },
         capabilities: { experimentalApi: true }
@@ -71,23 +82,46 @@ export class CodexAppServerClient {
       this.notify("initialized", {});
 
       const threadParams: Record<string, unknown> = {
-        dynamicTools: buildPhoneAssistantDynamicTools()
+        dynamicTools: buildPhoneAssistantDynamicTools(),
+        model: resolveCodexModel()
       };
-      const model = process.env.PHONE_ASSISTANT_CODEX_MODEL?.trim();
-      if (model) threadParams.model = model;
-      const threadResponse = await this.request("thread/start", threadParams);
-      const threadId = extractThreadId(threadResponse.result);
+      const threadResponse = existingThreadId
+        ? await this.request("thread/resume", {
+          threadId: existingThreadId,
+          model: threadParams.model
+        })
+        : await this.request("thread/start", threadParams);
+      const threadId = extractThreadId(threadResponse.result) || existingThreadId || null;
       if (!threadId) throw new Error("Codex App Server did not return a thread id.");
       this.activeThreadId = threadId;
+      if (!existingThreadId && threadTitle?.trim()) {
+        // Naming is best-effort: older App Server builds may not expose this
+        // convenience method, but a failed name update must not lose a turn.
+        try {
+          await this.request("thread/name/set", {
+            threadId,
+            name: threadTitle.trim().slice(0, 80)
+          });
+        } catch (error) {
+          console.error(`[codex-app-server] could not name thread: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
 
       const completion = new Promise<TurnResult>((resolve, reject) => {
         this.turnCompletion = { resolve, reject, text: "" };
       });
       try {
-        await this.request("turn/start", {
+        this.turnStartedAt = Date.now();
+        const turnStartResponse = await this.request("turn/start", {
           threadId,
+          model: resolveCodexModel(),
+          effort: resolveCodexEffort(),
           input: [{ type: "text", text: buildPhonePrompt(phoneRequest) }]
         });
+        // `turn/start` returns the initial turn object. The notification is
+        // also tracked below, but capturing this response makes cancellation
+        // reliable even if the notification arrives after a timeout callback.
+        this.activeTurnId = extractTurnId(turnStartResponse.result) || this.activeTurnId;
       } catch (error) {
         this.turnCompletion?.reject(error instanceof Error ? error : new Error(String(error)));
         this.turnCompletion = null;
@@ -97,12 +131,24 @@ export class CodexAppServerClient {
         completion,
         parseTurnTimeout(process.env.PHONE_ASSISTANT_TURN_TIMEOUT_MS),
         () => {
+          const elapsedMs = this.turnStartedAt ? Date.now() - this.turnStartedAt : undefined;
+          const lastEvent = this.lastServerEvent || "no App Server event received";
+          console.error(
+            `[codex-app-server] turn watchdog expired after ${elapsedMs ?? "?"}ms; ` +
+            `last event: ${lastEvent}`
+          );
           this.interruptTurn(threadId);
-          return new Error("Codex App Server turn timed out while waiting for a response.");
+          return new Error(
+            `Codex App Server turn timed out after ${elapsedMs ?? "?"}ms while waiting for turn/completed ` +
+            `(last event: ${lastEvent}).`
+          );
         }
       );
     } finally {
       this.activeThreadId = null;
+      this.activeTurnId = null;
+      this.turnStartedAt = null;
+      this.lastServerEvent = null;
       await this.stopProcess();
     }
   }
@@ -182,7 +228,13 @@ export class CodexAppServerClient {
 
     const completion = this.turnCompletion;
     if (!completion || !message.method) return;
+    this.lastServerEvent = describeServerEvent(message);
     logServerNotification(message);
+    if (message.method === "turn/started") {
+      this.activeTurnId = extractTurnId(message.params) || this.activeTurnId;
+      this.turnStartedAt = this.turnStartedAt || Date.now();
+      return;
+    }
     if (message.method === "item/agentMessage/delta") {
       completion.text += extractText(message.params);
       return;
@@ -196,9 +248,11 @@ export class CodexAppServerClient {
       const status = extractRecord(turn)?.status;
       if (status === "failed") {
         completion.reject(new Error(extractTurnError(message.params) || "Codex App Server turn failed."));
+      } else if (status === "interrupted") {
+        completion.reject(new Error("Codex App Server turn was interrupted."));
       } else {
         const fallback = extractText(message.params);
-        completion.resolve({ text: completion.text || fallback });
+        completion.resolve({ text: completion.text || fallback, threadId: this.activeThreadId || "" });
       }
       this.turnCompletion = null;
       return;
@@ -305,10 +359,11 @@ export class CodexAppServerClient {
 
   private interruptTurn(threadId: string): void {
     try {
+      const turnId = this.activeTurnId;
       this.send({
         method: "turn/interrupt",
         id: `interrupt-${this.nextId++}`,
-        params: { threadId }
+        params: { threadId, ...(turnId ? { turnId } : {}) }
       });
     } catch (error) {
       console.error(`[codex-app-server] could not interrupt timed-out turn: ${error instanceof Error ? error.message : String(error)}`);
@@ -457,11 +512,13 @@ export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
     ),
     dynamicTool(
       "phone_control_observe",
-      "Capture the current physical Android display and return a screenshot for visual context. Screen changes do not block a subsequent typed action.",
+      "Capture the current physical Android display and return a screenshot for visual context. Include a concise purpose when this observation should appear in the user's activity timeline. Screen changes do not block a subsequent typed action.",
       {
         type: "object",
         properties: {
-          expectedPackageName: { type: "string", minLength: 1 }
+          expectedPackageName: { type: "string", minLength: 1 },
+          purpose: { type: "string", minLength: 1, maxLength: 240 },
+          targetDescription: { type: "string", minLength: 1, maxLength: 240 }
         },
         additionalProperties: false
       }
@@ -585,7 +642,32 @@ function logServerNotification(message: JsonRpcMessage): void {
   const type = typeof item.type === "string" ? item.type : "item";
   const tool = typeof item.tool === "string" ? ` ${item.tool}` : "";
   const status = typeof item.status === "string" ? ` (${item.status})` : "";
-  console.error(`[codex-app-server] ${message.method} ${type}${tool}${status}`);
+  const duration = typeof item.durationMs === "number" ? ` [${item.durationMs}ms]` : "";
+  console.error(`[codex-app-server] ${message.method} ${type}${tool}${status}${duration}`);
+}
+
+/**
+ * Keep timeout diagnostics useful without logging tool arguments, screenshots,
+ * or model text. App Server notifications are intentionally summarized by
+ * method plus the small lifecycle fields that identify what was last active.
+ */
+function describeServerEvent(message: JsonRpcMessage): string {
+  const method = message.method || "unknown event";
+  const params = extractRecord(message.params);
+  const turn = extractRecord(params?.turn);
+  if (method.startsWith("turn/") && turn) {
+    const status = typeof turn.status === "string" ? ` (${turn.status})` : "";
+    return `${method}${status}`;
+  }
+  const item = extractRecord(params?.item);
+  if (item) {
+    const type = typeof item.type === "string" ? item.type : "item";
+    const tool = typeof item.tool === "string" ? ` ${item.tool}` : "";
+    const status = typeof item.status === "string" ? ` (${item.status})` : "";
+    const duration = typeof item.durationMs === "number" ? ` [${item.durationMs}ms]` : "";
+    return `${method} ${type}${tool}${status}${duration}`;
+  }
+  return method;
 }
 
 export async function runAssistantCompanion(): Promise<void> {
@@ -649,7 +731,21 @@ async function processPendingRequest(pending: BridgeMessage): Promise<void> {
 
   console.error(`[phone-assistant-companion] claimed ${sessionId}: ${request}`);
   try {
-    const result = await new CodexAppServerClient().runTurn(request);
+    const conversationId = typeof claimed.conversationId === "string" ? claimed.conversationId : undefined;
+    const existingThreadId = typeof claimed.codexThreadId === "string" ? claimed.codexThreadId : undefined;
+    const threadTitle = typeof claimed.title === "string" ? claimed.title : request;
+    const result = await new CodexAppServerClient().runTurn(request, existingThreadId, threadTitle);
+    if (conversationId && result.threadId && result.threadId !== existingThreadId) {
+      const bound = await requestBridge({
+        type: "bind_codex_thread",
+        requestId: randomUUID(),
+        conversationId,
+        codexThreadId: result.threadId
+      });
+      if (bound.ok !== true) {
+        throw new Error(`The phone did not bind Codex thread ${result.threadId}: ${String(bound.message ?? "unknown error")}`);
+      }
+    }
     console.error(`[phone-assistant-companion] Codex turn completed${result.text ? `: ${result.text.slice(0, 500)}` : ""}`);
     const feedback = normalizeAgentFeedback(result.text);
     const completed = await requestBridge({
@@ -664,7 +760,16 @@ async function processPendingRequest(pending: BridgeMessage): Promise<void> {
     }
   } catch (error) {
     console.error(`[phone-assistant-companion] Codex turn failed: ${error instanceof Error ? error.message : String(error)}`);
-    await releaseRequest(sessionId);
+    try {
+      await requestBridge({
+        type: "fail_session",
+        requestId: randomUUID(),
+        sessionId,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    } catch (failureError) {
+      console.error(`[phone-assistant-companion] could not mark the phone session failed: ${failureError instanceof Error ? failureError.message : String(failureError)}`);
+    }
   }
 }
 
@@ -681,6 +786,7 @@ function buildPhonePrompt(phoneRequest: string): string {
     "Operate the user's physical Android phone for the request below.",
     "A phone-side session is already running; do not call phone_assistant_start.",
     "Use only the direct phone_control_* tools exposed by this companion. Do not use arbitrary exec code, shell commands, or the configured phone_assistant_* MCP wrappers. Code Mode may be the App Server transport for these direct tools; never use it to run unrelated code.",
+    "For a multi-step request, use the update_plan tool to keep a short internal checklist: one step in_progress at a time, mark a step completed only after observing the resulting screen, and revise the plan when the app or goal changes. Do not expose private reasoning; the phone only receives safe purpose-bearing activity summaries.",
     "Begin with phone_control_list_allowed_apps if you need the allowlist, then phone_control_observe.",
     "Before actions, use phone_control_observe when you need visual context. After every action, inspect the returned screenshot before proposing the next action.",
     "Every action must include a concise, user-facing metadata.purpose and metadata.targetDescription. Never send shell commands or bypass a phone policy decision.",
@@ -706,6 +812,14 @@ function extractThreadId(value: unknown): string | null {
     const id = (thread as Record<string, unknown>).id;
     if (typeof id === "string" && id) return id;
   }
+  return typeof record.id === "string" && record.id ? record.id : null;
+}
+
+function extractTurnId(value: unknown): string | null {
+  const record = extractRecord(value);
+  if (!record) return null;
+  const turn = extractRecord(record.turn);
+  if (turn && typeof turn.id === "string" && turn.id) return turn.id;
   return typeof record.id === "string" && record.id ? record.id : null;
 }
 
@@ -754,6 +868,14 @@ function parsePollInterval(value: string | undefined): number {
     throw new Error("PHONE_ASSISTANT_POLL_MS must be between 250 and 60000.");
   }
   return parsed;
+}
+
+function resolveCodexModel(): string {
+  return process.env.PHONE_ASSISTANT_CODEX_MODEL?.trim() || DEFAULT_CODEX_MODEL;
+}
+
+function resolveCodexEffort(): string {
+  return process.env.PHONE_ASSISTANT_CODEX_REASONING_EFFORT?.trim() || DEFAULT_CODEX_EFFORT;
 }
 
 function parseTurnTimeout(value: string | undefined): number {

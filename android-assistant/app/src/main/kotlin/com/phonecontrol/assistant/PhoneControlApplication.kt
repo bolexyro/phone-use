@@ -3,6 +3,7 @@ package com.phonecontrol.assistant
 import android.app.Application
 import com.phonecontrol.assistant.apps.AppPermissionRepository
 import com.phonecontrol.assistant.bridge.DevBridgeServer
+import com.phonecontrol.assistant.data.ConversationStore
 import com.phonecontrol.assistant.policy.PolicyEngine
 import com.phonecontrol.assistant.session.SessionCoordinator
 import com.phonecontrol.assistant.shizuku.ShizukuActionTransport
@@ -21,6 +22,8 @@ class PhoneControlApplication : Application() {
         private set
     lateinit var sessionCoordinator: SessionCoordinator
         private set
+    lateinit var conversationStore: ConversationStore
+        private set
     lateinit var devBridgeServer: DevBridgeServer
         private set
 
@@ -30,6 +33,7 @@ class PhoneControlApplication : Application() {
         shizukuController = ShizukuController().also { it.start() }
         shizukuProcessRunner = ShizukuProcessRunner(shizukuController)
         observationProvider = ShizukuObservationProvider(this, shizukuProcessRunner)
+        conversationStore = ConversationStore(this)
         sessionCoordinator = SessionCoordinator(
             enabledPackagesProvider = { appPermissionRepository.enabledPackages() },
             // Screenshot freshness/guard checks are deliberately deferred in
@@ -42,6 +46,7 @@ class PhoneControlApplication : Application() {
                 processRunner = shizukuProcessRunner,
                 enforceObservationFreshness = false,
             ),
+            conversationStore = conversationStore,
         )
         // The bridge is localhost-only and intended for adb-forwarded
         // development sessions. It is deliberately not a production network

@@ -15,25 +15,31 @@ import com.phonecontrol.assistant.ui.PhoneControlApp
 
 class MainActivity : ComponentActivity() {
     private var pendingRequest: String? = null
+    private var pendingConversationId: String? = null
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) pendingRequest?.let(::launchSession)
+        if (granted) {
+            pendingRequest?.let { launchSession(it, pendingConversationId) }
+        }
         pendingRequest = null
+        pendingConversationId = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val initialConversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID)
         setContent {
             PhoneControlApp(
+                initialConversationId = initialConversationId,
                 onRunRequest = ::startSession,
                 onStopSession = ::stopSession,
             )
         }
     }
 
-    private fun startSession(request: String) {
+    private fun startSession(request: String, conversationId: String?) {
         if (request.isBlank()) return
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -41,16 +47,20 @@ class MainActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
         ) {
             pendingRequest = request
+            pendingConversationId = conversationId
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            launchSession(request)
+            launchSession(request, conversationId)
         }
     }
 
-    private fun launchSession(request: String) {
+    private fun launchSession(request: String, conversationId: String? = null) {
         val intent = Intent(this, AssistantForegroundService::class.java)
             .setAction(AssistantForegroundService.ACTION_START)
             .putExtra(AssistantForegroundService.EXTRA_REQUEST, request)
+        if (!conversationId.isNullOrBlank()) {
+            intent.putExtra(AssistantForegroundService.EXTRA_CONVERSATION_ID, conversationId)
+        }
         ContextCompat.startForegroundService(this, intent)
     }
 
@@ -59,5 +69,9 @@ class MainActivity : ComponentActivity() {
             Intent(this, AssistantForegroundService::class.java)
                 .setAction(AssistantForegroundService.ACTION_STOP),
         )
+    }
+
+    companion object {
+        const val EXTRA_CONVERSATION_ID = "com.phonecontrol.assistant.extra.CONVERSATION_ID"
     }
 }
