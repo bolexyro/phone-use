@@ -110,6 +110,14 @@ also forwards the final user-facing Codex message as `feedback` on
 separate completion notification. Sensitive action payloads and private
 reasoning are not written to the timeline.
 
+The companion treats `turn/completed` as the App Server transport reaching its
+terminal state, not as proof that the user's phone task succeeded. The injected
+prompt explicitly requires the model to continue past progress states such as
+opening an app or reaching a setup screen, and to use fresh observations to
+verify every requested step before giving its final message. A terminal-turn
+log line therefore means that Codex stopped producing work; the following
+`complete_session` call is the point at which the phone timeline is closed.
+
 When the model needs a human to look at the phone, it can call
 `phone_control_request_attention` with a short reason. The phone posts a
 high-priority notification and updates the conversation, but does not force the

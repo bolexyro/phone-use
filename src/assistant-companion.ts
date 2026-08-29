@@ -250,9 +250,13 @@ export class CodexAppServerClient {
         completion.reject(new Error(extractTurnError(message.params) || "Codex App Server turn failed."));
       } else if (status === "interrupted") {
         completion.reject(new Error("Codex App Server turn was interrupted."));
-      } else {
+      } else if (status === "completed") {
         const fallback = extractText(message.params);
         completion.resolve({ text: completion.text || fallback, threadId: this.activeThreadId || "" });
+      } else {
+        completion.reject(
+          new Error(`Codex App Server turn ended with unexpected status: ${String(status ?? "unknown")}.`)
+        );
       }
       this.turnCompletion = null;
       return;
@@ -746,7 +750,10 @@ async function processPendingRequest(pending: BridgeMessage): Promise<void> {
         throw new Error(`The phone did not bind Codex thread ${result.threadId}: ${String(bound.message ?? "unknown error")}`);
       }
     }
-    console.error(`[phone-assistant-companion] Codex turn completed${result.text ? `: ${result.text.slice(0, 500)}` : ""}`);
+    console.error(
+      `[phone-assistant-companion] Codex turn reached terminal status; closing phone session` +
+      `${result.text ? `; final assistant message: ${result.text.slice(0, 500)}` : ""}`
+    );
     const feedback = normalizeAgentFeedback(result.text);
     const completed = await requestBridge({
       type: "complete_session",
@@ -791,6 +798,10 @@ function buildPhonePrompt(phoneRequest: string): string {
     "Before actions, use phone_control_observe when you need visual context. After every action, inspect the returned screenshot before proposing the next action.",
     "Every action must include a concise, user-facing metadata.purpose and metadata.targetDescription. Never send shell commands or bypass a phone policy decision.",
     "If the phone requires confirmation or asks for user attention, use phone_control_request_attention with a concise explanation, stop taking phone actions, and explain what the user must do.",
+    "Do not end the turn merely because you observed a screen, opened an app, reached a setup screen, or completed one action; those are progress states whenever the request has more work.",
+    "For a request with a count, sequence, destination, or verification requirement, continue until every requirement is completed and freshly verified. A benchmark setup screen is not completion when benchmark rounds were requested.",
+    "Before sending a final message, compare the current phone state against every requirement in the user request. If work remains, keep using the phone tools. If safe progress is blocked by a failed app state or user attention, call phone_control_request_attention with the exact blocker instead of claiming success.",
+    "When the user says go on, continue, or otherwise asks to resume, continue the outstanding task from the current phone state; do not stop after merely reopening or observing the app.",
     "When the request is complete, give a short result summary; the desktop companion will close the phone session.",
     "",
     `User request: ${phoneRequest}`
