@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
@@ -74,10 +75,12 @@ fun AssistantScreen(
     onRunRequest: (String, String?) -> Unit,
     onStopSession: () -> Unit,
     onOpenSettings: () -> Unit,
+    onStartFresh: () -> Unit,
 ) {
     val state by coordinator.state.collectAsState()
     val timeline by store.timeline(DHD_CONVERSATION_ID).collectAsState()
     val active = state.isActive()
+    var showStartFreshConfirmation by rememberSaveable { mutableStateOf(false) }
     val recentCutoff = System.currentTimeMillis() - RECENT_HISTORY_WINDOW_MS
     val recentTimeline = timeline.filter { item ->
         item.timestampEpochMs >= recentCutoff ||
@@ -99,6 +102,12 @@ fun AssistantScreen(
                     }
                 },
                 actions = {
+                    TextButton(
+                        onClick = { showStartFreshConfirmation = true },
+                        enabled = !active,
+                    ) {
+                        Text("Start fresh")
+                    }
                     IconButton(onClick = onOpenSettings) { Text("⚙") }
                 },
             )
@@ -138,6 +147,34 @@ fun AssistantScreen(
                 )
             }
         }
+    }
+
+    if (showStartFreshConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showStartFreshConfirmation = false },
+            title = { Text("Start fresh?") },
+            text = {
+                Text(
+                    "This clears the DHD timeline and forgets its stored Codex thread " +
+                        "binding. App permissions and Shizuku stay unchanged.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showStartFreshConfirmation = false
+                        onStartFresh()
+                    },
+                ) {
+                    Text("Start fresh")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStartFreshConfirmation = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

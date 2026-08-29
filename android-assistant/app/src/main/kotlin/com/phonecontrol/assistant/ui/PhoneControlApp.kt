@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.phonecontrol.assistant.PhoneControlApplication
 import com.phonecontrol.assistant.apps.InstalledAppsRepository
+import com.phonecontrol.assistant.data.DHD_CONVERSATION_ID
 
 @Composable
 fun PhoneControlApp(
@@ -51,6 +52,9 @@ fun PhoneControlApp(
                     onRunRequest = onRunRequest,
                     onStopSession = onStopSession,
                     onOpenSettings = { showSettings = true },
+                    onStartFresh = {
+                        conversationStore.deleteConversation(DHD_CONVERSATION_ID)
+                    },
                 )
             }
         }

@@ -427,14 +427,19 @@ class ConversationStore(context: Context) {
     }
 
     fun deleteConversation(conversationId: String): Boolean = synchronized(lock) {
-        if (dao.findConversation(conversationId) == null) return@synchronized false
+        val canonicalId = canonicalConversationId(conversationId)
+        if (dao.findConversation(canonicalId) == null) return@synchronized false
         database.runInTransaction {
-            dao.deleteActivities(conversationId)
-            dao.deleteMessages(conversationId)
-            dao.deleteRuns(conversationId)
-            dao.deleteConversation(conversationId)
+            dao.deleteActivities(canonicalId)
+            dao.deleteMessages(canonicalId)
+            dao.deleteRuns(canonicalId)
+            dao.deleteConversation(canonicalId)
         }
-        timelineFlows.remove(conversationId)
+        // Keep the flow instance that Compose is already collecting alive and
+        // publish the empty state before dropping it from the cache. A
+        // collector must not stay stuck displaying the deleted timeline.
+        timelineFlows[canonicalId]?.value = emptyList()
+        timelineFlows.remove(canonicalId)
         refreshConversations()
         true
     }
