@@ -110,6 +110,11 @@ also forwards the final user-facing Codex message as `feedback` on
 separate completion notification. Sensitive action payloads and private
 reasoning are not written to the timeline.
 
+Agent messages are kept separate by their App Server `itemId`. Commentary
+items remain progress output; only the latest completed `agentMessage` with
+`phase: "final_answer"` is forwarded as phone feedback, so an opening note is
+not accidentally prefixed to the final result.
+
 The companion treats `turn/completed` as the App Server transport reaching its
 terminal state, not as proof that the user's phone task succeeded. The injected
 prompt explicitly requires the model to continue past progress states such as

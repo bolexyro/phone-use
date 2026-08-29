@@ -49,6 +49,14 @@ interface TurnResult {
   threadId: string;
 }
 
+interface AgentMessageState {
+  id: string;
+  text: string;
+  phase?: string;
+  completed: boolean;
+  lastEventOrder: number;
+}
+
 /**
  * Small, one-turn Codex App Server client. Authentication stays in the Codex
  * CLI/App Server; this process never handles ChatGPT cookies or API keys.
@@ -61,7 +69,8 @@ export class CodexAppServerClient {
   private turnCompletion: {
     resolve: (result: TurnResult) => void;
     reject: (error: Error) => void;
-    text: string;
+    agentMessages: Map<string, AgentMessageState>;
+    nextAgentMessageOrder: number;
   } | null = null;
   private activeThreadId: string | null = null;
   private activeTurnId: string | null = null;
@@ -108,7 +117,12 @@ export class CodexAppServerClient {
       }
 
       const completion = new Promise<TurnResult>((resolve, reject) => {
-        this.turnCompletion = { resolve, reject, text: "" };
+        this.turnCompletion = {
+          resolve,
+          reject,
+          agentMessages: new Map(),
+          nextAgentMessageOrder: 0
+        };
       });
       try {
         this.turnStartedAt = Date.now();
@@ -235,12 +249,16 @@ export class CodexAppServerClient {
       this.turnStartedAt = this.turnStartedAt || Date.now();
       return;
     }
-    if (message.method === "item/agentMessage/delta") {
-      completion.text += extractText(message.params);
+    if (message.method === "item/started") {
+      recordAgentMessageStarted(completion, message.params);
       return;
     }
-    if (message.method === "item/completed" && !completion.text) {
-      completion.text = extractCompletedAgentText(message.params);
+    if (message.method === "item/agentMessage/delta") {
+      recordAgentMessageDelta(completion, message.params);
+      return;
+    }
+    if (message.method === "item/completed") {
+      recordAgentMessageCompleted(completion, message.params);
       return;
     }
     if (message.method === "turn/completed") {
@@ -251,8 +269,10 @@ export class CodexAppServerClient {
       } else if (status === "interrupted") {
         completion.reject(new Error("Codex App Server turn was interrupted."));
       } else if (status === "completed") {
-        const fallback = extractText(message.params);
-        completion.resolve({ text: completion.text || fallback, threadId: this.activeThreadId || "" });
+        completion.resolve({
+          text: selectFinalAgentMessageText(completion.agentMessages) || extractText(message.params),
+          threadId: this.activeThreadId || ""
+        });
       } else {
         completion.reject(
           new Error(`Codex App Server turn ended with unexpected status: ${String(status ?? "unknown")}.`)
@@ -851,10 +871,121 @@ function extractText(value: unknown): string {
   return "";
 }
 
-function extractCompletedAgentText(value: unknown): string {
-  const item = extractRecord(extractRecord(value)?.item);
-  if (!item || item.type !== "agentMessage") return "";
-  return typeof item.text === "string" ? item.text : "";
+function recordAgentMessageStarted(
+  completion: {
+    agentMessages: Map<string, AgentMessageState>;
+    nextAgentMessageOrder: number;
+  },
+  value: unknown
+): void {
+  const item = extractAgentMessageItem(value);
+  if (!item) return;
+  const state = getAgentMessageState(completion, extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID);
+  if (typeof item.text === "string") state.text = item.text;
+  state.phase = extractAgentMessagePhase(value) || state.phase;
+  state.completed = false;
+  touchAgentMessage(completion, state);
+}
+
+function recordAgentMessageDelta(
+  completion: {
+    agentMessages: Map<string, AgentMessageState>;
+    nextAgentMessageOrder: number;
+  },
+  value: unknown
+): void {
+  const delta = extractText(value);
+  if (!delta) return;
+  const state = getAgentMessageState(completion, extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID);
+  state.text += delta;
+  state.phase = extractAgentMessagePhase(value) || state.phase;
+  touchAgentMessage(completion, state);
+}
+
+function recordAgentMessageCompleted(
+  completion: {
+    agentMessages: Map<string, AgentMessageState>;
+    nextAgentMessageOrder: number;
+  },
+  value: unknown
+): void {
+  const item = extractAgentMessageItem(value);
+  if (!item) return;
+  const state = getAgentMessageState(completion, extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID);
+  // item/completed is authoritative for the full agentMessage text. This
+  // replaces any streamed deltas for this item without touching other phases.
+  if (typeof item.text === "string") state.text = item.text;
+  state.phase = extractAgentMessagePhase(value) || state.phase;
+  state.completed = true;
+  touchAgentMessage(completion, state);
+}
+
+function selectFinalAgentMessageText(agentMessages: Map<string, AgentMessageState>): string {
+  const messages = [...agentMessages.values()]
+    .filter((message) => message.text.trim())
+    .sort((left, right) => left.lastEventOrder - right.lastEventOrder);
+  const finalAnswer = [...messages]
+    .reverse()
+    .find((message) => message.completed && message.phase === "final_answer");
+  if (finalAnswer) return finalAnswer.text;
+  const lastCompleted = [...messages].reverse().find((message) => message.completed);
+  if (lastCompleted) return lastCompleted.text;
+  const lastFinalPhase = [...messages].reverse().find((message) => message.phase === "final_answer");
+  return lastFinalPhase?.text || messages.at(-1)?.text || "";
+}
+
+const UNSCOPED_AGENT_MESSAGE_ID = "__agent_message_without_item_id__";
+
+function getAgentMessageState(
+  completion: {
+    agentMessages: Map<string, AgentMessageState>;
+    nextAgentMessageOrder: number;
+  },
+  id: string
+): AgentMessageState {
+  const existing = completion.agentMessages.get(id);
+  if (existing) return existing;
+  const state: AgentMessageState = {
+    id,
+    text: "",
+    completed: false,
+    lastEventOrder: 0
+  };
+  completion.agentMessages.set(id, state);
+  return state;
+}
+
+function touchAgentMessage(
+  completion: {
+    nextAgentMessageOrder: number;
+  },
+  state: AgentMessageState
+): void {
+  state.lastEventOrder = ++completion.nextAgentMessageOrder;
+}
+
+function extractAgentMessageItem(value: unknown): Record<string, unknown> | null {
+  const record = extractRecord(value);
+  const item = extractRecord(record?.item) || record;
+  return item?.type === "agentMessage" ? item : null;
+}
+
+function extractAgentMessageId(value: unknown): string | null {
+  const record = extractRecord(value);
+  if (!record) return null;
+  if (typeof record.itemId === "string" && record.itemId) return record.itemId;
+  const item = extractRecord(record.item);
+  if (typeof item?.id === "string" && item.id) return item.id;
+  if (record.type === "agentMessage" && typeof record.id === "string" && record.id) return record.id;
+  return null;
+}
+
+function extractAgentMessagePhase(value: unknown): string | null {
+  const record = extractRecord(value);
+  if (!record) return null;
+  if (typeof record.phase === "string" && record.phase) return record.phase;
+  const item = extractRecord(record.item);
+  return typeof item?.phase === "string" && item.phase ? item.phase : null;
 }
 
 function extractTurnError(value: unknown): string {
