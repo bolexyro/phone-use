@@ -139,6 +139,10 @@ class DevBridgeServer(
                     "status" -> status(requestId, writer)
                     "pending_request" -> pendingRequest(requestId, writer)
                     "claim_request" -> claimRequest(requestId, json, writer)
+                    "pending_steer" -> pendingSteer(requestId, json, writer)
+                    "claim_steer" -> claimSteer(requestId, json, writer)
+                    "release_steer" -> releaseSteer(requestId, json, writer)
+                    "complete_steer" -> completeSteer(requestId, json, writer)
                     "bind_codex_thread" -> bindCodexThread(requestId, json, writer)
                     "release_request" -> releaseRequest(requestId, json, writer)
                     "complete_session" -> completeSession(requestId, json, writer)
@@ -277,6 +281,102 @@ class DevBridgeServer(
                 .put("codexThreadId", claimed.codexThreadId ?: JSONObject.NULL)
                 .put("request", claimed.request)
                 .put("message", "Phone request claimed by the desktop Codex companion."),
+        )
+    }
+
+    private fun pendingSteer(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val expectedSessionId = json.optString("sessionId").trim().ifBlank { null }
+        val state = coordinator.state.value
+        val pending = coordinator.pendingSteer(expectedSessionId)
+        val response = JSONObject()
+            .put("type", "pending_steer")
+            .put("requestId", requestId)
+            .put("ok", true)
+            .put("active", state is SessionState.Running)
+            .put("available", pending != null)
+        if (pending != null) {
+            response
+                .put("steerId", pending.steerId)
+                .put("sessionId", pending.sessionId)
+        }
+        write(writer, response)
+    }
+
+    private fun claimSteer(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val sessionId = json.optString("sessionId").trim()
+        val steerId = json.optString("steerId").trim()
+        require(sessionId.isNotEmpty()) { "sessionId is required." }
+        require(steerId.isNotEmpty()) { "steerId is required." }
+        val claimed = coordinator.claimSteer(sessionId, steerId)
+        if (claimed == null) {
+            write(
+                writer,
+                errorResponse(requestId, "No unclaimed steer matched the supplied session and steer id.")
+                    .put("code", "STEER_NOT_AVAILABLE"),
+            )
+            return
+        }
+        write(
+            writer,
+            JSONObject()
+                .put("type", "steer_claimed")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("steerId", claimed.steerId)
+                .put("sessionId", claimed.sessionId)
+                .put("text", claimed.text),
+        )
+    }
+
+    private fun releaseSteer(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val sessionId = json.optString("sessionId").trim()
+        val steerId = json.optString("steerId").trim()
+        require(sessionId.isNotEmpty()) { "sessionId is required." }
+        require(steerId.isNotEmpty()) { "steerId is required." }
+        val released = coordinator.releaseSteer(sessionId, steerId)
+        write(
+            writer,
+            JSONObject()
+                .put("type", "steer_released")
+                .put("requestId", requestId)
+                .put("ok", released)
+                .put("sessionId", sessionId)
+                .put("steerId", steerId)
+                .put("released", released),
+        )
+    }
+
+    private fun completeSteer(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val sessionId = json.optString("sessionId").trim()
+        val steerId = json.optString("steerId").trim()
+        require(sessionId.isNotEmpty()) { "sessionId is required." }
+        require(steerId.isNotEmpty()) { "steerId is required." }
+        val completed = coordinator.completeSteer(sessionId, steerId)
+        write(
+            writer,
+            JSONObject()
+                .put("type", "steer_completed")
+                .put("requestId", requestId)
+                .put("ok", completed)
+                .put("sessionId", sessionId)
+                .put("steerId", steerId)
+                .put("delivered", completed),
         )
     }
 

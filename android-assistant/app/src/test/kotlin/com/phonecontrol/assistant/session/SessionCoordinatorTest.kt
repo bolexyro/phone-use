@@ -77,6 +77,46 @@ class SessionCoordinatorTest {
     }
 
     @Test
+    fun `steer request can be claimed once and completed`() {
+        val coordinator = coordinator()
+        assertTrue(coordinator.start("Find a restaurant"))
+
+        val queued = coordinator.enqueueSteer("Actually use the closest location.")
+        assertNotNull(queued)
+        assertEquals(queued, coordinator.pendingSteer(queued!!.sessionId))
+
+        val claimed = coordinator.claimSteer(queued.sessionId, queued.steerId)
+        assertEquals(queued, claimed)
+        assertNull(coordinator.pendingSteer(queued.sessionId))
+        assertTrue(coordinator.completeSteer(queued.sessionId, queued.steerId))
+        assertNull(coordinator.claimSteer(queued.sessionId, queued.steerId))
+    }
+
+    @Test
+    fun `failed steer delivery is requeued for the same running session`() {
+        val coordinator = coordinator()
+        assertTrue(coordinator.start("Find a restaurant"))
+
+        val queued = coordinator.enqueueSteer("Do not submit anything yet.")!!
+        assertNotNull(coordinator.claimSteer(queued.sessionId, queued.steerId))
+        assertTrue(coordinator.releaseSteer(queued.sessionId, queued.steerId))
+        assertEquals(queued, coordinator.pendingSteer(queued.sessionId))
+    }
+
+    @Test
+    fun `steer cannot be released through a different session id`() {
+        val coordinator = coordinator()
+        assertTrue(coordinator.start("Find a restaurant"))
+
+        val queued = coordinator.enqueueSteer("Keep the current plan.")!!
+        assertNotNull(coordinator.claimSteer(queued.sessionId, queued.steerId))
+        assertTrue(!coordinator.releaseSteer("another-session", queued.steerId))
+        assertNull(coordinator.pendingSteer(queued.sessionId))
+        assertTrue(coordinator.releaseSteer(queued.sessionId, queued.steerId))
+        assertEquals(queued, coordinator.pendingSteer(queued.sessionId))
+    }
+
+    @Test
     fun `agent feedback is kept as a conversation message when completed`() {
         val coordinator = coordinator()
         coordinator.start("Find a restaurant")

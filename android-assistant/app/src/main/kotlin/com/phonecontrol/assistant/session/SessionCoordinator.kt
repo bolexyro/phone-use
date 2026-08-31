@@ -69,6 +69,13 @@ data class PendingRequest(
     val codexThreadId: String? = null,
 )
 
+/** A user instruction waiting to be appended to the active Codex turn. */
+data class PendingSteer(
+    val steerId: String,
+    val sessionId: String,
+    val text: String,
+)
+
 /**
  * Process-local session state shared by the Compose activity, foreground
  * service, and desktop Codex bridge. The phone owns the handoff and all typed
@@ -85,6 +92,8 @@ class SessionCoordinator(
     private val _events = MutableStateFlow<List<ActivityEvent>>(emptyList())
     private var sessionJob: Job? = null
     private var claimedRequestSessionId: String? = null
+    private val pendingSteers = mutableListOf<PendingSteer>()
+    private val claimedSteers = mutableMapOf<String, PendingSteer>()
 
     val state: StateFlow<SessionState> = _state.asStateFlow()
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
@@ -118,6 +127,72 @@ class SessionCoordinator(
         val running = _state.value as? SessionState.Running ?: return@synchronized null
         if (claimedRequestSessionId == running.sessionId) return@synchronized null
         pendingRequestFor(running)
+    }
+
+    /** Queue a user instruction for the desktop companion's active Codex turn. */
+    fun enqueueSteer(text: String): PendingSteer? = synchronized(lock) {
+        val running = _state.value as? SessionState.Running ?: return@synchronized null
+        val safeText = text.trim().take(MAX_STEER_CHARS).ifBlank { return@synchronized null }
+        if (pendingSteers.size >= MAX_PENDING_STEERS) return@synchronized null
+
+        val steer = PendingSteer(
+            steerId = UUID.randomUUID().toString(),
+            sessionId = running.sessionId,
+            text = safeText,
+        )
+        pendingSteers += steer
+        _state.value = running.copy(currentPurpose = "Steer queued")
+        conversationStore?.setCurrentPurpose(running.sessionId, "Steer queued")
+        conversationStore?.recordSteer(steer.steerId, running.sessionId, safeText)
+        appendEvent(
+            ActivityEventKind.SYSTEM,
+            "Steer instruction queued for Codex.",
+            sessionId = running.sessionId,
+        )
+        steer
+    }
+
+    /** Return the next unclaimed steer for the active phone session. */
+    fun pendingSteer(expectedSessionId: String? = null): PendingSteer? = synchronized(lock) {
+        val running = _state.value as? SessionState.Running ?: return@synchronized null
+        if (expectedSessionId != null && expectedSessionId != running.sessionId) {
+            return@synchronized null
+        }
+        pendingSteers.firstOrNull { it.sessionId == running.sessionId }
+    }
+
+    /** Atomically claim a steer so multiple desktop pollers cannot deliver it twice. */
+    fun claimSteer(
+        expectedSessionId: String,
+        expectedSteerId: String,
+    ): PendingSteer? = synchronized(lock) {
+        val running = _state.value as? SessionState.Running ?: return@synchronized null
+        if (expectedSessionId != running.sessionId) return@synchronized null
+        val index = pendingSteers.indexOfFirst {
+            it.sessionId == running.sessionId && it.steerId == expectedSteerId
+        }
+        if (index < 0) return@synchronized null
+        val claimed = pendingSteers.removeAt(index)
+        claimedSteers[claimed.steerId] = claimed
+        claimed
+    }
+
+    /** Put a steer back at the front after a transient desktop delivery failure. */
+    fun releaseSteer(expectedSessionId: String, steerId: String): Boolean = synchronized(lock) {
+        val steer = claimedSteers[steerId] ?: return@synchronized false
+        if (steer.sessionId != expectedSessionId) return@synchronized false
+        val running = _state.value as? SessionState.Running
+        if (running?.sessionId != steer.sessionId) return@synchronized false
+        claimedSteers.remove(steerId)
+        if (pendingSteers.none { it.steerId == steer.steerId }) pendingSteers.add(0, steer)
+        true
+    }
+
+    /** Acknowledge that the active Codex client accepted a steer. */
+    fun completeSteer(expectedSessionId: String, steerId: String): Boolean = synchronized(lock) {
+        val steer = claimedSteers[steerId] ?: return@synchronized false
+        if (steer.sessionId != expectedSessionId) return@synchronized false
+        claimedSteers.remove(steerId) != null
     }
 
     /**
@@ -200,6 +275,7 @@ class SessionCoordinator(
         sessionJob?.cancel()
         sessionJob = null
         claimedRequestSessionId = null
+        clearSteers(sessionId)
         val conversationId = _state.value.conversationIdOrNull()
         _state.value = SessionState.Stopped(sessionId, reason, conversationId)
         conversationStore?.completeRun(sessionId, RunStatus.STOPPED)
@@ -218,6 +294,7 @@ class SessionCoordinator(
         sessionJob?.cancel()
         sessionJob = null
         claimedRequestSessionId = null
+        clearSteers(sessionId)
         val safeReason = reason.trim().take(MAX_AGENT_FEEDBACK_CHARS)
             .ifBlank { "The desktop Codex turn failed." }
         val conversationId = _state.value.conversationIdOrNull()
@@ -249,6 +326,7 @@ class SessionCoordinator(
         sessionJob = null
         claimedRequestSessionId = null
         val conversationId = _state.value.conversationIdOrNull()
+        _state.value.sessionIdOrNull?.let(::clearSteers)
         _state.value = SessionState.Completed(sessionId, displayMessage, conversationId)
         // Feedback is emitted as an AGENT_MESSAGE below so the live timeline
         // and the durable timeline share one row. The fallback completion has
@@ -403,6 +481,15 @@ class SessionCoordinator(
     fun close() {
         sessionJob?.cancel()
         sessionJob = null
+        synchronized(lock) {
+            pendingSteers.clear()
+            claimedSteers.clear()
+        }
+    }
+
+    private fun clearSteers(sessionId: String) {
+        pendingSteers.removeAll { it.sessionId == sessionId }
+        claimedSteers.entries.removeIf { it.value.sessionId == sessionId }
     }
 
     private fun pendingRequestFor(running: SessionState.Running): PendingRequest = PendingRequest(
@@ -446,6 +533,8 @@ class SessionCoordinator(
         const val MAX_EVENTS = 100
         const val MAX_TEXT_CHARS = 240
         const val MAX_AGENT_FEEDBACK_CHARS = 4_000
+        const val MAX_STEER_CHARS = 4_000
+        const val MAX_PENDING_STEERS = 8
     }
 }
 

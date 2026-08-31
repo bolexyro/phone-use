@@ -118,6 +118,7 @@ fun AssistantScreen(
     @Suppress("UNUSED_PARAMETER") initialConversationId: String?,
     onRunRequest: (String, String?) -> Unit,
     onStopSession: () -> Unit,
+    onSteerRequest: (String) -> Boolean,
     onOpenSettings: () -> Unit,
     onStartFresh: () -> Unit,
 ) {
@@ -125,6 +126,7 @@ fun AssistantScreen(
     val state by coordinator.state.collectAsState()
     val timeline by store.timeline(DHD_CONVERSATION_ID).collectAsState()
     val active = state.isActive()
+    val canSteer = state is SessionState.Running
     var showStartFreshConfirmation by rememberSaveable { mutableStateOf(false) }
     val recentCutoff = System.currentTimeMillis() - RECENT_HISTORY_WINDOW_MS
     val recentTimeline = timeline.filter { item ->
@@ -233,9 +235,16 @@ fun AssistantScreen(
                     .padding(bottom = 14.dp),
             ) {
                 RequestComposer(
-                    enabled = !active,
+                    enabled = !active || canSteer,
                     isActive = active,
-                    onSend = { request -> onRunRequest(request, DHD_CONVERSATION_ID) },
+                    canSteer = canSteer,
+                    onSend = { request ->
+                        if (canSteer) onSteerRequest(request)
+                        else {
+                            onRunRequest(request, DHD_CONVERSATION_ID)
+                            true
+                        }
+                    },
                     onStop = onStopSession,
                 )
             }
@@ -358,6 +367,7 @@ private fun PromptSuggestionChip(
 private data class TaskGroup(
     val id: String,
     val userMessage: TimelineItem.Message?,
+    val steerMessages: List<TimelineItem.Message>,
     val activities: List<TimelineItem.Activity>,
     val assistantMessages: List<TimelineItem.Message>,
     val timestampEpochMs: Long,
@@ -365,6 +375,7 @@ private data class TaskGroup(
 
 private class TaskGroupBuilder(val id: String) {
     var userMessage: TimelineItem.Message? = null
+    val steerMessages = mutableListOf<TimelineItem.Message>()
     val activities = mutableListOf<TimelineItem.Activity>()
     val assistantMessages = mutableListOf<TimelineItem.Message>()
     var timestampEpochMs: Long = Long.MAX_VALUE
@@ -376,6 +387,7 @@ private class TaskGroupBuilder(val id: String) {
     fun build(): TaskGroup = TaskGroup(
         id = id,
         userMessage = userMessage,
+        steerMessages = steerMessages.toList(),
         activities = activities.toList(),
         assistantMessages = assistantMessages.toList(),
         timestampEpochMs = timestampEpochMs,
@@ -395,6 +407,8 @@ private fun groupTimeline(timeline: List<TimelineItem>): List<TaskGroup> {
             is TimelineItem.Message -> {
                 if (item.role == "user" && builder.userMessage == null) {
                     builder.userMessage = item
+                } else if (item.role == "steer") {
+                    builder.steerMessages += item
                 } else {
                     builder.assistantMessages += item
                 }
@@ -423,7 +437,11 @@ private fun ConversationTimeline(
 ) {
     val listState = rememberLazyListState()
     val groups = remember(timeline) { groupTimeline(timeline) }
-    LaunchedEffect(groups.lastOrNull()?.id, groups.lastOrNull()?.activities?.size) {
+    LaunchedEffect(
+        groups.lastOrNull()?.id,
+        groups.lastOrNull()?.activities?.size,
+        groups.lastOrNull()?.steerMessages?.size,
+    ) {
         if (groups.isNotEmpty()) listState.animateScrollToItem(groups.lastIndex)
     }
     LazyColumn(
@@ -452,6 +470,10 @@ private fun TaskGroupCard(
     ) {
         // User message bubble (ChatGPT navy bubble in dark, soft gray bubble in light)
         group.userMessage?.let { MessageBubble(it) }
+
+        // Steering instructions stay attached to the current run instead of
+        // appearing as a new task.
+        group.steerMessages.forEach { SteerMessageBubble(it) }
 
         // Shimmering thinking loading indicator (visible when actively planning/thinking)
         if (active) {
@@ -568,6 +590,38 @@ private fun MessageBubble(message: TimelineItem.Message) {
                     color = colors.textPrimary,
                     fontSize = 15.sp,
                     lineHeight = 22.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SteerMessageBubble(message: TimelineItem.Message) {
+    val colors = LocalAssistantColors.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End,
+    ) {
+        Surface(
+            color = colors.surfaceCard,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, colors.accentBlue.copy(alpha = 0.65f)),
+            modifier = Modifier.padding(start = 64.dp),
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(
+                    text = "Steer",
+                    color = colors.accentBlue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = message.text,
+                    color = colors.textPrimary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(top = 2.dp),
                 )
             }
         }
@@ -748,7 +802,8 @@ private fun activityStatusText(status: String): String = when (status.lowercase(
 private fun RequestComposer(
     enabled: Boolean,
     isActive: Boolean,
-    onSend: (String) -> Unit,
+    canSteer: Boolean,
+    onSend: (String) -> Boolean,
     onStop: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
@@ -840,16 +895,21 @@ private fun RequestComposer(
                         onSend = {
                             val text = textFieldValue.text.trim()
                             if (text.isNotEmpty() && enabled) {
-                                onSend(text)
-                                textFieldValue = TextFieldValue("", selection = TextRange.Zero)
-                                focusManager.clearFocus()
+                                if (onSend(text)) {
+                                    textFieldValue = TextFieldValue("", selection = TextRange.Zero)
+                                    focusManager.clearFocus()
+                                }
                             }
                         },
                     ),
                     decorationBox = { innerTextField ->
                         if (textFieldValue.text.isEmpty()) {
                             Text(
-                                text = if (enabled) "Ask DHD" else "DHD is working…",
+                                text = when {
+                                    canSteer -> "Steer DHD"
+                                    enabled -> "Ask DHD"
+                                    else -> "DHD is working…"
+                                },
                                 color = colors.textSecondary,
                                 fontSize = 16.sp,
                             )
@@ -870,13 +930,13 @@ private fun RequestComposer(
                         colors = colors,
                         onSend = {
                             val text = textFieldValue.text.trim()
-                            if (text.isNotEmpty()) {
-                                onSend(text)
+                            if (text.isNotEmpty() && onSend(text)) {
                                 textFieldValue = TextFieldValue("", selection = TextRange.Zero)
                                 focusManager.clearFocus()
                             }
                         },
                         onStop = onStop,
+                        canSteer = canSteer,
                     )
                 }
             }
@@ -900,13 +960,13 @@ private fun RequestComposer(
                             colors = colors,
                             onSend = {
                                 val text = textFieldValue.text.trim()
-                                if (text.isNotEmpty()) {
-                                    onSend(text)
+                                if (text.isNotEmpty() && onSend(text)) {
                                     textFieldValue = TextFieldValue("", selection = TextRange.Zero)
                                     focusManager.clearFocus()
                                 }
                             },
                             onStop = onStop,
+                            canSteer = canSteer,
                         )
                     }
                 }
@@ -920,27 +980,50 @@ private fun ActionOrSendButton(
     isActive: Boolean,
     hasText: Boolean,
     enabled: Boolean,
+    canSteer: Boolean,
     colors: AssistantColorScheme,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
     if (isActive) {
-        // Active Stop Square Button inside blue circle (Matching Image)
-        Surface(
-            shape = CircleShape,
-            color = colors.accentBlue,
-            modifier = Modifier
-                .size(36.dp)
-                .clip(CircleShape)
-                .clickable { onStop() },
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_stop),
-                    contentDescription = "Stop task",
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp),
-                )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (canSteer) {
+                Surface(
+                    shape = CircleShape,
+                    color = if (hasText) colors.sendButtonActiveBg else colors.sendButtonInactiveBg,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .clickable(enabled = hasText) { onSend() },
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_send_arrow),
+                            contentDescription = "Steer active task",
+                            tint = if (hasText) colors.sendButtonActiveIcon else colors.sendButtonInactiveIcon,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+            }
+
+            // Active Stop Square Button inside blue circle (Matching Image)
+            Surface(
+                shape = CircleShape,
+                color = colors.accentBlue,
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .clickable { onStop() },
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_stop),
+                        contentDescription = "Stop task",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
         }
     } else {

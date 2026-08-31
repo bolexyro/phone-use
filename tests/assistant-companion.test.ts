@@ -63,3 +63,39 @@ describe("Codex App Server agent-message extraction", () => {
     });
   });
 });
+
+describe("Codex App Server turn steering", () => {
+  it("sends steer input to the active turn and preserves its expected turn id", async () => {
+    const client = new CodexAppServerClient() as any;
+    client.activeThreadId = "thread-steer";
+    client.activeTurnId = "turn-steer";
+    client.turnCompletion = {
+      resolve: () => undefined,
+      reject: () => undefined,
+      agentMessages: new Map(),
+      nextAgentMessageOrder: 0
+    };
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    client.request = async (method: string, params: Record<string, unknown>) => {
+      requests.push({ method, params });
+      return { result: { turnId: "turn-steer" } };
+    };
+
+    await client.steer("Actually stop after verifying the current screen.");
+
+    expect(requests).toEqual([{
+      method: "turn/steer",
+      params: {
+        threadId: "thread-steer",
+        input: [{ type: "text", text: "Actually stop after verifying the current screen." }],
+        expectedTurnId: "turn-steer"
+      }
+    }]);
+  });
+
+  it("rejects steering when the App Server turn is no longer active", async () => {
+    const client = new CodexAppServerClient();
+
+    await expect(client.steer("Continue")).rejects.toThrow("no active turn");
+  });
+});
