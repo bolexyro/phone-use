@@ -419,8 +419,7 @@ private fun groupTimeline(timeline: List<TimelineItem>): List<TaskGroup> {
 }
 
 private fun TimelineItem.Activity.isMcpExecuteActivity(): Boolean =
-    (toolName == PHONE_ASSISTANT_EXECUTE_TOOL || (toolName == null && actionType != null)) &&
-        !status.equals("confirmation", ignoreCase = true)
+    !status.equals("confirmation", ignoreCase = true)
 
 @Composable
 private fun ConversationTimeline(
@@ -505,7 +504,7 @@ private fun TaskGroupCard(
         }
 
         // Completed "Worked for Xs >" Collapsible Header & Trace
-        if (!active && group.activities.isNotEmpty()) {
+        if (!active && (group.assistantMessages.isNotEmpty() || group.activities.isNotEmpty())) {
             WorkedTraceSection(
                 durationSeconds = durationSeconds,
                 activities = group.activities,
@@ -1077,8 +1076,28 @@ private fun WorkedTraceSection(
                     .padding(top = 8.dp, bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                activities.forEach { activity ->
-                    TraceStepRow(activity)
+                if (activities.isEmpty()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(vertical = 3.dp, horizontal = 2.dp),
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_connected_nodes),
+                            contentDescription = "Finished",
+                            tint = colors.textSecondary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            text = "Completed in ${durationSeconds}s · Direct response",
+                            fontSize = 13.5.sp,
+                            color = colors.textSecondary,
+                        )
+                    }
+                } else {
+                    activities.forEach { activity ->
+                        TraceStepRow(activity)
+                    }
                 }
             }
         }
@@ -1096,41 +1115,29 @@ private fun TraceStepRow(activity: TimelineItem.Activity) {
         else -> colors.textSecondary
     }
 
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .padding(vertical = 3.dp, horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_connected_nodes),
-                contentDescription = "Tool Call",
-                tint = statusColor,
-                modifier = Modifier.size(18.dp),
-            )
-            Text(
-                text = activityLabel(activity),
-                fontSize = 13.5.sp,
-                color = colors.textPrimary,
-                fontWeight = FontWeight.Normal,
-                modifier = Modifier.weight(1f),
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-
-        activity.message.takeIf(String::isNotBlank)?.let {
-            Text(
-                text = "Detail: $it",
-                fontSize = 12.sp,
-                color = colors.textSecondary,
-                modifier = Modifier.padding(start = 28.dp, top = 4.dp),
-            )
-        }
+        Icon(
+            painter = painterResource(R.drawable.ic_connected_nodes),
+            contentDescription = "Tool Call",
+            tint = statusColor,
+            modifier = Modifier.size(18.dp),
+        )
+        Text(
+            text = activityLabel(activity),
+            fontSize = 13.5.sp,
+            color = colors.textPrimary,
+            fontWeight = FontWeight.Normal,
+            modifier = Modifier.weight(1f),
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
