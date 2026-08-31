@@ -107,10 +107,12 @@ before starting the replacement, preventing old subscriptions from accumulating.
 The App Server child starts in a dedicated user runtime directory rather than
 the Phone Control repository: `%USERPROFILE%\\.dhd\\codex-runtime` by default.
 Override it with `PHONE_ASSISTANT_CODEX_CWD` when a different empty directory is
-needed. The companion also passes minimal App Server config overrides that
-disable configured MCP servers, project instruction loading, shell execution,
-apps, browser use, computer use, memories, multi-agent tools, plugins, remote
-plugins, skill search, unified exec, hooks, and dependency installation.
+needed. The companion passes minimal App Server config overrides that disable
+configured MCP servers, shell execution, apps, browser use, computer use,
+memories, multi-agent tools, plugins, remote plugins, skill search, unified
+exec, hooks, and dependency installation. Project instructions are not capped:
+the runtime can provide its own small `AGENTS.md` for DHD-specific guidance,
+without inheriting the Phone Control repository's project instructions.
 It also turns off goals, shell snapshots, image generation, the in-app browser,
 tool suggestions, image viewing, and workspace dependencies for this child.
 ChatGPT authentication remains in the user's normal Codex home; the isolated

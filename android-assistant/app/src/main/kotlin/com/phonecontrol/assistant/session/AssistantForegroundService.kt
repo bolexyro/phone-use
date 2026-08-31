@@ -76,8 +76,8 @@ class AssistantForegroundService : Service() {
         val isPaused = state is SessionState.Paused
         val status = when (state) {
             SessionState.Idle -> "Ready"
-            is SessionState.Running -> state.currentPurpose
-            is SessionState.Paused -> "Paused · ${state.currentPurpose}"
+            is SessionState.Running -> notificationPurpose(state.currentPurpose)
+            is SessionState.Paused -> "Paused · ${notificationPurpose(state.currentPurpose)}"
             is SessionState.Stopped -> "Stopped"
             is SessionState.Completed -> "Completed"
         }
@@ -116,6 +116,14 @@ class AssistantForegroundService : Service() {
             )
             .addAction(android.R.drawable.ic_delete, "Stop", stopIntent)
             .build()
+    }
+
+    private fun notificationPurpose(purpose: String): String = when {
+        purpose.equals("Preparing request", ignoreCase = true) -> "Connecting to Codex…"
+        purpose.equals("Codex is planning", ignoreCase = true) -> "Thinking…"
+        purpose.equals("Waiting for desktop Codex bridge", ignoreCase = true) -> "Companion not connected"
+        purpose.equals("Needs your attention", ignoreCase = true) -> "DHD needs your attention"
+        else -> purpose
     }
 
     private fun startForegroundCompat(notification: Notification) {

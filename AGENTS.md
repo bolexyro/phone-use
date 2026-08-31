@@ -23,3 +23,13 @@ The first version supports one connected Android phone and uses an app allowlist
 - scrcpy for screen mirroring
 - UI Automator for visible UI metadata
 
+## Git & Staging Discipline (CRITICAL)
+- **Never blindly stage or commit all files** (e.g., NEVER run `git add -A` or `git add .`).
+- Multiple agents or human collaborators may be working on separate modules simultaneously.
+- **Stage only the exact files** you created or intentionally modified for your specific task:
+  ```bash
+  git add <exact-file-path-1> <exact-file-path-2>
+  ```
+- Always check `git status` and `git diff --staged` before committing to ensure no unrelated workspace changes are bundled.
+
+

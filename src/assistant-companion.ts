@@ -23,7 +23,6 @@ const MAX_AGENT_FEEDBACK_CHARS = 4_000;
 const DEFAULT_CODEX_RUNTIME_CWD = join(homedir(), ".dhd", "codex-runtime");
 const MINIMAL_CODEX_CONFIG_OVERRIDES = [
   "mcp_servers={}",
-  "project_doc_max_bytes=0",
   "features.apps=false",
   "features.browser_use=false",
   "features.computer_use=false",

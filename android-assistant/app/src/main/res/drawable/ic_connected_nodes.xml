@@ -3,23 +3,35 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+    <!-- Diagonal connecting line -->
     <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M17,7 L7,17"
-        android:strokeColor="#A7B0BE"
+        android:pathData="M17,7L7,17"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
         android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:strokeWidth="1.5" />
+        android:strokeLineJoin="round" />
+    <!-- Node Top-Left (7, 7) -->
     <path
-        android:fillColor="#172131"
-        android:pathData="M7,7m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0" />
+        android:pathData="M7,7m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000" />
+    <!-- Node Top-Right (17, 7) -->
     <path
-        android:fillColor="#172131"
-        android:pathData="M17,7m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0" />
+        android:pathData="M17,7m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000" />
+    <!-- Node Bottom-Left (7, 17) -->
     <path
-        android:fillColor="#172131"
-        android:pathData="M7,17m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0" />
+        android:pathData="M7,17m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000" />
+    <!-- Node Bottom-Right (17, 17) -->
     <path
-        android:fillColor="#172131"
-        android:pathData="M17,17m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0" />
+        android:pathData="M17,17m-2.25,0a2.25,2.25 0,1 1,4.5 0a2.25,2.25 0,1 1,-4.5 0"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000" />
 </vector>

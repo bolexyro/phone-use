@@ -1,7 +1,11 @@
 package com.phonecontrol.assistant.ui
 
 import android.content.Context
-import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -19,9 +23,14 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import com.phonecontrol.assistant.PhoneControlApplication
 import com.phonecontrol.assistant.apps.InstalledAppsRepository
 import com.phonecontrol.assistant.data.DHD_CONVERSATION_ID
+
+private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
 data class AssistantColorScheme(
     val isDark: Boolean,
@@ -90,10 +99,10 @@ val LocalAssistantColors = staticCompositionLocalOf { DarkAssistantColors }
 private const val PREFS_NAME = "dhd_ui_preferences"
 private const val KEY_DARK_MODE = "pref_is_dark_mode"
 
-enum class AssistantNavigationScreen {
-    MAIN,
-    SETTINGS,
-    APPROVED_APPS,
+object AppRoutes {
+    const val MAIN = "main"
+    const val SETTINGS = "settings"
+    const val APPROVED_APPS = "approved_apps"
 }
 
 @Composable
@@ -120,16 +129,8 @@ fun PhoneControlApp(
     val shizukuController = application.shizukuController
     val shizukuStatus by shizukuController.status.collectAsState()
     val apps = remember { InstalledAppsRepository(context).listLaunchableUserApps() }
-    var currentScreen by rememberSaveable { mutableStateOf(AssistantNavigationScreen.MAIN) }
 
-    // Intercept hardware / system back button to navigate back
-    BackHandler(enabled = currentScreen != AssistantNavigationScreen.MAIN) {
-        currentScreen = when (currentScreen) {
-            AssistantNavigationScreen.APPROVED_APPS -> AssistantNavigationScreen.SETTINGS
-            AssistantNavigationScreen.SETTINGS -> AssistantNavigationScreen.MAIN
-            AssistantNavigationScreen.MAIN -> AssistantNavigationScreen.MAIN
-        }
-    }
+    val navController = rememberNavController()
 
     val assistantColors = if (isDarkMode) DarkAssistantColors else LightAssistantColors
     val materialColors = if (isDarkMode) {
@@ -160,21 +161,47 @@ fun PhoneControlApp(
                 modifier = Modifier.fillMaxSize(),
                 color = assistantColors.background,
             ) {
-                when (currentScreen) {
-                    AssistantNavigationScreen.MAIN -> {
+                NavHost(
+                    navController = navController,
+                    startDestination = AppRoutes.MAIN,
+                    enterTransition = {
+                        slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(280)) + fadeIn(animationSpec = tween(280))
+                    },
+                    exitTransition = {
+                        slideOutHorizontally(targetOffsetX = { -it / 4 }, animationSpec = tween(280)) + fadeOut(animationSpec = tween(280))
+                    },
+                    popEnterTransition = {
+                        slideInHorizontally(initialOffsetX = { -it / 4 }, animationSpec = tween(280)) + fadeIn(animationSpec = tween(280))
+                    },
+                    popExitTransition = {
+                        slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(280)) + fadeOut(animationSpec = tween(280))
+                    },
+                ) {
+                    composable(AppRoutes.MAIN) {
                         AssistantScreen(
                             store = conversationStore,
                             coordinator = coordinator,
                             initialConversationId = initialConversationId,
                             onRunRequest = onRunRequest,
                             onStopSession = onStopSession,
-                            onOpenSettings = { currentScreen = AssistantNavigationScreen.SETTINGS },
+                            onOpenSettings = { navController.navigate(AppRoutes.SETTINGS) },
                             onStartFresh = {
                                 conversationStore.deleteConversation(DHD_CONVERSATION_ID)
                             },
+                            shizukuStatus = shizukuStatus,
+                            onOpenShizuku = {
+                                val shizukuIntent = context.packageManager
+                                    .getLaunchIntentForPackage(SHIZUKU_PACKAGE)
+                                if (shizukuIntent != null) {
+                                    context.startActivity(shizukuIntent)
+                                } else {
+                                    navController.navigate(AppRoutes.SETTINGS)
+                                }
+                            },
                         )
                     }
-                    AssistantNavigationScreen.SETTINGS -> {
+
+                    composable(AppRoutes.SETTINGS) {
                         SettingsScreen(
                             apps = apps,
                             permissions = permissions,
@@ -183,15 +210,16 @@ fun PhoneControlApp(
                             onToggleDarkMode = setDarkMode,
                             onRequestShizukuPermission = { shizukuController.requestPermission() },
                             onRefreshShizuku = shizukuController::refresh,
-                            onOpenApprovedApps = { currentScreen = AssistantNavigationScreen.APPROVED_APPS },
-                            onBack = { currentScreen = AssistantNavigationScreen.MAIN },
+                            onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
+                            onBack = { navController.popBackStack() },
                         )
                     }
-                    AssistantNavigationScreen.APPROVED_APPS -> {
+
+                    composable(AppRoutes.APPROVED_APPS) {
                         ApprovedAppsScreen(
                             apps = apps,
                             permissions = permissions,
-                            onBack = { currentScreen = AssistantNavigationScreen.SETTINGS },
+                            onBack = { navController.popBackStack() },
                         )
                     }
                 }

@@ -108,6 +108,8 @@ import com.phonecontrol.assistant.domain.userFacingActivityLabel
 import com.phonecontrol.assistant.session.SessionCoordinator
 import com.phonecontrol.assistant.session.SessionState
 import com.phonecontrol.assistant.shizuku.ShizukuStatus
+import kotlinx.coroutines.delay
+import kotlin.random.Random
 import java.text.DateFormat
 import java.util.Date
 
@@ -120,6 +122,8 @@ fun AssistantScreen(
     onStopSession: () -> Unit,
     onOpenSettings: () -> Unit,
     onStartFresh: () -> Unit,
+    shizukuStatus: ShizukuStatus,
+    onOpenShizuku: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
     val state by coordinator.state.collectAsState()
@@ -213,6 +217,10 @@ fun AssistantScreen(
                 ConversationTimeline(
                     timeline = recentTimeline,
                     state = state,
+                    shizukuStatus = shizukuStatus,
+                    onOpenSettings = onOpenSettings,
+                    onOpenShizuku = onOpenShizuku,
+                    onStopSession = onStopSession,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         top = 12.dp,
@@ -418,6 +426,10 @@ private fun TimelineItem.Activity.isMcpExecuteActivity(): Boolean =
 private fun ConversationTimeline(
     timeline: List<TimelineItem>,
     state: SessionState,
+    shizukuStatus: ShizukuStatus,
+    onOpenSettings: () -> Unit,
+    onOpenShizuku: () -> Unit,
+    onStopSession: () -> Unit,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(vertical = 12.dp),
 ) {
@@ -435,6 +447,11 @@ private fun ConversationTimeline(
         items(groups, key = { it.id }) { group ->
             TaskGroupCard(
                 group = group,
+                state = state,
+                shizukuStatus = shizukuStatus,
+                onOpenSettings = onOpenSettings,
+                onOpenShizuku = onOpenShizuku,
+                onStopSession = onStopSession,
                 active = state.isActive() && state.sessionIdOrNullForUi() == group.id,
             )
         }
@@ -444,36 +461,130 @@ private fun ConversationTimeline(
 @Composable
 private fun TaskGroupCard(
     group: TaskGroup,
+    state: SessionState,
+    shizukuStatus: ShizukuStatus,
+    onOpenSettings: () -> Unit,
+    onOpenShizuku: () -> Unit,
+    onStopSession: () -> Unit,
     active: Boolean,
 ) {
+    var traceExpanded by rememberSaveable(group.id) { mutableStateOf(false) }
+
+    val durationSeconds = remember(group) {
+        val start = group.userMessage?.timestampEpochMs ?: group.timestampEpochMs
+        val end = group.assistantMessages.lastOrNull()?.timestampEpochMs
+            ?: group.activities.lastOrNull()?.timestampEpochMs
+            ?: start
+        maxOf(1L, (end - start) / 1000L)
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         // User message bubble (ChatGPT navy bubble in dark, soft gray bubble in light)
         group.userMessage?.let { MessageBubble(it) }
 
-        // Shimmering thinking loading indicator (visible when actively planning/thinking)
+        // Keep the playful status for healthy work, but replace it with a
+        // concrete recovery card whenever the phone cannot make progress.
         if (active) {
-            ShimmerThinkingIndicator()
+            when (state) {
+                is SessionState.Running -> RunningStatusIndicator(
+                    currentPurpose = state.currentPurpose,
+                    startedAtEpochMs = state.startedAtEpochMs,
+                    shizukuStatus = shizukuStatus,
+                    onOpenSettings = onOpenSettings,
+                    onOpenShizuku = onOpenShizuku,
+                    onStopSession = onStopSession,
+                )
+                is SessionState.Paused -> PausedStatusIndicator(
+                    currentPurpose = state.currentPurpose,
+                )
+                else -> Unit
+            }
+        }
+
+        // Completed "Worked for Xs >" Collapsible Header & Trace
+        if (!active && group.activities.isNotEmpty()) {
+            WorkedTraceSection(
+                durationSeconds = durationSeconds,
+                activities = group.activities,
+                expanded = traceExpanded,
+                onToggleExpand = { traceExpanded = !traceExpanded },
+            )
+        }
+
+        // Action activities feed in-flight
+        if (active && group.activities.isNotEmpty()) {
+            ActivityFeed(
+                activities = group.activities,
+                active = true,
+            )
         }
 
         // Assistant response message(s)
         group.assistantMessages.forEach { MessageBubble(it) }
-
-        // Action activities feed
-        if (group.activities.isNotEmpty()) {
-            ActivityFeed(
-                activities = group.activities,
-                active = active,
-            )
-        }
     }
 }
 
 @Composable
-private fun ShimmerThinkingIndicator() {
+private fun RunningStatusIndicator(
+    currentPurpose: String,
+    startedAtEpochMs: Long,
+    shizukuStatus: ShizukuStatus,
+    onOpenSettings: () -> Unit,
+    onOpenShizuku: () -> Unit,
+    onStopSession: () -> Unit,
+) {
+    val elapsedSeconds = rememberElapsedSeconds(startedAtEpochMs)
+    val shizukuCheckFinished = !shizukuStatus.message.startsWith("Checking", ignoreCase = true)
+    if (shizukuCheckFinished && !shizukuStatus.privilegedApiReady) {
+        ShizukuRecoveryCard(
+            status = shizukuStatus,
+            onOpenSettings = onOpenSettings,
+            onOpenShizuku = onOpenShizuku,
+        )
+        return
+    }
+
+    val waitingForCompanion = currentPurpose.equals("Waiting for desktop Codex bridge", ignoreCase = true) ||
+        (currentPurpose.equals("Preparing request", ignoreCase = true) && elapsedSeconds >= COMPANION_WAIT_CALLOUT_SECONDS)
+    if (waitingForCompanion) {
+        CompanionRecoveryCard(
+            elapsedSeconds = elapsedSeconds,
+            onStopSession = onStopSession,
+        )
+        return
+    }
+
+    if (currentPurpose.equals("Needs your attention", ignoreCase = true)) {
+        AttentionRecoveryCard(onStopSession = onStopSession)
+        return
+    }
+
+    ShimmerThinkingIndicator(
+        currentPurpose = currentPurpose,
+        startedAtEpochMs = startedAtEpochMs,
+        elapsedSeconds = elapsedSeconds,
+    )
+}
+
+@Composable
+private fun ShimmerThinkingIndicator(
+    currentPurpose: String,
+    startedAtEpochMs: Long,
+    elapsedSeconds: Long,
+) {
     val colors = LocalAssistantColors.current
+    var wordIndex by rememberSaveable(startedAtEpochMs) {
+        mutableStateOf(Random.nextInt(THINKING_WORDS.size))
+    }
+    LaunchedEffect(startedAtEpochMs) {
+        while (true) {
+            delay(2_400L)
+            wordIndex = nextThinkingWordIndex(wordIndex)
+        }
+    }
     val infiniteTransition = rememberInfiniteTransition(label = "thinking_shimmer")
 
     val shimmerTranslate by infiniteTransition.animateFloat(
@@ -508,26 +619,372 @@ private fun ShimmerThinkingIndicator() {
         end = Offset(shimmerTranslate + 160f, 0f),
     )
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .padding(vertical = 4.dp, horizontal = 2.dp),
-    ) {
-        Icon(
-            painter = painterResource(R.drawable.ic_bot),
-            contentDescription = "Thinking",
-            tint = colors.accentBlue.copy(alpha = pulseAlpha),
-            modifier = Modifier.size(16.dp),
-        )
-        Spacer(Modifier.width(7.dp))
+    Column(modifier = Modifier.padding(vertical = 4.dp, horizontal = 2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                painter = painterResource(R.drawable.ic_bot),
+                contentDescription = "Thinking",
+                tint = colors.accentBlue.copy(alpha = pulseAlpha),
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(7.dp))
+            Text(
+                text = THINKING_WORDS[wordIndex],
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                style = TextStyle(brush = shimmerBrush),
+            )
+        }
         Text(
-            text = "Thinking…",
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            style = TextStyle(brush = shimmerBrush),
+            text = "${thinkingDetail(currentPurpose, elapsedSeconds)} · ${elapsedSeconds}s",
+            fontSize = 12.sp,
+            color = colors.textSecondary,
+            modifier = Modifier.padding(start = 23.dp, top = 2.dp),
         )
     }
 }
+
+@Composable
+private fun PausedStatusIndicator(currentPurpose: String) {
+    val colors = LocalAssistantColors.current
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(vertical = 4.dp, horizontal = 2.dp),
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_stop),
+            contentDescription = "Paused",
+            tint = colors.warningAmber,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(7.dp))
+        Column {
+            Text(
+                text = "Paused",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = colors.warningAmber,
+            )
+            Text(
+                text = thinkingDetail(currentPurpose, 0L),
+                fontSize = 12.sp,
+                color = colors.textSecondary,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompanionRecoveryCard(
+    elapsedSeconds: Long,
+    onStopSession: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    RecoveryCard(
+        icon = R.drawable.ic_laptop,
+        title = "Desktop companion not connected",
+        detail = "DHD has not sent any phone action yet. Check the Codex companion and try again.",
+        accent = colors.warningAmber,
+        actionLabel = "Stop waiting",
+        onAction = onStopSession,
+        trailing = "Waiting ${elapsedSeconds}s",
+    )
+}
+
+@Composable
+private fun ShizukuRecoveryCard(
+    status: ShizukuStatus,
+    onOpenSettings: () -> Unit,
+    onOpenShizuku: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    RecoveryCard(
+        icon = R.drawable.ic_shield,
+        title = if (status.binderAvailable) "Shizuku permission needed" else "Shizuku isn’t running",
+        detail = "DHD is paused before the next phone action. ${status.message}",
+        accent = colors.warningAmber,
+        actionLabel = "Open Shizuku",
+        onAction = onOpenShizuku,
+        secondaryActionLabel = "DHD settings",
+        onSecondaryAction = onOpenSettings,
+    )
+}
+
+@Composable
+private fun AttentionRecoveryCard(onStopSession: () -> Unit) {
+    val colors = LocalAssistantColors.current
+    RecoveryCard(
+        icon = R.drawable.ic_info,
+        title = "DHD needs your attention",
+        detail = "The phone screen changed unexpectedly. Review the phone before continuing.",
+        accent = colors.warningAmber,
+        actionLabel = "Stop",
+        onAction = onStopSession,
+    )
+}
+
+@Composable
+private fun RecoveryCard(
+    icon: Int,
+    title: String,
+    detail: String,
+    accent: Color,
+    actionLabel: String,
+    onAction: () -> Unit,
+    trailing: String? = null,
+    secondaryActionLabel: String? = null,
+    onSecondaryAction: (() -> Unit)? = null,
+) {
+    val colors = LocalAssistantColors.current
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = colors.surfaceCard,
+        border = BorderStroke(1.dp, colors.borderColor),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    painter = painterResource(icon),
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    text = title,
+                    color = colors.textPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                trailing?.let {
+                    Text(text = it, color = colors.textSecondary, fontSize = 11.sp)
+                }
+            }
+            Text(
+                text = detail,
+                color = colors.textSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(start = 27.dp, top = 5.dp),
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(start = 27.dp, top = 9.dp),
+            ) {
+                Button(
+                    onClick = onAction,
+                    colors = ButtonDefaults.buttonColors(containerColor = accent),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                ) {
+                    Text(actionLabel, fontSize = 12.sp)
+                }
+                if (secondaryActionLabel != null && onSecondaryAction != null) {
+                    OutlinedButton(
+                        onClick = onSecondaryAction,
+                        border = BorderStroke(1.dp, colors.borderColor),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                    ) {
+                        Text(secondaryActionLabel, color = colors.textSecondary, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberElapsedSeconds(startedAtEpochMs: Long): Long {
+    var elapsedSeconds by remember(startedAtEpochMs) {
+        mutableStateOf(((System.currentTimeMillis() - startedAtEpochMs) / 1_000L).coerceAtLeast(0L))
+    }
+    LaunchedEffect(startedAtEpochMs) {
+        while (true) {
+            elapsedSeconds = ((System.currentTimeMillis() - startedAtEpochMs) / 1_000L).coerceAtLeast(0L)
+            delay(1_000L)
+        }
+    }
+    return elapsedSeconds
+}
+
+private fun thinkingDetail(currentPurpose: String, elapsedSeconds: Long): String = when {
+    currentPurpose.equals("Preparing request", ignoreCase = true) && elapsedSeconds >= COMPANION_WAIT_CALLOUT_SECONDS ->
+        "Waiting for the desktop companion"
+    currentPurpose.equals("Preparing request", ignoreCase = true) -> "Connecting to the desktop companion"
+    currentPurpose.equals("Codex is planning", ignoreCase = true) && elapsedSeconds >= LONG_WAIT_SECONDS ->
+        "Codex is still preparing the first phone check"
+    currentPurpose.equals("Codex is planning", ignoreCase = true) -> "Preparing the first phone check"
+    else -> currentPurpose.ifBlank { "Preparing the next step" }
+}
+
+private val THINKING_WORDS = listOf(
+    "Thinking…",
+    "DHD-ing…",
+    "Discombobulating…",
+    "NPC-ing…",
+    "Combobulating…",
+    "Recombobulating…",
+    "Cerebrating…",
+    "Noodling…",
+    "Orchestrating…",
+    "Razzle-dazzling…",
+    "Vibing…",
+    "Accomplishing…",
+    "Actioning…",
+    "Actualizing…",
+    "Architecting…",
+    "Baking…",
+    "Beaming…",
+    "Beboppin’…",
+    "Bloviating…",
+    "Boogieing…",
+    "Boondoggling…",
+    "Booping…",
+    "Bootstrapping…",
+    "Brewing…",
+    "Burrowing…",
+    "Calculating…",
+    "Canoodling…",
+    "Caramelizing…",
+    "Cascading…",
+    "Catapulting…",
+    "Channeling…",
+    "Choreographing…",
+    "Churning…",
+    "Coalescing…",
+    "Composing…",
+    "Computing…",
+    "Concocting…",
+    "Considering…",
+    "Contemplating…",
+    "Cooking…",
+    "Crafting…",
+    "Creating…",
+    "Crunching…",
+    "Crystallizing…",
+    "Cultivating…",
+    "Deciphering…",
+    "Deliberating…",
+    "Determining…",
+    "Dilly-dallying…",
+    "Doing…",
+    "Doodling…",
+    "Drizzling…",
+    "Effecting…",
+    "Elucidating…",
+    "Embellishing…",
+    "Enchanting…",
+    "Envisioning…",
+    "Fermenting…",
+    "Fiddle-faddling…",
+    "Finagling…",
+    "Flambeing…",
+    "Flibbertigibbeting…",
+    "Flowing…",
+    "Fluttering…",
+    "Forging…",
+    "Forming…",
+    "Frolicking…",
+    "Gallivanting…",
+    "Garnishing…",
+    "Generating…",
+    "Germinating…",
+    "Gitifying…",
+    "Grooving…",
+    "Hatching…",
+    "Herding…",
+    "Honking…",
+    "Hullaballooing…",
+    "Hyperspacing…",
+    "Ideating…",
+    "Imagining…",
+    "Improvising…",
+    "Incubating…",
+    "Inferring…",
+    "Infusing…",
+    "Jitterbugging…",
+    "Kneading…",
+    "Leavening…",
+    "Levitating…",
+    "Lollygagging…",
+    "Manifesting…",
+    "Marinating…",
+    "Meandering…",
+    "Metamorphosing…",
+    "Moseying…",
+    "Mulling…",
+    "Musing…",
+    "Nesting…",
+    "Orbiting…",
+    "Percolating…",
+    "Perusing…",
+    "Philosophising…",
+    "Pondering…",
+    "Pontificating…",
+    "Pouncing…",
+    "Processing…",
+    "Proofing…",
+    "Puttering…",
+    "Puzzling…",
+    "Quantumizing…",
+    "Reticulating…",
+    "Roosting…",
+    "Ruminating…",
+    "Sauteing…",
+    "Scampering…",
+    "Schlepping…",
+    "Scurrying…",
+    "Seasoning…",
+    "Shenaniganing…",
+    "Shimmying…",
+    "Simmering…",
+    "Skedaddling…",
+    "Sketching…",
+    "Slithering…",
+    "Smooshing…",
+    "Sock-hopping…",
+    "Spelunking…",
+    "Spinning…",
+    "Sprouting…",
+    "Stewing…",
+    "Synthesizing…",
+    "Tempering…",
+    "Thundering…",
+    "Tinkering…",
+    "Tomfoolering…",
+    "Transfiguring…",
+    "Transmuting…",
+    "Unfurling…",
+    "Unravelling…",
+    "Warping…",
+    "Whatchamacalliting…",
+    "Whirring…",
+    "Whisking…",
+    "Wibbling…",
+    "Working…",
+    "Wrangling…",
+    "Zesting…",
+    "Zigzagging…",
+    "Phone-wrangling…",
+    "Tap-dancing…",
+    "Screen-sleuthing…",
+    "Guard-checking…",
+)
+
+private fun nextThinkingWordIndex(previous: Int): Int {
+    if (THINKING_WORDS.size < 2) return 0
+    var next: Int
+    do {
+        next = Random.nextInt(THINKING_WORDS.size)
+    } while (next == previous)
+    return next
+}
+
+private const val COMPANION_WAIT_CALLOUT_SECONDS = 15L
+private const val LONG_WAIT_SECONDS = 30L
 
 @Composable
 private fun MessageBubble(message: TimelineItem.Message) {
@@ -550,7 +1007,7 @@ private fun MessageBubble(message: TimelineItem.Message) {
             ) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Text(
-                        text = message.text,
+                        text = parseInlineMarkdown(message.text, colors),
                         color = colors.userBubbleText,
                         fontSize = 15.sp,
                         lineHeight = 21.sp,
@@ -563,13 +1020,116 @@ private fun MessageBubble(message: TimelineItem.Message) {
                     .fillMaxWidth()
                     .padding(end = 24.dp, top = 2.dp),
             ) {
-                Text(
-                    text = message.text,
-                    color = colors.textPrimary,
-                    fontSize = 15.sp,
-                    lineHeight = 22.sp,
+                MarkdownContent(
+                    markdown = message.text,
+                    baseTextStyle = TextStyle(
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp,
+                        color = colors.textPrimary,
+                    ),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun WorkedTraceSection(
+    durationSeconds: Long,
+    activities: List<TimelineItem.Activity>,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { onToggleExpand() }
+                .padding(vertical = 4.dp, horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = "Worked for ${durationSeconds}s",
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = colors.textSecondary,
+            )
+            Icon(
+                painter = painterResource(if (expanded) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
+                contentDescription = if (expanded) "Collapse trace" else "Expand trace",
+                tint = colors.textSecondary,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(tween(180)) + expandVertically(tween(220)),
+            exit = fadeOut(tween(140)) + shrinkVertically(tween(180)),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                activities.forEach { activity ->
+                    TraceStepRow(activity)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TraceStepRow(activity: TimelineItem.Activity) {
+    val colors = LocalAssistantColors.current
+
+    val statusColor = when (activity.status.lowercase()) {
+        "completed" -> colors.accentGreen
+        "failed" -> colors.errorRed
+        "attention" -> colors.warningAmber
+        else -> colors.textSecondary
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .padding(vertical = 3.dp, horizontal = 2.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_connected_nodes),
+                contentDescription = "Tool Call",
+                tint = statusColor,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = activityLabel(activity),
+                fontSize = 13.5.sp,
+                color = colors.textPrimary,
+                fontWeight = FontWeight.Normal,
+                modifier = Modifier.weight(1f),
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        activity.message.takeIf(String::isNotBlank)?.let {
+            Text(
+                text = "Detail: $it",
+                fontSize = 12.sp,
+                color = colors.textSecondary,
+                modifier = Modifier.padding(start = 28.dp, top = 4.dp),
+            )
         }
     }
 }
@@ -645,7 +1205,6 @@ private fun ActivityFeed(
 @Composable
 private fun ActionStepRow(activity: TimelineItem.Activity) {
     val colors = LocalAssistantColors.current
-    var detailsExpanded by rememberSaveable(activity.id) { mutableStateOf(false) }
     val statusColor = when (activity.status.lowercase()) {
         "completed" -> colors.accentGreen
         "failed" -> colors.errorRed
@@ -656,7 +1215,6 @@ private fun ActionStepRow(activity: TimelineItem.Activity) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { detailsExpanded = !detailsExpanded }
             .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
         Row(
@@ -676,43 +1234,9 @@ private fun ActionStepRow(activity: TimelineItem.Activity) {
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     color = colors.textPrimary,
-                    maxLines = if (detailsExpanded) 4 else 1,
+                    maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (!detailsExpanded) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(top = 2.dp),
-                    ) {
-                        Text(
-                            text = "$PHONE_ASSISTANT_EXECUTE_TOOL · ${activityStatusText(activity.status)}",
-                            color = statusColor,
-                            fontSize = 11.sp,
-                        )
-                        Text(
-                            text = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(activity.timestampEpochMs)),
-                            color = colors.textSecondary,
-                            fontSize = 11.sp,
-                        )
-                    }
-                }
-            }
-        }
-
-        if (detailsExpanded) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 25.dp, top = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                activity.targetDescription?.takeIf(String::isNotBlank)?.let {
-                    Text(
-                        text = "Target: $it",
-                        fontSize = 12.sp,
-                        color = colors.textSecondary,
-                    )
-                }
                 activity.message.takeIf(String::isNotBlank)?.let {
                     Text(
                         text = "Detail: $it",
@@ -720,11 +1244,21 @@ private fun ActionStepRow(activity: TimelineItem.Activity) {
                         color = colors.textSecondary,
                     )
                 }
-                Text(
-                    text = "Time: ${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(activity.timestampEpochMs))}",
-                    fontSize = 11.sp,
-                    color = colors.textSecondary.copy(alpha = 0.8f),
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 2.dp),
+                ) {
+                    Text(
+                        text = "$PHONE_ASSISTANT_EXECUTE_TOOL · ${activityStatusText(activity.status)}",
+                        color = statusColor,
+                        fontSize = 11.sp,
+                    )
+                    Text(
+                        text = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(activity.timestampEpochMs)),
+                        color = colors.textSecondary,
+                        fontSize = 11.sp,
+                    )
+                }
             }
         }
     }
