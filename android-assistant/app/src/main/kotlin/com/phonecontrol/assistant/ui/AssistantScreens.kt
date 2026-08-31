@@ -130,6 +130,7 @@ fun AssistantScreen(
     var showStartFreshConfirmation by rememberSaveable { mutableStateOf(false) }
     var steerDraft by rememberSaveable { mutableStateOf("") }
     var steerDraftSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var composerEditText by rememberSaveable { mutableStateOf<String?>(null) }
     val activeSessionId = state.sessionIdOrNullForUi()
     LaunchedEffect(activeSessionId) {
         // A draft belongs to the run in which it was composed. Do not carry an
@@ -138,6 +139,19 @@ fun AssistantScreen(
             steerDraft = ""
             steerDraftSessionId = activeSessionId
         }
+    }
+    LaunchedEffect(state) {
+        val completed = state as? SessionState.Completed ?: return@LaunchedEffect
+        val normalRequest = steerDraft.trim()
+        if (normalRequest.isBlank() || steerDraftSessionId != completed.sessionId) {
+            return@LaunchedEffect
+        }
+
+        // A draft that was not explicitly steered becomes the next ordinary
+        // request once the current run has reached a successful terminal state.
+        steerDraft = ""
+        steerDraftSessionId = null
+        onRunRequest(normalRequest, DHD_CONVERSATION_ID)
     }
     val recentCutoff = System.currentTimeMillis() - RECENT_HISTORY_WINDOW_MS
     val recentTimeline = timeline.filter { item ->
@@ -261,6 +275,10 @@ fun AssistantScreen(
                                 }
                             },
                             onDismiss = { steerDraft = "" },
+                            onEdit = {
+                                composerEditText = steerDraft
+                                steerDraft = ""
+                            },
                         )
                         Spacer(Modifier.height(6.dp))
                     }
@@ -268,12 +286,15 @@ fun AssistantScreen(
                         enabled = !active || canSteer,
                         isActive = active,
                         canSteer = canSteer,
+                        editText = composerEditText,
+                        onEditTextConsumed = { composerEditText = null },
                         onSend = { request ->
                             if (canSteer) {
                                 // Sending from the composer creates a draft;
                                 // the explicit Steer button above performs the
                                 // actual turn/steer request.
                                 steerDraft = request
+                                steerDraftSessionId = activeSessionId
                                 true
                             } else {
                                 onRunRequest(request, DHD_CONVERSATION_ID)
@@ -637,6 +658,7 @@ private fun SteerDraftBar(
     text: String,
     onSteer: () -> Boolean,
     onDismiss: () -> Unit,
+    onEdit: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
     Surface(
@@ -670,25 +692,32 @@ private fun SteerDraftBar(
                 color = colors.textSecondary,
                 fontSize = 12.sp,
                 modifier = Modifier
+                    .padding(start = 10.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .clickable { onSteer() }
-                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                    .padding(horizontal = 8.dp, vertical = 7.dp),
             )
+            Spacer(Modifier.width(6.dp))
             Icon(
                 painter = painterResource(R.drawable.ic_close),
                 contentDescription = "Discard steer draft",
                 tint = colors.textSecondary,
                 modifier = Modifier
-                    .size(20.dp)
+                    .size(32.dp)
                     .clip(CircleShape)
                     .clickable { onDismiss() }
-                    .padding(3.dp),
+                    .padding(8.dp),
             )
-            Text(
-                text = "⋯",
-                color = colors.textSecondary,
-                fontSize = 18.sp,
-                modifier = Modifier.padding(start = 5.dp),
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                painter = painterResource(R.drawable.ic_compose_new),
+                contentDescription = "Edit steer draft",
+                tint = colors.textSecondary,
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable { onEdit() }
+                    .padding(7.dp),
             )
         }
     }
@@ -901,6 +930,8 @@ private fun RequestComposer(
     enabled: Boolean,
     isActive: Boolean,
     canSteer: Boolean,
+    editText: String? = null,
+    onEditTextConsumed: () -> Unit = {},
     onSend: (String) -> Boolean,
     onStop: () -> Unit,
 ) {
@@ -916,6 +947,18 @@ private fun RequestComposer(
     }
     var isFocused by remember { mutableStateOf(false) }
     var isImeHiding by remember { mutableStateOf(false) }
+    val composerFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(editText) {
+        if (!editText.isNullOrBlank()) {
+            textFieldValue = TextFieldValue(
+                editText,
+                selection = TextRange(editText.length),
+            )
+            composerFocusRequester.requestFocus()
+            onEditTextConsumed()
+        }
+    }
 
     LaunchedEffect(density, imeInsets) {
         var previousImeBottom = imeInsets.getBottom(density)
@@ -978,6 +1021,7 @@ private fun RequestComposer(
                     modifier = Modifier
                         .weight(1f)
                         .padding(end = 12.dp)
+                        .focusRequester(composerFocusRequester)
                         .semantics {
                             contentDescription = "Ask DHD input"
                         }
