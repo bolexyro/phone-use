@@ -19,7 +19,7 @@ const MAX_AGENT_FEEDBACK_CHARS = 4_000;
 // DHD owns its App Server conversation settings. These defaults deliberately
 // do not depend on the user's interactive Codex chat or global config.
 const DEFAULT_CODEX_MODEL = "gpt-5.6-luna";
-const DEFAULT_CODEX_EFFORT = "low";
+const DEFAULT_CODEX_EFFORT = "max";
 type JsonRpcId = number | string;
 
 interface JsonRpcMessage {
@@ -817,7 +817,7 @@ function buildPhonePrompt(phoneRequest: string): string {
     "Begin with phone_control_list_allowed_apps if you need the allowlist, then phone_control_observe.",
     "Before actions, use phone_control_observe when you need visual context. After every action, inspect the returned screenshot before proposing the next action.",
     "Every action must include a concise, user-facing metadata.purpose and metadata.targetDescription. Never send shell commands or bypass a phone policy decision.",
-    "If the phone requires confirmation or asks for user attention, use phone_control_request_attention with a concise explanation, stop taking phone actions, and explain what the user must do.",
+    "If the phone asks for user attention because the screen or foreground app changed, use phone_control_request_attention with a concise explanation, stop taking phone actions, and explain what the user must do.",
     "Do not end the turn merely because you observed a screen, opened an app, reached a setup screen, or completed one action; those are progress states whenever the request has more work.",
     "For a request with a count, sequence, destination, or verification requirement, continue until every requirement is completed and freshly verified. A benchmark setup screen is not completion when benchmark rounds were requested.",
     "Before sending a final message, compare the current phone state against every requirement in the user request. If work remains, keep using the phone tools. If safe progress is blocked by a failed app state or user attention, call phone_control_request_attention with the exact blocker instead of claiming success.",

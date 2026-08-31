@@ -53,7 +53,6 @@ sealed interface SessionState {
 
 sealed interface ActionExecutionResult {
     data object SessionNotRunning : ActionExecutionResult
-    data class ConfirmationRequired(val category: String, val message: String) : ActionExecutionResult
     data class PolicyRejected(val message: String) : ActionExecutionResult
     data class TransportFinished(val result: TransportResult) : ActionExecutionResult
 }
@@ -325,11 +324,7 @@ class SessionCoordinator(
         true
     }
 
-    /**
-     * Policy and transport integration point for a future Codex bridge. A
-     * sensitive action stops at ConfirmationRequired; there is no model-side
-     * bypass flag and no implicit approval in this method.
-     */
+    /** Policy and transport integration point for the Codex bridge. */
     suspend fun executeAction(
         action: PhoneAction,
         observation: ObservationSnapshot?,
@@ -364,23 +359,6 @@ class SessionCoordinator(
         )
         when (decision) {
             PolicyDecision.Allowed -> Unit
-            is PolicyDecision.RequiresConfirmation -> {
-                appendEvent(
-                    ActivityEventKind.CONFIRMATION_REQUIRED,
-                    decision.message,
-                    sessionId = running.sessionId,
-                    actionType = action.type,
-                    purpose = displayPurpose,
-                    observationId = action.metadata.observationId,
-                    targetDescription = action.metadata.targetDescription,
-                )
-                setCurrentPurpose("Waiting for confirmation")
-                return ActionExecutionResult.ConfirmationRequired(
-                    category = decision.category.name,
-                    message = decision.message,
-                )
-            }
-
             is PolicyDecision.Denied -> {
                 appendEvent(
                     ActivityEventKind.ACTION_FAILED,

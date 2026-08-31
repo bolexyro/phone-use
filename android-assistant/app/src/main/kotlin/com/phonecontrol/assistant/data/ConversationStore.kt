@@ -23,6 +23,7 @@ import java.util.UUID
 
 const val DHD_CONVERSATION_ID = "dhd-assistant"
 const val DHD_THREAD_INACTIVITY_MS = 3 * 60 * 60 * 1000L
+const val PHONE_ASSISTANT_EXECUTE_TOOL = "phone_assistant_execute"
 
 /** Local, app-private conversation metadata. Codex remains the remote context source of truth. */
 @Entity(tableName = "conversations")
@@ -356,7 +357,11 @@ class ConversationStore(context: Context) {
                         sequence = dao.listActivities(runId).size.toLong(),
                         purpose = purpose,
                         targetDescription = event.targetDescription?.trim()?.take(MAX_PURPOSE_CHARS),
-                        toolName = null,
+                        // Action lifecycle events are emitted by the phone's
+                        // phone_assistant_execute MCP boundary. Keep the
+                        // protocol name so the UI can distinguish real tool
+                        // calls from system/agent activity.
+                        toolName = PHONE_ASSISTANT_EXECUTE_TOOL.takeIf { event.actionType != null },
                         actionType = actionName,
                         status = status,
                         message = message,
@@ -512,11 +517,10 @@ class ConversationStore(context: Context) {
             ActivityEventKind.ACTION_STARTED,
             ActivityEventKind.ACTION_SUCCEEDED,
             ActivityEventKind.ACTION_FAILED,
-            ActivityEventKind.CONFIRMATION_REQUIRED,
             ActivityEventKind.ATTENTION_REQUIRED,
             ActivityEventKind.SYSTEM,
         )
-        val ACTIVE_ACTIVITY_STATUSES = setOf("proposed", "running", "confirmation")
+        val ACTIVE_ACTIVITY_STATUSES = setOf("proposed", "running")
     }
 }
 
@@ -525,7 +529,6 @@ private fun ActivityEventKind.activityStatus(): String = when (this) {
     ActivityEventKind.ACTION_STARTED -> "running"
     ActivityEventKind.ACTION_SUCCEEDED -> "completed"
     ActivityEventKind.ACTION_FAILED -> "failed"
-    ActivityEventKind.CONFIRMATION_REQUIRED -> "confirmation"
     ActivityEventKind.ATTENTION_REQUIRED -> "attention"
     else -> "info"
 }

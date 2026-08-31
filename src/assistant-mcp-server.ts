@@ -277,7 +277,7 @@ export function createPhoneAssistantMcpServer(
   server.registerTool(
     "phone_assistant_start",
     {
-      description: "Start a phone-assistant session for a natural-language request. The phone remains the authority for app permissions, confirmations, and cancellation.",
+      description: "Start a phone-assistant session for a natural-language request. The phone remains the authority for app permissions, foreground checks, and cancellation.",
       inputSchema: { request: z.string().min(1).max(16_384) }
     },
     async (input) => invokePhoneAssistantTool("phone_assistant_start", input)

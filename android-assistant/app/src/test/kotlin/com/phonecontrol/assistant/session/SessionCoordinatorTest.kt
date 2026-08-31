@@ -39,7 +39,7 @@ class SessionCoordinatorTest {
     }
 
     @Test
-    fun `sensitive action stops at confirmation`() = runTest {
+    fun `executes action and updates timeline`() = runTest {
         val coordinator = coordinator()
         coordinator.start("Buy dinner")
 
@@ -56,8 +56,8 @@ class SessionCoordinatorTest {
             observation,
         )
 
-        assertTrue(result is ActionExecutionResult.ConfirmationRequired)
-        assertTrue(coordinator.events.value.any { it.kind.name == "CONFIRMATION_REQUIRED" })
+        assertTrue(result is ActionExecutionResult.TransportFinished)
+        assertTrue(coordinator.events.value.any { it.kind == com.phonecontrol.assistant.domain.ActivityEventKind.ACTION_SUCCEEDED })
     }
 
     @Test

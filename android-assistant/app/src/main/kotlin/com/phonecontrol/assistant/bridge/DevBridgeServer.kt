@@ -505,9 +505,6 @@ class DevBridgeServer(
                 .put("action", wireActionName(action))
                 .put("message", result.failureMessage())
             result.failureCode()?.let { response.put("code", it) }
-            if (result is ActionExecutionResult.ConfirmationRequired) {
-                response.put("category", result.category)
-            }
             write(writer, response)
             return
         }
@@ -825,9 +822,6 @@ class DevBridgeServer(
                 }
             }
 
-            is ActionExecutionResult.ConfirmationRequired -> response
-                .put("code", "CONFIRMATION_REQUIRED")
-                .put("message", result.message)
             is ActionExecutionResult.PolicyRejected -> response
                 .put("code", "POLICY_REJECTED")
                 .put("message", result.message)
@@ -931,7 +925,6 @@ private fun ActionExecutionResult.failureMessage(): String = when (this) {
         is TransportResult.Unsupported -> result.message
         is TransportResult.Succeeded -> result.message
     }
-    is ActionExecutionResult.ConfirmationRequired -> message
     is ActionExecutionResult.PolicyRejected -> message
     ActionExecutionResult.SessionNotRunning -> "The phone session is no longer running."
 }
@@ -942,7 +935,6 @@ private fun ActionExecutionResult.successMessage(): String = when (this) {
         is TransportResult.Rejected -> result.message
         is TransportResult.Unsupported -> result.message
     }
-    is ActionExecutionResult.ConfirmationRequired -> message
     is ActionExecutionResult.PolicyRejected -> message
     ActionExecutionResult.SessionNotRunning -> "The phone session is no longer running."
 }
@@ -953,7 +945,6 @@ private fun ActionExecutionResult.failureCode(): String? = when (this) {
         is TransportResult.Unsupported -> "UNSUPPORTED_ACTION"
         is TransportResult.Succeeded -> null
     }
-    is ActionExecutionResult.ConfirmationRequired -> "CONFIRMATION_REQUIRED"
     is ActionExecutionResult.PolicyRejected -> "POLICY_REJECTED"
     ActionExecutionResult.SessionNotRunning -> "SESSION_NOT_RUNNING"
 }

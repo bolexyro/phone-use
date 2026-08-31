@@ -1,9 +1,11 @@
 <resources>
-    <style name="Theme.PhoneControlAssistant" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#10A37F</item>
-        <item name="android:navigationBarColor">#F7F7F8</item>
-        <item name="android:statusBarColor">#F7F7F8</item>
-        <item name="android:windowLightStatusBar">true</item>
+    <style name="Theme.PhoneControlAssistant" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:colorAccent">#3B82F6</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowBackground">#000000</item>
     </style>
 </resources>

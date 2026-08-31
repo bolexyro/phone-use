@@ -5,14 +5,11 @@ import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.OpenAppAction
 import com.phonecontrol.assistant.domain.TapAction
-import com.phonecontrol.assistant.domain.TypeAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PolicyEngineTest {
-    // Keep coverage for the deferred guard layer while the app runtime uses
-    // the relaxed prototype configuration.
     private val engine = PolicyEngine(enforceObservationFreshness = true)
     private val relaxedEngine = PolicyEngine()
     private val observation = ObservationSnapshot(
@@ -60,37 +57,6 @@ class PolicyEngineTest {
 
         assertTrue(decision is PolicyDecision.Denied)
         assertEquals(DenialCode.STALE_OBSERVATION, (decision as PolicyDecision.Denied).code)
-    }
-
-    @Test
-    fun `requires confirmation for purchase intent`() {
-        val decision = engine.evaluate(
-            TypeAction(
-                text = "2",
-                metadata = metadata("Set quantity before checkout"),
-            ),
-            context(),
-        )
-
-        assertTrue(decision is PolicyDecision.RequiresConfirmation)
-        assertEquals(
-            SensitiveActionCategory.PURCHASE,
-            (decision as PolicyDecision.RequiresConfirmation).category,
-        )
-    }
-
-    @Test
-    fun `phone detected sensitive category cannot be cleared by neutral metadata`() {
-        val decision = engine.evaluate(
-            TapAction(500, 900, metadata("Continue")),
-            context(phoneDetectedSensitiveCategory = SensitiveActionCategory.TRANSFER),
-        )
-
-        assertTrue(decision is PolicyDecision.RequiresConfirmation)
-        assertEquals(
-            SensitiveActionCategory.TRANSFER,
-            (decision as PolicyDecision.RequiresConfirmation).category,
-        )
     }
 
     @Test
@@ -142,11 +108,9 @@ class PolicyEngineTest {
     private fun context(
         enabledPackages: Set<String> = setOf("com.example.shop"),
         foregroundPackage: String? = "com.example.shop",
-        phoneDetectedSensitiveCategory: SensitiveActionCategory? = null,
     ) = PolicyContext(
         enabledPackages = enabledPackages,
         foregroundPackage = foregroundPackage,
         currentObservationId = observation.id,
-        phoneDetectedSensitiveCategory = phoneDetectedSensitiveCategory,
     )
 }
