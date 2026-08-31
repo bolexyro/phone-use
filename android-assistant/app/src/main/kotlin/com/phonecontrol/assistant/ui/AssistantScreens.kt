@@ -128,6 +128,17 @@ fun AssistantScreen(
     val active = state.isActive()
     val canSteer = state is SessionState.Running
     var showStartFreshConfirmation by rememberSaveable { mutableStateOf(false) }
+    var steerDraft by rememberSaveable { mutableStateOf("") }
+    var steerDraftSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    val activeSessionId = state.sessionIdOrNullForUi()
+    LaunchedEffect(activeSessionId) {
+        // A draft belongs to the run in which it was composed. Do not carry an
+        // unsent steer into a newly started task or a rotated session.
+        if (steerDraftSessionId != activeSessionId) {
+            steerDraft = ""
+            steerDraftSessionId = activeSessionId
+        }
+    }
     val recentCutoff = System.currentTimeMillis() - RECENT_HISTORY_WINDOW_MS
     val recentTimeline = timeline.filter { item ->
         item.timestampEpochMs >= recentCutoff ||
@@ -234,19 +245,44 @@ fun AssistantScreen(
                     .imePadding()
                     .padding(bottom = 14.dp),
             ) {
-                RequestComposer(
-                    enabled = !active || canSteer,
-                    isActive = active,
-                    canSteer = canSteer,
-                    onSend = { request ->
-                        if (canSteer) onSteerRequest(request)
-                        else {
-                            onRunRequest(request, DHD_CONVERSATION_ID)
-                            true
-                        }
-                    },
-                    onStop = onStopSession,
-                )
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    if (canSteer && steerDraft.isNotBlank()) {
+                        SteerDraftBar(
+                            text = steerDraft,
+                            onSteer = {
+                                if (onSteerRequest(steerDraft)) {
+                                    steerDraft = ""
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                            onDismiss = { steerDraft = "" },
+                        )
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    RequestComposer(
+                        enabled = !active || canSteer,
+                        isActive = active,
+                        canSteer = canSteer,
+                        onSend = { request ->
+                            if (canSteer) {
+                                // Sending from the composer creates a draft;
+                                // the explicit Steer button above performs the
+                                // actual turn/steer request.
+                                steerDraft = request
+                                true
+                            } else {
+                                onRunRequest(request, DHD_CONVERSATION_ID)
+                                true
+                            }
+                        },
+                        onStop = onStopSession,
+                    )
+                }
             }
         }
     }
@@ -597,6 +633,68 @@ private fun MessageBubble(message: TimelineItem.Message) {
 }
 
 @Composable
+private fun SteerDraftBar(
+    text: String,
+    onSteer: () -> Boolean,
+    onDismiss: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    Surface(
+        color = colors.surfaceCard,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, colors.borderColor),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 28.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "↪",
+                color = colors.textSecondary,
+                fontSize = 18.sp,
+                modifier = Modifier.padding(end = 8.dp),
+            )
+            Text(
+                text = text,
+                color = colors.textPrimary,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "↪ Steer",
+                color = colors.textSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onSteer() }
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+            )
+            Icon(
+                painter = painterResource(R.drawable.ic_close),
+                contentDescription = "Discard steer draft",
+                tint = colors.textSecondary,
+                modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .clickable { onDismiss() }
+                    .padding(3.dp),
+            )
+            Text(
+                text = "⋯",
+                color = colors.textSecondary,
+                fontSize = 18.sp,
+                modifier = Modifier.padding(start = 5.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun SteerMessageBubble(message: TimelineItem.Message) {
     val colors = LocalAssistantColors.current
     Row(
@@ -906,7 +1004,7 @@ private fun RequestComposer(
                         if (textFieldValue.text.isEmpty()) {
                             Text(
                                 text = when {
-                                    canSteer -> "Steer DHD"
+                                    canSteer -> "Do anything"
                                     enabled -> "Ask DHD"
                                     else -> "DHD is working…"
                                 },
