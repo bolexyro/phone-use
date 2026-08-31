@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -104,6 +105,7 @@ import androidx.compose.ui.unit.sp
 import com.phonecontrol.assistant.R
 import com.phonecontrol.assistant.apps.AppPermissionRepository
 import com.phonecontrol.assistant.apps.InstalledUserApp
+import com.phonecontrol.assistant.bridge.DevBridgeServer
 import com.phonecontrol.assistant.data.ConversationStore
 import com.phonecontrol.assistant.data.DHD_CONVERSATION_ID
 import com.phonecontrol.assistant.data.TimelineItem
@@ -1635,6 +1637,7 @@ fun SettingsScreen(
     apps: List<InstalledUserApp>,
     permissions: AppPermissionRepository,
     shizukuStatus: ShizukuStatus,
+    bridgeServer: DevBridgeServer,
     isDarkMode: Boolean,
     onToggleDarkMode: (Boolean) -> Unit,
     onRequestShizukuPermission: () -> Unit,
@@ -1643,6 +1646,7 @@ fun SettingsScreen(
 ) {
     val colors = LocalAssistantColors.current
     val enabledCount = remember(permissions.enabledPackages()) { permissions.enabledPackages().size }
+    var lanAddresses by remember { mutableStateOf(bridgeServer.lanIpv4Addresses()) }
 
     Scaffold(
         containerColor = colors.background,
@@ -1778,6 +1782,114 @@ fun SettingsScreen(
                                 tint = colors.textSecondary,
                                 modifier = Modifier.size(18.dp),
                             )
+                        }
+                    }
+                }
+            }
+
+            // Desktop companion connection
+            item {
+                SettingsSectionHeader("Companion connection")
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = colors.surfaceCard,
+                    border = BorderStroke(1.dp, colors.borderColor),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_laptop),
+                                contentDescription = "Desktop companion",
+                                tint = colors.accentBlue,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 14.dp),
+                            ) {
+                                Text(
+                                    text = "Wireless bridge",
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.textPrimary,
+                                    fontSize = 15.sp,
+                                )
+                                Text(
+                                    text = if (lanAddresses.isEmpty()) {
+                                        "Join the phone and companion to the same Wi-Fi"
+                                    } else {
+                                        "Ready for a paired companion on Wi-Fi"
+                                    },
+                                    fontSize = 12.sp,
+                                    color = colors.textSecondary,
+                                )
+                            }
+                            Surface(
+                                shape = CircleShape,
+                                color = if (lanAddresses.isEmpty()) {
+                                    colors.warningAmber.copy(alpha = 0.2f)
+                                } else {
+                                    colors.accentGreen.copy(alpha = 0.2f)
+                                },
+                            ) {
+                                Text(
+                                    text = if (lanAddresses.isEmpty()) "Offline" else "Ready",
+                                    color = if (lanAddresses.isEmpty()) colors.warningAmber else colors.accentGreen,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Phone address",
+                            fontSize = 12.sp,
+                            color = colors.textSecondary,
+                        )
+                        SelectionContainer {
+                            Text(
+                                text = if (lanAddresses.isEmpty()) {
+                                    "No Wi-Fi IPv4 address found"
+                                } else {
+                                    lanAddresses.joinToString("\n") { address -> "$address:${bridgeServer.listeningPort}" }
+                                },
+                                fontSize = 13.sp,
+                                color = colors.textPrimary,
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Pairing token",
+                            fontSize = 12.sp,
+                            color = colors.textSecondary,
+                        )
+                        SelectionContainer {
+                            Text(
+                                text = bridgeServer.authenticationToken,
+                                fontSize = 13.sp,
+                                color = colors.textPrimary,
+                            )
+                        }
+                        Text(
+                            text = "On the companion laptop, set PHONE_ASSISTANT_BRIDGE_HOST to the phone address and PHONE_ASSISTANT_BRIDGE_TOKEN to this token before starting pnpm assistant:companion.",
+                            fontSize = 12.sp,
+                            color = colors.textSecondary,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            TextButton(onClick = { lanAddresses = bridgeServer.lanIpv4Addresses() }) {
+                                Text("Refresh address", color = colors.accentBlue)
+                            }
                         }
                     }
                 }

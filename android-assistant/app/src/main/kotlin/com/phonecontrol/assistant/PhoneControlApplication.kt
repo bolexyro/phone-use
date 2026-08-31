@@ -48,9 +48,9 @@ class PhoneControlApplication : Application() {
             ),
             conversationStore = conversationStore,
         )
-        // The bridge is localhost-only and intended for adb-forwarded
-        // development sessions. It is deliberately not a production network
-        // endpoint or an MCP server by itself.
+        // The bridge accepts paired LAN connections for the development
+        // companion. adb forwarding remains compatible because forwarded
+        // clients arrive as loopback and bypass the LAN token check.
         devBridgeServer = DevBridgeServer(
             context = this,
             coordinator = sessionCoordinator,

@@ -39,8 +39,8 @@ notifications, request handoff, and observation/action execution.
   the first assistant prototype is tuned.
 
 Run now creates a phone-owned request that the desktop Codex companion can
-claim. A localhost-only development bridge carries that handoff and the typed
-execution path: the companion starts a Codex App Server turn, while the
+claim. An authenticated LAN development bridge carries that handoff and the
+typed execution path: the companion starts a Codex App Server turn, while the
 configured MCP adapter sends allowlist, observation, and action requests back
 to this app over NDJSON. The legacy `demo_run` request remains available for
 the open -> observe -> tap smoke test.
@@ -94,9 +94,18 @@ transport changes.
 
 ## Dummy desktop bridge (open -> observe -> tap)
 
-The Android app starts a loopback-only NDJSON listener on port `8765` while its
-process is alive. Keep the app open, connect it to the development machine,
-and forward that port:
+The Android app starts an authenticated NDJSON listener on port `8765` while
+its process is alive. For the wireless path, keep the phone and development
+machine on the same Wi-Fi, open DHD Settings → Companion connection, and copy
+the displayed phone address and pairing token into the companion environment:
+
+```powershell
+$env:PHONE_ASSISTANT_BRIDGE_HOST = "192.168.1.42"
+$env:PHONE_ASSISTANT_BRIDGE_TOKEN = "copy-the-token-from-dhd-settings"
+pnpm assistant:companion
+```
+
+`adb forward` remains a loopback fallback for local development:
 
 ```powershell
 adb forward tcp:8765 tcp:8765
@@ -110,8 +119,9 @@ the app's Approved apps settings):
 pnpm bridge:demo -- --package com.phonecontrol.coordinatebenchmark --x 500 --y 900
 ```
 
-Optional flags are `--host`, `--port`, `--purpose`, and `--target`. The phone
-is still the authority: it checks Shizuku state, the per-app allowlist,
+Optional flags are `--host`, `--port`, `--token`, `--purpose`, and `--target`.
+For wireless use, prefer `PHONE_ASSISTANT_BRIDGE_TOKEN` so the token is not
+stored in shell history. The phone is still the authority: it checks Shizuku state, the per-app allowlist,
 foreground binding, and coordinate bounds
 before it sends `input tap`. Use the Coordinate Benchmark app for repeatable
 tests; it is the only package enabled in the current physical smoke setup.

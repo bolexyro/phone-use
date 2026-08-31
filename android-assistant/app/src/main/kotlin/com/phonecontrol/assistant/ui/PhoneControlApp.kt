@@ -208,6 +208,7 @@ fun PhoneControlApp(
                             apps = apps,
                             permissions = permissions,
                             shizukuStatus = shizukuStatus,
+                            bridgeServer = application.devBridgeServer,
                             isDarkMode = isDarkMode,
                             onToggleDarkMode = setDarkMode,
                             onRequestShizukuPermission = { shizukuController.requestPermission() },

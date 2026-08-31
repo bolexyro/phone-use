@@ -16,7 +16,7 @@ fails, so a temporary disconnect does not silently lose the user's request.
 ```text
 Android app (typed request)
         |
-        | adb forward / localhost NDJSON
+        | Wi-Fi TCP/NDJSON + pairing token
         v
 pnpm assistant:companion
         |
@@ -28,7 +28,7 @@ Codex App Server (one persistent process; ChatGPT/Codex login)
         v
 phone-tool dispatcher (shared with assistant:mcp)
         |
-        | adb forward tcp:8765 tcp:8765
+        | same authenticated phone link
         v
 Phone Control Assistant (NDJSON bridge)
         |
@@ -48,15 +48,33 @@ args = ["assistant:mcp"]
 cwd = "C:/Users/USER/Documents/ChatGPT/Project Phone Control"
 
 [mcp_servers.dhd.env]
-PHONE_ASSISTANT_BRIDGE_HOST = "127.0.0.1"
+PHONE_ASSISTANT_BRIDGE_HOST = "192.168.1.42"
 PHONE_ASSISTANT_BRIDGE_PORT = "8765"
+PHONE_ASSISTANT_BRIDGE_TOKEN = "copy-the-token-from-dhd-settings"
 ```
 
 If `pnpm.cmd` is not at that location, use the absolute path returned by
 `Get-Command pnpm`. Keeping the command and working directory explicit avoids
 depending on the PATH inherited by the Codex process.
 
-Start the phone-side app and forward its loopback port:
+For the wireless path, open DHD Settings → Companion connection and copy one
+of the shown phone addresses and the pairing token. Put them in the companion
+shell before starting it. The phone and laptop must be on the same reachable
+Wi-Fi network:
+
+```powershell
+$env:PHONE_ASSISTANT_BRIDGE_HOST = "192.168.1.42"
+$env:PHONE_ASSISTANT_BRIDGE_PORT = "8765"
+$env:PHONE_ASSISTANT_BRIDGE_TOKEN = "copy-the-token-from-dhd-settings"
+pnpm assistant:companion
+```
+
+The token is required for non-loopback connections. It is a bearer token for
+this development bridge, so use it only on a trusted local network and do not
+forward port `8765` from the router to the internet.
+
+If a local USB/ADB fallback is useful, start the phone-side app and forward
+its loopback port instead:
 
 ```powershell
 adb forward tcp:8765 tcp:8765
@@ -271,11 +289,13 @@ pnpm assistant:mcp
 ```
 
 The process communicates on stdio; its phone connection is opened only when a
-tool is called. Do not expose port `8765` directly on the LAN.
+tool is called. For wireless use, set the same host/token environment variables
+shown above. The bridge is intended for a trusted local network and is not a
+TLS or internet-facing production protocol.
 
 For a deterministic bridge-only check, the older development stub remains
 available:
 
 ```powershell
-pnpm bridge:demo -- --package com.phonecontrol.coordinatebenchmark --x 500 --y 900
+pnpm bridge:demo -- --host 192.168.1.42 --token copy-the-token-from-dhd-settings --package com.phonecontrol.coordinatebenchmark --x 500 --y 900
 ```

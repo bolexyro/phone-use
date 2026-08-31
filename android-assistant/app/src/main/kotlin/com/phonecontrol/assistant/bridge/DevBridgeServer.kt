@@ -29,9 +29,12 @@ import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
@@ -48,12 +51,14 @@ import org.json.JSONException
 import org.json.JSONObject
 
 /**
- * Localhost-only NDJSON bridge used by the development desktop companion.
+ * Authenticated LAN NDJSON bridge used by the development desktop companion.
  *
- * The desktop reaches this socket through `adb forward`, so no phone port is
- * exposed on the LAN. It accepts the typed development requests used by the
- * local Codex MCP adapter and runs the phone-owned policy/observation/
- * transport path. This is not a production network protocol.
+ * The desktop may still reach this socket through `adb forward` for local
+ * development, but the normal path is a same-Wi-Fi connection to the phone's
+ * LAN address. It accepts the typed development requests used by the local
+ * Codex MCP adapter and runs the phone-owned policy/observation/transport
+ * path. The bearer token is a development pairing boundary, not a substitute
+ * for TLS or a production network protocol.
  */
 class DevBridgeServer(
     private val context: Context,
@@ -62,6 +67,14 @@ class DevBridgeServer(
     private val allowedPackagesProvider: () -> Set<String>,
     private val port: Int = DEFAULT_PORT,
 ) {
+    private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+    val authenticationToken: String = preferences.getString(KEY_AUTH_TOKEN, null)
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: UUID.randomUUID().toString().replace("-", "").also { token ->
+            preferences.edit().putString(KEY_AUTH_TOKEN, token).apply()
+        }
+    val listeningPort: Int = port
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var started = false
@@ -81,7 +94,7 @@ class DevBridgeServer(
                 val socket = ServerSocket(
                     port,
                     1,
-                    InetAddress.getByName(LOOPBACK_HOST),
+                    InetAddress.getByName(LAN_BIND_HOST),
                 )
                 serverSocket = socket
                 while (isActive) {
@@ -135,6 +148,15 @@ class DevBridgeServer(
                 return
             }
             val requestId = json.optString("requestId").ifBlank { UUID.randomUUID().toString() }
+
+            if (!isAuthorized(socket, json)) {
+                write(
+                    writer,
+                    errorResponse(requestId, "The phone bridge rejected this network connection. Pair the desktop companion in DHD settings.")
+                        .put("code", "AUTH_REQUIRED"),
+                )
+                return
+            }
 
             write(
                 writer,
@@ -477,9 +499,9 @@ class DevBridgeServer(
     ) {
         val sessionId = json.optString("sessionId").trim()
         require(sessionId.isNotEmpty()) { "sessionId is required." }
-        val message = json.optString("message", "Codex completed the phone request.")
+        val message = json.optString("message", "Your DHD task is ready to review.")
             .trim()
-            .ifBlank { "Codex completed the phone request." }
+            .ifBlank { "Your DHD task is ready to review." }
             .take(MAX_TEXT_CHARS)
         val feedback = json.optString("feedback")
             .trim()
@@ -1001,6 +1023,33 @@ class DevBridgeServer(
         writer.flush()
     }
 
+    private fun isAuthorized(socket: Socket, json: JSONObject): Boolean {
+        // adb forward presents the desktop peer as loopback. Keep this local
+        // development path compatible without requiring a token, while every
+        // actual LAN peer must prove possession of the paired token.
+        if (socket.inetAddress.isLoopbackAddress) return true
+        val candidate = json.optString("authToken").trim().toByteArray(Charsets.UTF_8)
+        val expected = authenticationToken.toByteArray(Charsets.UTF_8)
+        return MessageDigest.isEqual(candidate, expected)
+    }
+
+    /** Return currently usable IPv4 addresses that the desktop can dial. */
+    fun lanIpv4Addresses(): List<String> = runCatching {
+        NetworkInterface.getNetworkInterfaces()
+            ?.asSequence()
+            ?.filter { networkInterface ->
+                networkInterface.isUp && !networkInterface.isLoopback && !networkInterface.isVirtual
+            }
+            ?.flatMap { networkInterface -> networkInterface.inetAddresses.asSequence() }
+            ?.filterIsInstance<Inet4Address>()
+            ?.filter { address -> !address.isLoopbackAddress && !address.isLinkLocalAddress }
+            ?.mapNotNull(Inet4Address::getHostAddress)
+            ?.distinct()
+            ?.sorted()
+            ?.toList()
+            ?: emptyList()
+    }.getOrDefault(emptyList())
+
     private data class DemoRequest(
         val requestId: String,
         val packageName: String,
@@ -1013,8 +1062,10 @@ class DevBridgeServer(
 
     private companion object {
         const val TAG = "PhoneControlBridge"
-        const val LOOPBACK_HOST = "127.0.0.1"
+        const val LAN_BIND_HOST = "0.0.0.0"
         const val DEFAULT_PORT = 8765
+        const val PREFERENCES_NAME = "dhd_companion_link"
+        const val KEY_AUTH_TOKEN = "bridge_auth_token"
         const val MAX_REQUEST_CHARS = 16_384
         const val MAX_TEXT_CHARS = 240
         const val MAX_AGENT_FEEDBACK_CHARS = 4_000

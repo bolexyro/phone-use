@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 interface DemoOptions {
   host: string;
   port: number;
+  token?: string;
   packageName: string;
   x: number;
   y: number;
@@ -26,6 +27,7 @@ export async function runDesktopCodexBridgeDemo(
   const request = {
     type: "demo_run",
     requestId,
+    ...(options.token ? { authToken: options.token } : {}),
     packageName: options.packageName,
     x: options.x,
     y: options.y,
@@ -114,6 +116,7 @@ function parseOptions(argv: readonly string[]): DemoOptions {
 
   const host = values.get("host") ?? "127.0.0.1";
   const port = parseInteger(values.get("port") ?? "8765", "port");
+  const token = values.get("token")?.trim() || process.env.PHONE_ASSISTANT_BRIDGE_TOKEN?.trim() || undefined;
   const packageName = values.get("package") ?? "com.phonecontrol.coordinatebenchmark";
   if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName)) {
     throw new Error(`Invalid Android package name: ${packageName}.`);
@@ -127,7 +130,7 @@ function parseOptions(argv: readonly string[]): DemoOptions {
   if (!targetDescription.trim() || targetDescription.length > 240) {
     throw new Error("--target must be 1-240 characters.");
   }
-  return { host, port, packageName, x, y, purpose, targetDescription };
+  return { host, port, token, packageName, x, y, purpose, targetDescription };
 }
 
 function parseInteger(value: string, name: string): number {

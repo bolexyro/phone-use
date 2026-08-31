@@ -23,6 +23,7 @@ export interface BridgeRequestOptions {
 
 export const bridgeHost = process.env.PHONE_ASSISTANT_BRIDGE_HOST?.trim() || DEFAULT_BRIDGE_HOST;
 export const bridgePort = parsePort(process.env.PHONE_ASSISTANT_BRIDGE_PORT ?? `${DEFAULT_BRIDGE_PORT}`);
+export const bridgeToken = process.env.PHONE_ASSISTANT_BRIDGE_TOKEN?.trim() || undefined;
 
 const TERMINAL_MESSAGE_TYPES = new Set([
   "error",
@@ -54,11 +55,36 @@ export function parsePort(value: string): number {
   return port;
 }
 
+export function isLoopbackBridgeHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
+}
+
+export function buildBridgePayload(
+  request: BridgeRequest,
+  token: string | undefined = bridgeToken,
+): BridgeRequest {
+  const safeToken = token?.trim();
+  return safeToken ? { ...request, authToken: safeToken } : { ...request };
+}
+
+export function bridgeConfigurationError(
+  host: string = bridgeHost,
+  token: string | undefined = bridgeToken,
+): string | null {
+  if (!isLoopbackBridgeHost(host) && !token?.trim()) {
+    return "PHONE_ASSISTANT_BRIDGE_TOKEN is required when PHONE_ASSISTANT_BRIDGE_HOST is not loopback.";
+  }
+  return null;
+}
+
 /** Send one request to the phone-local NDJSON bridge and await its terminal line. */
 export function requestBridge(
   request: BridgeRequest,
   options: BridgeRequestOptions = {}
 ): Promise<BridgeMessage> {
+  const configurationError = bridgeConfigurationError();
+  if (configurationError) return Promise.reject(new Error(configurationError));
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: bridgeHost, port: bridgePort });
     let buffer = "";
@@ -83,7 +109,7 @@ export function requestBridge(
       if (!settled) finish(new Error("The phone assistant bridge closed before completing the request."));
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify(request)}\n`);
+      socket.write(`${JSON.stringify(buildBridgePayload(request))}\n`);
     });
     socket.on("data", (chunk: Buffer) => {
       responseBytes += chunk.byteLength;

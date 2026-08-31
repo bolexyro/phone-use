@@ -10,7 +10,13 @@ import {
   invokeDhdTool,
   type PhoneAssistantToolResult
 } from "./assistant-mcp-server.js";
-import { requestBridge, type BridgeMessage } from "./phone-assistant-bridge.js";
+import {
+  bridgeHost,
+  bridgePort,
+  isLoopbackBridgeHost,
+  requestBridge,
+  type BridgeMessage
+} from "./phone-assistant-bridge.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const BRIDGE_POLL_TIMEOUT_MS = 5_000;
@@ -989,7 +995,13 @@ export async function runAssistantCompanion(): Promise<void> {
   process.once("SIGTERM", stop);
 
   console.error("[phone-assistant-companion] waiting for a request typed in the Android app");
-  console.error("[phone-assistant-companion] ensure adb forward tcp:8765 tcp:8765 and a logged-in Codex CLI are available");
+  console.error(`[phone-assistant-companion] phone bridge target ${bridgeHost}:${bridgePort}`);
+  if (isLoopbackBridgeHost(bridgeHost)) {
+    console.error("[phone-assistant-companion] loopback mode: adb forward tcp:8765 tcp:8765 is still supported");
+  } else {
+    console.error("[phone-assistant-companion] wireless mode: phone and laptop must share Wi-Fi and PHONE_ASSISTANT_BRIDGE_TOKEN must match DHD settings");
+  }
+  console.error("[phone-assistant-companion] a logged-in Codex CLI must be available on this companion host");
 
   try {
     await prewarmCodexClient(codexClient, "codex-prewarm");

@@ -53,8 +53,11 @@ authority. The companion registers direct `dhd_*` tools with each Codex App
 Server turn (and the reusable DHD MCP adapter remains available for manual MCP
 clients); setup and the typed action contract are in
 [`docs/codex-app-server-phone-assistant.md`](docs/codex-app-server-phone-assistant.md).
-Run `pnpm assistant:companion` after forwarding port `8765` to let requests
-typed in the phone app start Codex turns automatically.
+Run `pnpm assistant:companion` to let requests typed in the phone app start
+Codex turns automatically. The normal development path is now wireless: DHD
+shows its Wi-Fi address and pairing token in Settings, and the companion dials
+the phone over the local network. `adb forward` remains available as a
+loopback-only fallback.
 
 ### DHD Codex home and authentication
 
