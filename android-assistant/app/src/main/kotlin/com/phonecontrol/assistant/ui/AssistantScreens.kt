@@ -503,21 +503,27 @@ private fun TaskGroupCard(
             }
         }
 
-        // Completed "Worked for Xs >" Collapsible Header & Trace
+        // While active: show in-flight tool steps directly under thinking indicator (clean, no boxed container)
+        if (active && group.activities.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                group.activities.forEach { activity ->
+                    TraceStepRow(activity)
+                }
+            }
+        }
+
+        // When completed (!active): everything collapses under "Worked for Xs >"
         if (!active && (group.assistantMessages.isNotEmpty() || group.activities.isNotEmpty())) {
             WorkedTraceSection(
                 durationSeconds = durationSeconds,
                 activities = group.activities,
                 expanded = traceExpanded,
                 onToggleExpand = { traceExpanded = !traceExpanded },
-            )
-        }
-
-        // Action activities feed in-flight
-        if (active && group.activities.isNotEmpty()) {
-            ActivityFeed(
-                activities = group.activities,
-                active = true,
             )
         }
 
@@ -1141,135 +1147,7 @@ private fun TraceStepRow(activity: TimelineItem.Activity) {
     }
 }
 
-@Composable
-private fun ActivityFeed(
-    activities: List<TimelineItem.Activity>,
-    active: Boolean,
-) {
-    val colors = LocalAssistantColors.current
-    var expanded by rememberSaveable { mutableStateOf(true) }
 
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = colors.surfaceCard,
-        border = BorderStroke(1.dp, colors.borderColor),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
-                    .clickable { expanded = !expanded }
-                    .padding(horizontal = 14.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_connected_nodes),
-                    contentDescription = PHONE_ASSISTANT_EXECUTE_TOOL,
-                    tint = if (active) colors.accentBlue else colors.textSecondary,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "$PHONE_ASSISTANT_EXECUTE_TOOL · ${activities.size}",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = colors.textPrimary,
-                    modifier = Modifier.weight(1f),
-                )
-                Icon(
-                    painter = painterResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
-                    contentDescription = "Toggle action steps",
-                    tint = colors.textSecondary,
-                    modifier = Modifier.size(15.dp),
-                )
-            }
-
-            AnimatedVisibility(
-                visible = expanded,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically(),
-            ) {
-                Column {
-                    HorizontalDivider(color = colors.borderColor)
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp),
-                        contentPadding = PaddingValues(vertical = 4.dp),
-                    ) {
-                        items(activities, key = { it.id }) { activity ->
-                            ActionStepRow(activity)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ActionStepRow(activity: TimelineItem.Activity) {
-    val colors = LocalAssistantColors.current
-    val statusColor = when (activity.status.lowercase()) {
-        "completed" -> colors.accentGreen
-        "failed" -> colors.errorRed
-        "attention" -> colors.warningAmber
-        else -> colors.accentBlue
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_connected_nodes),
-                contentDescription = PHONE_ASSISTANT_EXECUTE_TOOL,
-                tint = statusColor,
-                modifier = Modifier.size(18.dp),
-            )
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = activityLabel(activity),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = colors.textPrimary,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                activity.message.takeIf(String::isNotBlank)?.let {
-                    Text(
-                        text = "Detail: $it",
-                        fontSize = 12.sp,
-                        color = colors.textSecondary,
-                    )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(top = 2.dp),
-                ) {
-                    Text(
-                        text = "$PHONE_ASSISTANT_EXECUTE_TOOL · ${activityStatusText(activity.status)}",
-                        color = statusColor,
-                        fontSize = 11.sp,
-                    )
-                    Text(
-                        text = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(activity.timestampEpochMs)),
-                        color = colors.textSecondary,
-                        fontSize = 11.sp,
-                    )
-                }
-            }
-        }
-    }
-}
 
 private fun activityLabel(activity: TimelineItem.Activity): String = userFacingActivityLabel(
     actionType = activity.actionType?.let { runCatching { com.phonecontrol.assistant.domain.ActionType.valueOf(it) }.getOrNull() },
@@ -1277,13 +1155,7 @@ private fun activityLabel(activity: TimelineItem.Activity): String = userFacingA
     targetDescription = activity.targetDescription,
 )
 
-private fun activityStatusText(status: String): String = when (status.lowercase()) {
-    "running", "proposed" -> "Executing"
-    "completed" -> "Success"
-    "attention" -> "Needs attention"
-    "failed" -> "Failed"
-    else -> "Info"
-}
+
 
 @Composable
 private fun RequestComposer(
