@@ -110,6 +110,7 @@ fun PhoneControlApp(
     initialConversationId: String? = null,
     onRunRequest: (String, String?) -> Unit,
     onStopSession: () -> Unit,
+    onSteerRequest: (String) -> Boolean,
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
@@ -184,6 +185,7 @@ fun PhoneControlApp(
                             initialConversationId = initialConversationId,
                             onRunRequest = onRunRequest,
                             onStopSession = onStopSession,
+                            onSteerRequest = onSteerRequest,
                             onOpenSettings = { navController.navigate(AppRoutes.SETTINGS) },
                             onStartFresh = {
                                 conversationStore.deleteConversation(DHD_CONVERSATION_ID)

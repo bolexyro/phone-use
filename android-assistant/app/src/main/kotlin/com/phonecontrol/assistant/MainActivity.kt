@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
                 initialConversationId = initialConversationId,
                 onRunRequest = ::startSession,
                 onStopSession = ::stopSession,
+                onSteerRequest = ::steerSession,
             )
         }
     }
@@ -75,6 +76,9 @@ class MainActivity : ComponentActivity() {
                 .setAction(AssistantForegroundService.ACTION_STOP),
         )
     }
+
+    private fun steerSession(text: String): Boolean =
+        (application as PhoneControlApplication).sessionCoordinator.enqueueSteer(text) != null
 
     companion object {
         const val EXTRA_CONVERSATION_ID = "com.phonecontrol.assistant.extra.CONVERSATION_ID"

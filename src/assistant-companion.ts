@@ -20,6 +20,7 @@ const BRIDGE_POLL_TIMEOUT_MS = 5_000;
 const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_AGENT_FEEDBACK_CHARS = 4_000;
+const MAX_STEER_CHARS = 4_000;
 const DEFAULT_CODEX_RUNTIME_CWD = join(homedir(), ".dhd", "codex-runtime");
 const MINIMAL_CODEX_CONFIG_OVERRIDES = [
   "mcp_servers={}",
@@ -142,6 +143,16 @@ export class CodexAppServerClient {
   private lastServerEvent: string | null = null;
   private activeTiming: PhaseTimer | null = null;
   private userMessageLogged = false;
+
+  /** True while this client still owns an in-flight App Server turn. */
+  get isTurnInFlight(): boolean {
+    return this.turnCompletion !== null;
+  }
+
+  /** True when the active thread and turn ids are available for steering. */
+  get canSteer(): boolean {
+    return this.isTurnInFlight && Boolean(this.activeThreadId && this.activeTurnId);
+  }
 
   /**
    * Start and initialize one App Server connection. The connection remains
@@ -312,6 +323,38 @@ export class CodexAppServerClient {
   /** Stop the persistent App Server connection during companion shutdown. */
   async close(): Promise<void> {
     await this.stopProcess();
+  }
+
+  /** Append a user instruction to the currently running turn. */
+  async steer(text: string): Promise<void> {
+    const safeText = text.trim().slice(0, MAX_STEER_CHARS);
+    if (!safeText) throw new Error("A steer instruction is required.");
+    const threadId = this.activeThreadId;
+    const turnId = this.activeTurnId;
+    if (!this.isTurnInFlight || !threadId || !turnId) {
+      throw new Error("Codex has no active turn to steer.");
+    }
+
+    const response = await this.request("turn/steer", {
+      threadId,
+      input: [{ type: "text", text: safeText }],
+      expectedTurnId: turnId
+    });
+    const acceptedTurnId = extractRecord(response.result)?.turnId;
+    if (typeof acceptedTurnId === "string" && acceptedTurnId !== turnId) {
+      throw new Error(`Codex accepted the steer for unexpected turn ${acceptedTurnId}.`);
+    }
+  }
+
+  /** Interrupt the active turn, for example after the phone-side Stop action. */
+  async interrupt(): Promise<void> {
+    const threadId = this.activeThreadId;
+    if (!threadId || !this.isTurnInFlight) return;
+    const turnId = this.activeTurnId;
+    await this.request("turn/interrupt", {
+      threadId,
+      ...(turnId ? { turnId } : {})
+    });
   }
 
   private startProcess(): void {
@@ -924,12 +967,31 @@ function describeServerEvent(message: JsonRpcMessage): string {
   return method;
 }
 
+interface ActiveCodexTurn {
+  sessionId: string;
+  client: CodexAppServerClient;
+}
+
+/**
+ * The phone bridge is pull-based: the desktop companion polls the phone over
+ * the adb-forwarded socket. Keep the active App Server client here so those
+ * polls can deliver steering input to the same in-flight turn.
+ */
+let activeCodexTurn: ActiveCodexTurn | null = null;
+
 export async function runAssistantCompanion(): Promise<void> {
   const pollIntervalMs = parsePollInterval(process.env.PHONE_ASSISTANT_POLL_MS);
   let stopping = false;
   const codexClient = new CodexAppServerClient();
+  let pendingRun: Promise<void> | null = null;
   const stop = () => {
     stopping = true;
+    const active = activeCodexTurn;
+    if (active) {
+      void active.client.interrupt().catch((error) => {
+        console.error(`[phone-assistant-companion] could not interrupt on shutdown: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -943,28 +1005,38 @@ export async function runAssistantCompanion(): Promise<void> {
       const pollStartedAt = performance.now();
       if (debugTimingEnabled()) logCompanionPhase("poll:start");
       try {
-        const pending = await requestBridge(
-          { type: "pending_request", requestId: randomUUID() },
-          { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
-        );
-        if (debugTimingEnabled()) {
-          logCompanionPhase(
-            "poll:complete",
-            `durationMs=${Math.round(performance.now() - pollStartedAt)} available=${pending.available === true}`
+        if (!pendingRun && !activeCodexTurn) {
+          const pending = await requestBridge(
+            { type: "pending_request", requestId: randomUUID() },
+            { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
           );
-        }
-        if (pending.warmupRequested === true) {
-          logCompanionPhase("codex:warmup_requested");
-          await prewarmCodexClient(codexClient, "codex-app-open-warmup");
-        }
-        if (pending.ok === true && pending.available === true) {
-          logCompanionPhase(
-            "poll:request_detected",
-            `durationMs=${Math.round(performance.now() - pollStartedAt)}`
-          );
-          await processPendingRequest(pending, codexClient);
-        } else if (pending.ok === false) {
-          console.error(`[phone-assistant-companion] phone bridge rejected poll: ${String(pending.message ?? "unknown error")}`);
+          if (debugTimingEnabled()) {
+            logCompanionPhase(
+              "poll:complete",
+              `durationMs=${Math.round(performance.now() - pollStartedAt)} available=${pending.available === true}`
+            );
+          }
+          if (pending.warmupRequested === true) {
+            logCompanionPhase("codex:warmup_requested");
+            await prewarmCodexClient(codexClient, "codex-app-open-warmup");
+          }
+          if (pending.ok === true && pending.available === true) {
+            logCompanionPhase(
+              "poll:request_detected",
+              `durationMs=${Math.round(performance.now() - pollStartedAt)}`
+            );
+            pendingRun = processPendingRequest(pending, codexClient)
+              .catch((error) => {
+                console.error(`[phone-assistant-companion] phone request runner failed: ${error instanceof Error ? error.message : String(error)}`);
+              })
+              .finally(() => {
+                pendingRun = null;
+              });
+          } else if (pending.ok === false) {
+            console.error(`[phone-assistant-companion] phone bridge rejected poll: ${String(pending.message ?? "unknown error")}`);
+          }
+        } else if (activeCodexTurn) {
+          await processPendingSteer(activeCodexTurn);
         }
       } catch (error) {
         logCompanionPhase(
@@ -978,6 +1050,7 @@ export async function runAssistantCompanion(): Promise<void> {
       if (!stopping) await delay(pollIntervalMs);
     }
   } finally {
+    if (pendingRun) await pendingRun;
     await codexClient.close();
   }
 }
@@ -1046,6 +1119,7 @@ async function processPendingRequest(
   }
 
   console.error(`[phone-assistant-companion] claimed ${sessionId}: ${request}`);
+  activeCodexTurn = { sessionId, client: codexClient };
   try {
     const conversationId = typeof claimed.conversationId === "string" ? claimed.conversationId : undefined;
     const existingThreadId = typeof claimed.codexThreadId === "string" ? claimed.codexThreadId : undefined;
@@ -1089,6 +1163,95 @@ async function processPendingRequest(
     } catch (failureError) {
       console.error(`[phone-assistant-companion] could not mark the phone session failed: ${failureError instanceof Error ? failureError.message : String(failureError)}`);
     }
+  } finally {
+    if (activeCodexTurn?.sessionId === sessionId) activeCodexTurn = null;
+  }
+}
+
+async function processPendingSteer(active: ActiveCodexTurn): Promise<void> {
+  if (!active.client.isTurnInFlight) return;
+
+  const pending = await requestBridge(
+    {
+      type: "pending_steer",
+      requestId: randomUUID(),
+      sessionId: active.sessionId
+    },
+    { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
+  );
+  if (pending.ok !== true) {
+    if (pending.message) {
+      console.error(`[phone-assistant-companion] phone bridge rejected steer poll: ${String(pending.message)}`);
+    }
+    return;
+  }
+
+  // A phone-side Stop changes the coordinator state before the next poll. In
+  // that case interrupt Codex as well so the desktop turn cannot continue
+  // operating the phone after the user has stopped it.
+  if (pending.active === false && active.client.isTurnInFlight) {
+    await active.client.interrupt().catch((error) => {
+      console.error(`[phone-assistant-companion] could not interrupt stopped phone session: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    return;
+  }
+  // The App Server may still be completing turn/start. Leave a queued steer
+  // untouched until its thread and turn ids are available for turn/steer.
+  if (!active.client.canSteer) return;
+  if (pending.available !== true) return;
+
+  const steerId = typeof pending.steerId === "string" ? pending.steerId : "";
+  if (!steerId) {
+    console.error("[phone-assistant-companion] pending steer did not include a steer id");
+    return;
+  }
+  const claimed = await requestBridge({
+    type: "claim_steer",
+    requestId: randomUUID(),
+    sessionId: active.sessionId,
+    steerId
+  });
+  if (claimed.ok !== true) {
+    if (claimed.code !== "STEER_NOT_AVAILABLE") {
+      console.error(`[phone-assistant-companion] could not claim steer ${steerId}: ${String(claimed.message ?? "unknown error")}`);
+    }
+    return;
+  }
+
+  const text = typeof claimed.text === "string" ? claimed.text.trim() : "";
+  if (!text) {
+    await releaseSteer(steerId, active.sessionId);
+    return;
+  }
+
+  try {
+    await active.client.steer(text);
+    const completed = await requestBridge({
+      type: "complete_steer",
+      requestId: randomUUID(),
+      sessionId: active.sessionId,
+      steerId
+    });
+    if (completed.ok !== true) {
+      console.error(`[phone-assistant-companion] could not mark steer ${steerId} delivered: ${String(completed.message ?? "unknown error")}`);
+    }
+    console.error(`[phone-assistant-companion] delivered steer ${steerId} to the active Codex turn`);
+  } catch (error) {
+    console.error(`[phone-assistant-companion] Codex steer failed: ${error instanceof Error ? error.message : String(error)}`);
+    await releaseSteer(steerId, active.sessionId);
+  }
+}
+
+async function releaseSteer(steerId: string, sessionId: string): Promise<void> {
+  try {
+    await requestBridge({
+      type: "release_steer",
+      requestId: randomUUID(),
+      sessionId,
+      steerId
+    });
+  } catch (error) {
+    console.error(`[phone-assistant-companion] could not release steer ${steerId}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

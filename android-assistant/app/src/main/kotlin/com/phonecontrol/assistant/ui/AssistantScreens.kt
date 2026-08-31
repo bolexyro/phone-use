@@ -120,6 +120,7 @@ fun AssistantScreen(
     @Suppress("UNUSED_PARAMETER") initialConversationId: String?,
     onRunRequest: (String, String?) -> Unit,
     onStopSession: () -> Unit,
+    onSteerRequest: (String) -> Boolean,
     onOpenSettings: () -> Unit,
     onStartFresh: () -> Unit,
     shizukuStatus: ShizukuStatus,
@@ -129,7 +130,33 @@ fun AssistantScreen(
     val state by coordinator.state.collectAsState()
     val timeline by store.timeline(DHD_CONVERSATION_ID).collectAsState()
     val active = state.isActive()
+    val canSteer = state is SessionState.Running
     var showStartFreshConfirmation by rememberSaveable { mutableStateOf(false) }
+    var steerDraft by rememberSaveable { mutableStateOf("") }
+    var steerDraftSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var composerEditText by rememberSaveable { mutableStateOf<String?>(null) }
+    val activeSessionId = state.sessionIdOrNullForUi()
+    LaunchedEffect(activeSessionId) {
+        // A draft belongs to the run in which it was composed. Do not carry an
+        // unsent steer into a newly started task or a rotated session.
+        if (steerDraftSessionId != activeSessionId) {
+            steerDraft = ""
+            steerDraftSessionId = activeSessionId
+        }
+    }
+    LaunchedEffect(state) {
+        val completed = state as? SessionState.Completed ?: return@LaunchedEffect
+        val normalRequest = steerDraft.trim()
+        if (normalRequest.isBlank() || steerDraftSessionId != completed.sessionId) {
+            return@LaunchedEffect
+        }
+
+        // A draft that was not explicitly steered becomes the next ordinary
+        // request once the current run has reached a successful terminal state.
+        steerDraft = ""
+        steerDraftSessionId = null
+        onRunRequest(normalRequest, DHD_CONVERSATION_ID)
+    }
     val recentCutoff = System.currentTimeMillis() - RECENT_HISTORY_WINDOW_MS
     val recentTimeline = timeline.filter { item ->
         item.timestampEpochMs >= recentCutoff ||
@@ -240,12 +267,51 @@ fun AssistantScreen(
                     .imePadding()
                     .padding(bottom = 14.dp),
             ) {
-                RequestComposer(
-                    enabled = !active,
-                    isActive = active,
-                    onSend = { request -> onRunRequest(request, DHD_CONVERSATION_ID) },
-                    onStop = onStopSession,
-                )
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    if (canSteer && steerDraft.isNotBlank()) {
+                        SteerDraftBar(
+                            text = steerDraft,
+                            onSteer = {
+                                if (onSteerRequest(steerDraft)) {
+                                    steerDraft = ""
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                            onDismiss = { steerDraft = "" },
+                            onEdit = {
+                                composerEditText = steerDraft
+                                steerDraft = ""
+                            },
+                        )
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    RequestComposer(
+                        enabled = !active || canSteer,
+                        isActive = active,
+                        canSteer = canSteer,
+                        editText = composerEditText,
+                        onEditTextConsumed = { composerEditText = null },
+                        onSend = { request ->
+                            if (canSteer) {
+                                // Sending from the composer creates a draft;
+                                // the explicit Steer button above performs the
+                                // actual turn/steer request.
+                                steerDraft = request
+                                steerDraftSessionId = activeSessionId
+                                true
+                            } else {
+                                onRunRequest(request, DHD_CONVERSATION_ID)
+                                true
+                            }
+                        },
+                        onStop = onStopSession,
+                    )
+                }
             }
         }
     }
@@ -366,6 +432,7 @@ private fun PromptSuggestionChip(
 private data class TaskGroup(
     val id: String,
     val userMessage: TimelineItem.Message?,
+    val steerMessages: List<TimelineItem.Message>,
     val activities: List<TimelineItem.Activity>,
     val assistantMessages: List<TimelineItem.Message>,
     val timestampEpochMs: Long,
@@ -373,6 +440,7 @@ private data class TaskGroup(
 
 private class TaskGroupBuilder(val id: String) {
     var userMessage: TimelineItem.Message? = null
+    val steerMessages = mutableListOf<TimelineItem.Message>()
     val activities = mutableListOf<TimelineItem.Activity>()
     val assistantMessages = mutableListOf<TimelineItem.Message>()
     var timestampEpochMs: Long = Long.MAX_VALUE
@@ -384,6 +452,7 @@ private class TaskGroupBuilder(val id: String) {
     fun build(): TaskGroup = TaskGroup(
         id = id,
         userMessage = userMessage,
+        steerMessages = steerMessages.toList(),
         activities = activities.toList(),
         assistantMessages = assistantMessages.toList(),
         timestampEpochMs = timestampEpochMs,
@@ -403,6 +472,8 @@ private fun groupTimeline(timeline: List<TimelineItem>): List<TaskGroup> {
             is TimelineItem.Message -> {
                 if (item.role == "user" && builder.userMessage == null) {
                     builder.userMessage = item
+                } else if (item.role == "steer") {
+                    builder.steerMessages += item
                 } else {
                     builder.assistantMessages += item
                 }
@@ -434,7 +505,11 @@ private fun ConversationTimeline(
 ) {
     val listState = rememberLazyListState()
     val groups = remember(timeline) { groupTimeline(timeline) }
-    LaunchedEffect(groups.lastOrNull()?.id, groups.lastOrNull()?.activities?.size) {
+    LaunchedEffect(
+        groups.lastOrNull()?.id,
+        groups.lastOrNull()?.activities?.size,
+        groups.lastOrNull()?.steerMessages?.size,
+    ) {
         if (groups.isNotEmpty()) listState.animateScrollToItem(groups.lastIndex)
     }
     LazyColumn(
@@ -483,6 +558,10 @@ private fun TaskGroupCard(
     ) {
         // User message bubble (ChatGPT navy bubble in dark, soft gray bubble in light)
         group.userMessage?.let { MessageBubble(it) }
+
+        // Steering instructions stay attached to the current run instead of
+        // appearing as a new task.
+        group.steerMessages.forEach { SteerMessageBubble(it) }
 
         // Keep the playful status for healthy work, but replace it with a
         // concrete recovery card whenever the phone cannot make progress.
@@ -1147,6 +1226,108 @@ private fun TraceStepRow(activity: TimelineItem.Activity) {
     }
 }
 
+@Composable
+private fun SteerDraftBar(
+    text: String,
+    onSteer: () -> Boolean,
+    onDismiss: () -> Unit,
+    onEdit: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    Surface(
+        color = colors.surfaceCard,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, colors.borderColor),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 28.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "↪",
+                color = colors.textSecondary,
+                fontSize = 18.sp,
+                modifier = Modifier.padding(end = 8.dp),
+            )
+            Text(
+                text = text,
+                color = colors.textPrimary,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "↪ Steer",
+                color = colors.textSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .padding(start = 10.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onSteer() }
+                    .padding(horizontal = 8.dp, vertical = 7.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                painter = painterResource(R.drawable.ic_close),
+                contentDescription = "Discard steer draft",
+                tint = colors.textSecondary,
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable { onDismiss() }
+                    .padding(8.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                painter = painterResource(R.drawable.ic_compose_new),
+                contentDescription = "Edit steer draft",
+                tint = colors.textSecondary,
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable { onEdit() }
+                    .padding(7.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SteerMessageBubble(message: TimelineItem.Message) {
+    val colors = LocalAssistantColors.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End,
+    ) {
+        Surface(
+            color = colors.surfaceCard,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, colors.accentBlue.copy(alpha = 0.65f)),
+            modifier = Modifier.padding(start = 64.dp),
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(
+                    text = "Steer",
+                    color = colors.accentBlue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = message.text,
+                    color = colors.textPrimary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+    }
+}
+
 
 
 private fun activityLabel(activity: TimelineItem.Activity): String = userFacingActivityLabel(
@@ -1161,7 +1342,10 @@ private fun activityLabel(activity: TimelineItem.Activity): String = userFacingA
 private fun RequestComposer(
     enabled: Boolean,
     isActive: Boolean,
-    onSend: (String) -> Unit,
+    canSteer: Boolean,
+    editText: String? = null,
+    onEditTextConsumed: () -> Unit = {},
+    onSend: (String) -> Boolean,
     onStop: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
@@ -1176,6 +1360,18 @@ private fun RequestComposer(
     }
     var isFocused by remember { mutableStateOf(false) }
     var isImeHiding by remember { mutableStateOf(false) }
+    val composerFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(editText) {
+        if (!editText.isNullOrBlank()) {
+            textFieldValue = TextFieldValue(
+                editText,
+                selection = TextRange(editText.length),
+            )
+            composerFocusRequester.requestFocus()
+            onEditTextConsumed()
+        }
+    }
 
     LaunchedEffect(density, imeInsets) {
         var previousImeBottom = imeInsets.getBottom(density)
@@ -1238,6 +1434,7 @@ private fun RequestComposer(
                     modifier = Modifier
                         .weight(1f)
                         .padding(end = 12.dp)
+                        .focusRequester(composerFocusRequester)
                         .semantics {
                             contentDescription = "Ask DHD input"
                         }
@@ -1253,16 +1450,21 @@ private fun RequestComposer(
                         onSend = {
                             val text = textFieldValue.text.trim()
                             if (text.isNotEmpty() && enabled) {
-                                onSend(text)
-                                textFieldValue = TextFieldValue("", selection = TextRange.Zero)
-                                focusManager.clearFocus()
+                                if (onSend(text)) {
+                                    textFieldValue = TextFieldValue("", selection = TextRange.Zero)
+                                    focusManager.clearFocus()
+                                }
                             }
                         },
                     ),
                     decorationBox = { innerTextField ->
                         if (textFieldValue.text.isEmpty()) {
                             Text(
-                                text = if (enabled) "Ask DHD" else "DHD is working…",
+                                text = when {
+                                    canSteer -> "Do anything"
+                                    enabled -> "Ask DHD"
+                                    else -> "DHD is working…"
+                                },
                                 color = colors.textSecondary,
                                 fontSize = 16.sp,
                             )
@@ -1283,13 +1485,13 @@ private fun RequestComposer(
                         colors = colors,
                         onSend = {
                             val text = textFieldValue.text.trim()
-                            if (text.isNotEmpty()) {
-                                onSend(text)
+                            if (text.isNotEmpty() && onSend(text)) {
                                 textFieldValue = TextFieldValue("", selection = TextRange.Zero)
                                 focusManager.clearFocus()
                             }
                         },
                         onStop = onStop,
+                        canSteer = canSteer,
                     )
                 }
             }
@@ -1313,13 +1515,13 @@ private fun RequestComposer(
                             colors = colors,
                             onSend = {
                                 val text = textFieldValue.text.trim()
-                                if (text.isNotEmpty()) {
-                                    onSend(text)
+                                if (text.isNotEmpty() && onSend(text)) {
                                     textFieldValue = TextFieldValue("", selection = TextRange.Zero)
                                     focusManager.clearFocus()
                                 }
                             },
                             onStop = onStop,
+                            canSteer = canSteer,
                         )
                     }
                 }
@@ -1333,27 +1535,50 @@ private fun ActionOrSendButton(
     isActive: Boolean,
     hasText: Boolean,
     enabled: Boolean,
+    canSteer: Boolean,
     colors: AssistantColorScheme,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
     if (isActive) {
-        // Active Stop Square Button inside blue circle (Matching Image)
-        Surface(
-            shape = CircleShape,
-            color = colors.accentBlue,
-            modifier = Modifier
-                .size(36.dp)
-                .clip(CircleShape)
-                .clickable { onStop() },
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_stop),
-                    contentDescription = "Stop task",
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp),
-                )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (canSteer) {
+                Surface(
+                    shape = CircleShape,
+                    color = if (hasText) colors.sendButtonActiveBg else colors.sendButtonInactiveBg,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .clickable(enabled = hasText && enabled) { onSend() },
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_send_arrow),
+                            contentDescription = "Steer active task",
+                            tint = if (hasText) colors.sendButtonActiveIcon else colors.sendButtonInactiveIcon,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+            }
+
+            // Active Stop Square Button inside blue circle (Matching Image)
+            Surface(
+                shape = CircleShape,
+                color = colors.accentBlue,
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .clickable { onStop() },
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_stop),
+                        contentDescription = "Stop task",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
         }
     } else {

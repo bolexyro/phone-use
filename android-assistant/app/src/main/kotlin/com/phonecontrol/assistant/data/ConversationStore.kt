@@ -327,6 +327,26 @@ class ConversationStore(context: Context) {
         refresh(run.conversationId)
     }
 
+    /** Persist a user steering instruction alongside the run it modifies. */
+    fun recordSteer(steerId: String, runId: String, text: String) = synchronized(lock) {
+        val run = dao.findRun(runId) ?: return@synchronized
+        val safeText = text.trim().take(MAX_AGENT_MESSAGE_CHARS).ifBlank { return@synchronized }
+        if (dao.findMessage(steerId) == null) {
+            dao.insertMessage(
+                MessageEntity(
+                    id = steerId,
+                    conversationId = run.conversationId,
+                    runId = runId,
+                    role = ROLE_STEER,
+                    text = safeText,
+                    createdAtEpochMs = System.currentTimeMillis(),
+                ),
+            )
+        }
+        touchConversation(run.conversationId)
+        refresh(run.conversationId)
+    }
+
     fun recordEvent(event: ActivityEvent) = synchronized(lock) {
         val runId = event.sessionId ?: return@synchronized
         val run = dao.findRun(runId) ?: return@synchronized
@@ -507,6 +527,7 @@ class ConversationStore(context: Context) {
 
     private companion object {
         const val ROLE_USER = "user"
+        const val ROLE_STEER = "steer"
         const val ROLE_ASSISTANT = "assistant"
         const val MAX_TITLE_CHARS = 48
         const val MAX_PURPOSE_CHARS = 240

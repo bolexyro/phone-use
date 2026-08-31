@@ -230,6 +230,16 @@ need several observe/action cycles. Override it for a development run with
 companion sends `turn/interrupt` with the active thread and turn ids and reports
 the last App Server lifecycle event it saw.
 
+While a turn is running, the Android composer changes to **Steer DHD**. Sending
+text there appends one instruction to the same in-flight App Server turn; it does
+not create a new user-facing conversation or restart the phone session. The
+companion claims queued instructions from the phone, sends `turn/steer` with the
+active `threadId`, `expectedTurnId`, and text input, then acknowledges delivery.
+The steer appears in the local timeline beside the run it modified. Stop remains
+the urgent control: it ends the phone session and the companion propagates a
+`turn/interrupt` to Codex. A tap or swipe already in progress may finish before
+the interrupt is observed, so use Stop when the phone needs immediate attention.
+
 DHD presents one assistant timeline rather than user-facing chat threads. The
 phone stores requests and tool activity locally and only renders the most recent
 24 hours by default. The companion reuses the stored Codex thread for requests
