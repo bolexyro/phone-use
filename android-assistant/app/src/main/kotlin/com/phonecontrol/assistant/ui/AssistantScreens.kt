@@ -75,13 +75,17 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
@@ -227,47 +231,66 @@ fun AssistantScreen(
             )
         },
     ) { paddingValues ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = paddingValues.calculateTopPadding())
-                .background(colors.background),
+                .background(colors.background)
+                .navigationBarsPadding()
+                .imePadding(),
         ) {
-            // Chat timeline content with generous bottom padding so it can scroll fully above composer
-            if (recentTimeline.isEmpty()) {
-                EmptyChat(
-                    modifier = Modifier.fillMaxSize(),
-                    onSelectPrompt = { prompt -> onRunRequest(prompt, DHD_CONVERSATION_ID) },
-                )
-            } else {
-                ConversationTimeline(
-                    timeline = recentTimeline,
-                    state = state,
-                    shizukuStatus = shizukuStatus,
-                    onOpenSettings = onOpenSettings,
-                    onOpenShizuku = onOpenShizuku,
-                    onStopSession = onStopSession,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        top = 12.dp,
-                        start = 16.dp,
-                        end = 16.dp,
-                        bottom = 110.dp,
-                    ),
-                )
-            }
-
-            // Floating composer with zero rectangular background cutout
+            // Chat timeline stays strictly above composer area with soft fade at the bottom
             Box(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
+                    .weight(1f)
                     .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .imePadding()
-                    .padding(bottom = 14.dp),
+                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        val fadePx = 24.dp.toPx()
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                0.0f to Color.Black,
+                                (1f - (fadePx / size.height).coerceIn(0f, 1f)) to Color.Black,
+                                1.0f to Color.Transparent,
+                            ),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    },
+            ) {
+                if (recentTimeline.isEmpty()) {
+                    EmptyChat(
+                        modifier = Modifier.fillMaxSize(),
+                        onSelectPrompt = { prompt -> onRunRequest(prompt, DHD_CONVERSATION_ID) },
+                    )
+                } else {
+                    ConversationTimeline(
+                        timeline = recentTimeline,
+                        state = state,
+                        shizukuStatus = shizukuStatus,
+                        onOpenSettings = onOpenSettings,
+                        onOpenShizuku = onOpenShizuku,
+                        onStopSession = onStopSession,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            top = 12.dp,
+                            start = 16.dp,
+                            end = 16.dp,
+                            bottom = 44.dp,
+                        ),
+                    )
+                }
+            }
+
+            // Bottom composer bar with solid background - nothing scrolls behind or between composer and keyboard
+            Surface(
+                color = colors.background,
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp, bottom = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     if (canSteer && steerDraft.isNotBlank()) {
@@ -297,9 +320,6 @@ fun AssistantScreen(
                         onEditTextConsumed = { composerEditText = null },
                         onSend = { request ->
                             if (canSteer) {
-                                // Sending from the composer creates a draft;
-                                // the explicit Steer button above performs the
-                                // actual turn/steer request.
                                 steerDraft = request
                                 steerDraftSessionId = activeSessionId
                                 true
@@ -349,7 +369,6 @@ fun AssistantScreen(
         )
     }
 }
-
 @Composable
 private fun EmptyChat(
     modifier: Modifier = Modifier,
@@ -1356,6 +1375,7 @@ private fun RequestComposer(
     }
     var isFocused by remember { mutableStateOf(false) }
     var isImeHiding by remember { mutableStateOf(false) }
+    var staleValueToIgnore by remember { mutableStateOf<String?>(null) }
     val composerFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(editText) {
@@ -1383,6 +1403,25 @@ private fun RequestComposer(
         if (!isImeVisible && textFieldValue.text.isBlank()) {
             focusManager.clearFocus()
             isFocused = false
+        }
+    }
+
+    // Clear the field before handing the request to the session layer. Starting
+    // a session can immediately change the composition (and disable the field),
+    // while the IME may still deliver one final value-change callback. Clearing
+    // first prevents that callback from restoring the submitted text. If the
+    // caller rejects the request, restore the draft so it is not lost.
+    fun submitRequest() {
+        val request = textFieldValue.text.trim()
+        if (request.isEmpty() || !enabled) return
+
+        val previousValue = textFieldValue
+        staleValueToIgnore = previousValue.text
+        textFieldValue = TextFieldValue("", selection = TextRange.Zero)
+        focusManager.clearFocus()
+        if (!onSend(request)) {
+            staleValueToIgnore = null
+            textFieldValue = previousValue
         }
     }
 
@@ -1419,7 +1458,17 @@ private fun RequestComposer(
             ) {
                 BasicTextField(
                     value = textFieldValue,
-                    onValueChange = { textFieldValue = it },
+                    onValueChange = { nextValue ->
+                        // Some IMEs deliver the pre-submit value after focus is
+                        // cleared. Ignore that one stale callback instead of
+                        // putting the just-submitted request back in the field.
+                        if (staleValueToIgnore != null && nextValue.text == staleValueToIgnore) {
+                            staleValueToIgnore = null
+                        } else {
+                            staleValueToIgnore = null
+                            textFieldValue = nextValue
+                        }
+                    },
                     enabled = enabled,
                     textStyle = TextStyle(
                         color = colors.textPrimary,
@@ -1444,13 +1493,7 @@ private fun RequestComposer(
                     ),
                     keyboardActions = KeyboardActions(
                         onSend = {
-                            val text = textFieldValue.text.trim()
-                            if (text.isNotEmpty() && enabled) {
-                                if (onSend(text)) {
-                                    textFieldValue = TextFieldValue("", selection = TextRange.Zero)
-                                    focusManager.clearFocus()
-                                }
-                            }
+                            submitRequest()
                         },
                     ),
                     decorationBox = { innerTextField ->
@@ -1479,13 +1522,7 @@ private fun RequestComposer(
                         hasText = hasText,
                         enabled = enabled,
                         colors = colors,
-                        onSend = {
-                            val text = textFieldValue.text.trim()
-                            if (text.isNotEmpty() && onSend(text)) {
-                                textFieldValue = TextFieldValue("", selection = TextRange.Zero)
-                                focusManager.clearFocus()
-                            }
-                        },
+                        onSend = ::submitRequest,
                         onStop = onStop,
                         canSteer = canSteer,
                     )
@@ -1509,13 +1546,7 @@ private fun RequestComposer(
                             hasText = hasText,
                             enabled = enabled,
                             colors = colors,
-                            onSend = {
-                                val text = textFieldValue.text.trim()
-                                if (text.isNotEmpty() && onSend(text)) {
-                                    textFieldValue = TextFieldValue("", selection = TextRange.Zero)
-                                    focusManager.clearFocus()
-                                }
-                            },
+                            onSend = ::submitRequest,
                             onStop = onStop,
                             canSteer = canSteer,
                         )
@@ -1607,7 +1638,6 @@ fun SettingsScreen(
     isDarkMode: Boolean,
     onToggleDarkMode: (Boolean) -> Unit,
     onRequestShizukuPermission: () -> Unit,
-    onRefreshShizuku: () -> Unit,
     onOpenApprovedApps: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -1803,11 +1833,10 @@ fun SettingsScreen(
                                 )
                             }
                         }
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.padding(start = 36.dp, top = 10.dp),
-                        ) {
-                            if (shizukuStatus.binderAvailable && !shizukuStatus.permissionGranted) {
+                        if (shizukuStatus.binderAvailable && !shizukuStatus.permissionGranted) {
+                            Row(
+                                modifier = Modifier.padding(start = 36.dp, top = 10.dp),
+                            ) {
                                 Button(
                                     onClick = onRequestShizukuPermission,
                                     colors = ButtonDefaults.buttonColors(containerColor = colors.accentBlue),
@@ -1815,13 +1844,6 @@ fun SettingsScreen(
                                 ) {
                                     Text("Request permission", fontSize = 12.sp)
                                 }
-                            }
-                            OutlinedButton(
-                                onClick = onRefreshShizuku,
-                                border = BorderStroke(1.dp, colors.borderColor),
-                                shape = RoundedCornerShape(12.dp),
-                            ) {
-                                Text("Refresh", color = colors.textPrimary, fontSize = 12.sp)
                             }
                         }
                     }

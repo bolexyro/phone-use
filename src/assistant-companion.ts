@@ -138,6 +138,10 @@ export class CodexAppServerClient {
   } | null = null;
   private activeThreadId: string | null = null;
   private activeDhdThreadId: string | null = null;
+  // A thread loaded from an older companion process may carry an obsolete
+  // dynamic-tool contract. Establish one current DHD thread before allowing
+  // thread reuse or resume.
+  private hasCurrentDhdThread = false;
   private activeTurnId: string | null = null;
   private turnStartedAt: number | null = null;
   private lastServerEvent: string | null = null;
@@ -219,10 +223,11 @@ export class CodexAppServerClient {
       if (this.activeDhdThreadId && this.activeDhdThreadId !== existingThreadId) {
         await this.unsubscribeThread(this.activeDhdThreadId, logger);
       }
-      if (existingThreadId && this.loadedThreadIds.has(existingThreadId)) {
+      const mayReuseExistingThread = Boolean(existingThreadId && this.hasCurrentDhdThread);
+      if (mayReuseExistingThread && existingThreadId && this.loadedThreadIds.has(existingThreadId)) {
         threadId = existingThreadId;
         logger.log("thread:reuse_loaded", `threadId=${threadId}`);
-      } else if (existingThreadId) {
+      } else if (mayReuseExistingThread && existingThreadId) {
         logger.log("resume:start", `threadId=${existingThreadId}`);
         const threadResponse = await this.request("thread/resume", {
           ...threadParams,
@@ -231,6 +236,9 @@ export class CodexAppServerClient {
         threadId = extractThreadId(threadResponse.result) || existingThreadId;
         logger.log("resume:complete", `threadId=${threadId}`);
       } else {
+        if (existingThreadId) {
+          logger.log("thread:fresh_contract", `replacingStoredThread=${existingThreadId}`);
+        }
         logger.log("thread/start:start");
         const threadResponse = await this.request("thread/start", threadParams);
         threadId = extractThreadId(threadResponse.result);
@@ -282,7 +290,7 @@ export class CodexAppServerClient {
         this.turnCompletion = null;
         throw error;
       }
-      return await withTimeout(
+      const result = await withTimeout(
         completion,
         parseTurnTimeout(process.env.PHONE_ASSISTANT_TURN_TIMEOUT_MS),
         () => {
@@ -300,6 +308,8 @@ export class CodexAppServerClient {
           );
         }
       );
+      this.hasCurrentDhdThread = true;
+      return result;
     } catch (error) {
       // A failed/timeout turn may still be active inside App Server. Restart
       // the connection on the next request so a bad turn cannot poison the
@@ -672,6 +682,7 @@ export class CodexAppServerClient {
     this.initialized = false;
     this.loadedThreadIds.clear();
     this.activeDhdThreadId = null;
+    this.hasCurrentDhdThread = false;
     this.turnCompletion = null;
     for (const waiter of this.pending.values()) {
       clearTimeout(waiter.timer);

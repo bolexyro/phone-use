@@ -95,11 +95,14 @@ and warms the same connection in the background, so opening DHD can hide a
 desktop companion restart or crash recovery. Sending a request while warmup is
 in progress simply awaits the same idempotent startup operation.
 
-Successful later requests reuse the already loaded DHD thread; `thread/resume`
-is sent only when the stored thread id is not loaded in that connection (for
-example after a companion restart). At a three-hour DHD inactivity rotation,
-the companion sends `thread/unsubscribe` for the superseded loaded thread
-before starting the replacement, preventing old subscriptions from accumulating.
+The first request after each companion process starts creates a fresh DHD thread
+even when the phone supplies a stored thread id. This establishes the current
+DHD tool contract instead of reviving a thread created by an older companion
+version. Successful later requests reuse that newly established loaded thread;
+`thread/resume` is used only for a current-contract thread that is not loaded
+in the active connection. At a three-hour DHD inactivity rotation, the
+companion sends `thread/unsubscribe` for the superseded loaded thread before
+starting the replacement, preventing old subscriptions from accumulating.
 
 The App Server child starts in a dedicated user runtime directory rather than
 the Phone Control repository: `%USERPROFILE%\\.dhd\\codex-runtime` by default.

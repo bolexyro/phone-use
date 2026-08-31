@@ -67,6 +67,7 @@ describe("Codex App Server agent-message extraction", () => {
     const client = new CodexAppServerClient();
     const internals = client as any;
     const requests: string[] = [];
+    const turnInputs: unknown[] = [];
     const timingLogs: string[] = [];
     const originalError = console.error;
     console.error = (...args: unknown[]) => {
@@ -79,7 +80,7 @@ describe("Codex App Server agent-message extraction", () => {
     };
     internals.notify = () => undefined;
     let threadStarts = 0;
-    internals.request = async (method: string) => {
+    internals.request = async (method: string, params?: Record<string, unknown>) => {
       requests.push(method);
       if (method === "initialize") return { result: {} };
       if (method === "thread/unsubscribe") return { result: {} };
@@ -88,6 +89,7 @@ describe("Codex App Server agent-message extraction", () => {
         return { result: { thread: { id: threadStarts === 1 ? "thread-loaded" : "thread-new" } } };
       }
       if (method === "turn/start") {
+        turnInputs.push(params?.input);
         queueMicrotask(() => {
           internals.handleLine(JSON.stringify({
             method: "turn/started",
@@ -108,7 +110,7 @@ describe("Codex App Server agent-message extraction", () => {
     };
 
     try {
-      await expect(client.runTurn("first request")).resolves.toMatchObject({
+      await expect(client.runTurn("hi")).resolves.toMatchObject({
         threadId: "thread-loaded"
       });
       await expect(client.runTurn("second request", "thread-loaded")).resolves.toMatchObject({
@@ -126,6 +128,11 @@ describe("Codex App Server agent-message extraction", () => {
     expect(requests.filter((method) => method === "thread/resume")).toHaveLength(0);
     expect(requests.filter((method) => method === "thread/unsubscribe")).toHaveLength(1);
     expect(requests.filter((method) => method === "turn/start")).toHaveLength(3);
+    expect(turnInputs).toEqual([
+      [{ type: "text", text: "hi" }],
+      [{ type: "text", text: "second request" }],
+      [{ type: "text", text: "rotated request" }]
+    ]);
     expect(timingLogs.some((line) => line.includes("phase=turn/started"))).toBe(true);
     expect(timingLogs.some((line) => line.includes("phase=userMessage"))).toBe(true);
   });

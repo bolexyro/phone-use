@@ -211,7 +211,6 @@ fun PhoneControlApp(
                             isDarkMode = isDarkMode,
                             onToggleDarkMode = setDarkMode,
                             onRequestShizukuPermission = { shizukuController.requestPermission() },
-                            onRefreshShizuku = shizukuController::refresh,
                             onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
                             onBack = { navController.popBackStack() },
                         )
