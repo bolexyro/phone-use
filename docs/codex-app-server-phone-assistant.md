@@ -3,7 +3,7 @@
 The desktop side of the pivot has two small local processes:
 
 1. `assistant:companion` watches the phone for a request typed in the Android
-   app and starts one Codex App Server turn for it.
+   app and drives turns through one lazily-warmed Codex App Server process.
 2. `assistant:mcp` is the reusable MCP adapter for manual Codex/MCP clients.
    The companion uses the same phone-tool dispatcher directly, so a normal
    companion turn does not depend on a second MCP stdio process.
@@ -20,9 +20,9 @@ Android app (typed request)
         v
 pnpm assistant:companion
         |
-        | initialize -> thread/start -> turn/start
+        | initialize once -> thread/start or thread/resume -> turn/start (x N)
         v
-Codex App Server (ChatGPT/Codex login)
+Codex App Server (one persistent process; ChatGPT/Codex login)
         |
         | direct dynamic phone_control_* tools
         v
@@ -87,6 +87,34 @@ through the bundled Code Mode host, which the companion enables by default.
 Setting `PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST=false` intentionally disables
 that route and therefore prevents dynamic phone actions from executing.
 
+## Persistent App Server and isolated context
+
+The companion creates one `CodexAppServerClient` before it begins polling and
+closes it only when the companion exits. The first claimed request starts the
+process and performs the `initialize` handshake. Successful later requests
+reuse the already loaded DHD thread; `thread/resume` is sent only when the
+stored thread id is not loaded in that connection (for example after a
+companion restart). A three-hour DHD inactivity rotation still creates a new
+thread as before.
+
+The App Server child starts in a dedicated user runtime directory rather than
+the Phone Control repository: `%USERPROFILE%\\.dhd\\codex-runtime` by default.
+Override it with `PHONE_ASSISTANT_CODEX_CWD` when a different empty directory is
+needed. The companion also passes minimal App Server config overrides that
+disable configured MCP servers, project instruction loading, shell execution,
+apps, memories, multi-agent tools, hooks, remote plugins, and dependency
+installation. ChatGPT authentication remains in the user's normal Codex home;
+the isolated working directory only keeps DHD from inheriting the coding
+workspace's project context and tool catalog.
+
+Lifecycle timing is written to stderr as `[dhd-timing]` records with
+`tsMs` (wall-clock milliseconds) and `elapsedMs`. The records cover
+`poll:start/complete`, `claim:start/complete`, `spawn:start/complete`,
+`initialize:start/complete`, `thread/start`, `resume`, `turn/start`,
+`turn/started`, `userMessage`, `turn/completed`, and timeout/error paths. They
+contain ids and phase metadata only, not request text, tool arguments,
+screenshots, or model output.
+
 ## Action coverage
 
 The bridge preserves the pre-pivot MCP primitives in phone-owned form:
@@ -150,13 +178,15 @@ pnpm assistant:companion
 ```
 
 Now type a request in the Android app and press Run. The companion claims that
-request, starts a Codex App Server turn, and the model calls the phone tools.
+request, starts the shared Codex App Server connection on the first request,
+and the model calls the phone tools. Later requests on the same companion
+reuse the initialized connection and loaded DHD thread.
 The phone stays in Watch mode: the target app opens and receives visible taps,
 typing, swipes, keypresses, and waits. The foreground notification and the
 in-app timeline show a compact, independently scrollable stack of each action's
 short label, such as “Searching for jollof rice”. Expanding an item reveals its
 target and full safe explanation. When the turn finishes, the companion marks
-the phone session completed. DHD pins its own App Server turns to `gpt-5.6-luna` with `low`
+the phone session completed. DHD pins its own App Server turns to `gpt-5.6-luna` with `max`
 reasoning by default, independently of the interactive Codex chat's settings.
 Set `PHONE_ASSISTANT_CODEX_MODEL` or `PHONE_ASSISTANT_CODEX_REASONING_EFFORT`
 only when intentionally overriding that development default. The companion runs

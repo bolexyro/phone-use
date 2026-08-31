@@ -1,5 +1,9 @@
+import { mkdirSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import * as readline from "node:readline";
 
 import {
@@ -16,6 +20,18 @@ const BRIDGE_POLL_TIMEOUT_MS = 5_000;
 const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_AGENT_FEEDBACK_CHARS = 4_000;
+const DEFAULT_CODEX_RUNTIME_CWD = join(homedir(), ".dhd", "codex-runtime");
+const MINIMAL_CODEX_CONFIG_OVERRIDES = [
+  "mcp_servers={}",
+  "project_doc_max_bytes=0",
+  "features.apps=false",
+  "features.hooks=false",
+  "features.memories=false",
+  "features.multi_agent=false",
+  "features.remote_plugin=false",
+  "features.shell_tool=false",
+  "features.skill_mcp_dependency_install=false"
+];
 // DHD owns its App Server conversation settings. These defaults deliberately
 // do not depend on the user's interactive Codex chat or global config.
 const DEFAULT_CODEX_MODEL = "gpt-5.6-luna";
@@ -34,6 +50,30 @@ interface PendingRpcRequest {
   resolve: (message: JsonRpcMessage) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+/**
+ * Human-readable, millisecond-resolution lifecycle timing written to stderr.
+ * The companion never includes request text, tool arguments, screenshots, or
+ * model output in these diagnostics.
+ */
+class PhaseTimer {
+  private readonly startedAt = performance.now();
+
+  constructor(private readonly scope: string) {}
+
+  log(phase: string, details?: string): void {
+    const elapsedMs = Math.round(performance.now() - this.startedAt);
+    const suffix = details ? ` ${details}` : "";
+    console.error(
+      `[dhd-timing] scope=${this.scope} phase=${phase} tsMs=${Date.now()} elapsedMs=${elapsedMs}${suffix}`
+    );
+  }
+}
+
+function logCompanionPhase(phase: string, details?: string): void {
+  const suffix = details ? ` ${details}` : "";
+  console.error(`[dhd-timing] scope=companion phase=${phase} tsMs=${Date.now()}${suffix}`);
 }
 
 export interface DynamicToolCallResponse {
@@ -58,7 +98,7 @@ interface AgentMessageState {
 }
 
 /**
- * Small, one-turn Codex App Server client. Authentication stays in the Codex
+ * Persistent Codex App Server client. Authentication stays in the Codex
  * CLI/App Server; this process never handles ChatGPT cookies or API keys.
  */
 export class CodexAppServerClient {
@@ -66,6 +106,10 @@ export class CodexAppServerClient {
   private reader: readline.Interface | null = null;
   private nextId = 1;
   private pending = new Map<JsonRpcId, PendingRpcRequest>();
+  private startPromise: Promise<void> | null = null;
+  private initialized = false;
+  private loadedThreadIds = new Set<string>();
+  private readonly runtimeCwd = resolveCodexRuntimeCwd();
   private turnCompletion: {
     resolve: (result: TurnResult) => void;
     reject: (error: Error) => void;
@@ -76,33 +120,91 @@ export class CodexAppServerClient {
   private activeTurnId: string | null = null;
   private turnStartedAt: number | null = null;
   private lastServerEvent: string | null = null;
+  private activeTiming: PhaseTimer | null = null;
+  private userMessageLogged = false;
 
-  async runTurn(phoneRequest: string, existingThreadId?: string, threadTitle?: string): Promise<TurnResult> {
-    this.startProcess();
+  /**
+   * Start and initialize one App Server connection. The connection remains
+   * alive after a turn so later requests can reuse its loaded thread state.
+   */
+  async start(timing?: PhaseTimer): Promise<void> {
+    if (this.initialized && this.child) {
+      timing?.log("connection:reuse", `pid=${this.child.pid ?? "?"}`);
+      return;
+    }
+    if (this.startPromise) return this.startPromise;
+
+    const logger = timing ?? new PhaseTimer("codex-connection");
+    this.startPromise = (async () => {
+      if (this.child) await this.stopProcess();
+      logger.log("spawn:start", `cwd=${this.runtimeCwd}`);
+      this.startProcess();
+      logger.log("spawn:complete", `pid=${this.child?.pid ?? "?"}`);
+      logger.log("initialize:start");
+      try {
+        await this.request("initialize", {
+          clientInfo: {
+            name: "dhd-phone-assistant",
+            title: "DHD phone assistant",
+            version: "0.1.0"
+          },
+          capabilities: { experimentalApi: true }
+        });
+        this.notify("initialized", {});
+        this.initialized = true;
+        logger.log("initialize:complete");
+      } catch (error) {
+        await this.stopProcess();
+        throw error;
+      }
+    })();
+
     try {
-      await this.request("initialize", {
-        clientInfo: {
-          name: "dhd-phone-assistant",
-          title: "DHD phone assistant",
-          version: "0.1.0"
-        },
-        capabilities: { experimentalApi: true }
-      });
-      this.notify("initialized", {});
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  async runTurn(
+    phoneRequest: string,
+    existingThreadId?: string,
+    threadTitle?: string,
+    timing?: PhaseTimer
+  ): Promise<TurnResult> {
+    const logger = timing ?? new PhaseTimer("codex-turn");
+    this.activeTiming = logger;
+    this.userMessageLogged = false;
+    try {
+      await this.start(logger);
 
       const threadParams: Record<string, unknown> = {
         dynamicTools: buildPhoneAssistantDynamicTools(),
-        model: resolveCodexModel()
+        model: resolveCodexModel(),
+        cwd: this.runtimeCwd
       };
-      const threadResponse = existingThreadId
-        ? await this.request("thread/resume", {
-          threadId: existingThreadId,
-          model: threadParams.model
-        })
-        : await this.request("thread/start", threadParams);
-      const threadId = extractThreadId(threadResponse.result) || existingThreadId || null;
+
+      let threadId: string | null = null;
+      if (existingThreadId && this.loadedThreadIds.has(existingThreadId)) {
+        threadId = existingThreadId;
+        logger.log("thread:reuse_loaded", `threadId=${threadId}`);
+      } else if (existingThreadId) {
+        logger.log("resume:start", `threadId=${existingThreadId}`);
+        const threadResponse = await this.request("thread/resume", {
+          ...threadParams,
+          threadId: existingThreadId
+        });
+        threadId = extractThreadId(threadResponse.result) || existingThreadId;
+        logger.log("resume:complete", `threadId=${threadId}`);
+      } else {
+        logger.log("thread/start:start");
+        const threadResponse = await this.request("thread/start", threadParams);
+        threadId = extractThreadId(threadResponse.result);
+        logger.log("thread/start:complete", `threadId=${threadId ?? "?"}`);
+      }
       if (!threadId) throw new Error("Codex App Server did not return a thread id.");
       this.activeThreadId = threadId;
+      this.loadedThreadIds.add(threadId);
       if (!existingThreadId && threadTitle?.trim()) {
         // Naming is best-effort: older App Server builds may not expose this
         // convenience method, but a failed name update must not lose a turn.
@@ -126,16 +228,20 @@ export class CodexAppServerClient {
       });
       try {
         this.turnStartedAt = Date.now();
+        logger.log("turn/start:start", `threadId=${threadId}`);
         const turnStartResponse = await this.request("turn/start", {
           threadId,
           model: resolveCodexModel(),
           effort: resolveCodexEffort(),
+          cwd: this.runtimeCwd,
           input: [{ type: "text", text: buildPhonePrompt(phoneRequest) }]
         });
         // `turn/start` returns the initial turn object. The notification is
         // also tracked below, but capturing this response makes cancellation
         // reliable even if the notification arrives after a timeout callback.
         this.activeTurnId = extractTurnId(turnStartResponse.result) || this.activeTurnId;
+        this.logUserMessagePhaseFromValue(turnStartResponse.result, "turn/start.response");
+        logger.log("turn/start:complete", `turnId=${this.activeTurnId ?? "?"}`);
       } catch (error) {
         this.turnCompletion?.reject(error instanceof Error ? error : new Error(String(error)));
         this.turnCompletion = null;
@@ -147,6 +253,7 @@ export class CodexAppServerClient {
         () => {
           const elapsedMs = this.turnStartedAt ? Date.now() - this.turnStartedAt : undefined;
           const lastEvent = this.lastServerEvent || "no App Server event received";
+          logger.log("turn:timeout", `lastEvent=${lastEvent.replaceAll(" ", "_")}`);
           console.error(
             `[codex-app-server] turn watchdog expired after ${elapsedMs ?? "?"}ms; ` +
             `last event: ${lastEvent}`
@@ -158,19 +265,39 @@ export class CodexAppServerClient {
           );
         }
       );
+    } catch (error) {
+      // A failed/timeout turn may still be active inside App Server. Restart
+      // the connection on the next request so a bad turn cannot poison the
+      // persistent connection or make later requests fail mysteriously.
+      await this.stopProcess();
+      throw error;
     } finally {
       this.activeThreadId = null;
       this.activeTurnId = null;
       this.turnStartedAt = null;
       this.lastServerEvent = null;
-      await this.stopProcess();
+      this.activeTiming = null;
+      this.userMessageLogged = false;
+      if (this.turnCompletion) {
+        this.turnCompletion.reject(new Error("Codex App Server turn ended before completion."));
+        this.turnCompletion = null;
+      }
     }
+  }
+
+  /** Stop the persistent App Server connection during companion shutdown. */
+  async close(): Promise<void> {
+    await this.stopProcess();
   }
 
   private startProcess(): void {
     if (this.child) throw new Error("Codex App Server client is already running.");
+    mkdirSync(this.runtimeCwd, { recursive: true });
     const command = process.env.PHONE_ASSISTANT_CODEX_BIN?.trim() || "codex";
     const args = ["app-server", "--listen", "stdio://"];
+    for (const override of MINIMAL_CODEX_CONFIG_OVERRIDES) {
+      args.push("-c", override);
+    }
     // In the current Codex App Server builds, the model's dynamic-tool router
     // reaches these phone tools through the bundled Code Mode host. Keep that
     // host enabled by default; disabling it makes an otherwise healthy turn
@@ -187,6 +314,7 @@ export class CodexAppServerClient {
       : command;
     const child = spawn(windowsCommand, process.platform === "win32" ? [] : args, {
       stdio: ["pipe", "pipe", "pipe"],
+      cwd: this.runtimeCwd,
       // On Windows Codex may be exposed as a .ps1/.cmd shim rather than a
       // native executable. Let cmd.exe resolve that user-installed command.
       shell: process.platform === "win32",
@@ -202,6 +330,12 @@ export class CodexAppServerClient {
     });
     child.once("error", (error) => this.failPending(new Error(`Could not start Codex App Server: ${error.message}`)));
     child.once("close", (code, signal) => {
+      if (this.child === child) {
+        this.child = null;
+        this.reader = null;
+        this.initialized = false;
+        this.loadedThreadIds.clear();
+      }
       this.failPending(new Error(`Codex App Server exited before completing the turn (code=${code ?? "?"}, signal=${signal ?? "?"}).`));
     });
   }
@@ -240,6 +374,21 @@ export class CodexAppServerClient {
       return;
     }
 
+    if (message.method === "thread/started") {
+      const threadId = extractThreadId(message.params);
+      if (threadId) this.loadedThreadIds.add(threadId);
+    } else if (message.method === "thread/closed") {
+      const threadId = extractThreadId(message.params);
+      if (threadId) this.loadedThreadIds.delete(threadId);
+    } else if (message.method === "thread/status/changed") {
+      const params = extractRecord(message.params);
+      const status = extractRecord(params?.status);
+      if (status?.type === "notLoaded") {
+        const threadId = extractThreadId(message.params);
+        if (threadId) this.loadedThreadIds.delete(threadId);
+      }
+    }
+
     const completion = this.turnCompletion;
     if (!completion || !message.method) return;
     this.lastServerEvent = describeServerEvent(message);
@@ -247,9 +396,11 @@ export class CodexAppServerClient {
     if (message.method === "turn/started") {
       this.activeTurnId = extractTurnId(message.params) || this.activeTurnId;
       this.turnStartedAt = this.turnStartedAt || Date.now();
+      this.activeTiming?.log("turn/started", `turnId=${this.activeTurnId ?? "?"}`);
       return;
     }
     if (message.method === "item/started") {
+      this.logUserMessagePhase(message);
       recordAgentMessageStarted(completion, message.params);
       return;
     }
@@ -258,12 +409,14 @@ export class CodexAppServerClient {
       return;
     }
     if (message.method === "item/completed") {
+      this.logUserMessagePhase(message);
       recordAgentMessageCompleted(completion, message.params);
       return;
     }
     if (message.method === "turn/completed") {
       const turn = extractRecord(message.params)?.turn;
       const status = extractRecord(turn)?.status;
+      this.activeTiming?.log("turn/completed", `status=${String(status ?? "unknown")}`);
       if (status === "failed") {
         completion.reject(new Error(extractTurnError(message.params) || "Codex App Server turn failed."));
       } else if (status === "interrupted") {
@@ -285,6 +438,26 @@ export class CodexAppServerClient {
       completion.reject(new Error(extractTurnError(message.params) || "Codex App Server turn failed."));
       this.turnCompletion = null;
     }
+  }
+
+  private logUserMessagePhase(message: JsonRpcMessage): void {
+    this.logUserMessagePhaseFromValue(message.params, message.method || "notification");
+  }
+
+  private logUserMessagePhaseFromValue(value: unknown, event: string): void {
+    if (this.userMessageLogged) return;
+    const record = extractRecord(value);
+    const candidates: unknown[] = [record?.item];
+    const turn = extractRecord(record?.turn);
+    if (Array.isArray(turn?.items)) candidates.push(...turn.items);
+    if (Array.isArray(record?.items)) candidates.push(...record.items);
+    if (record?.type === "userMessage") candidates.push(record);
+    const userMessage = candidates
+      .map((candidate) => extractRecord(candidate))
+      .find((item) => item?.type === "userMessage");
+    if (!userMessage) return;
+    this.userMessageLogged = true;
+    this.activeTiming?.log("userMessage", `event=${event}`);
   }
 
   private async handleServerRequest(message: JsonRpcMessage): Promise<void> {
@@ -399,6 +572,8 @@ export class CodexAppServerClient {
     const reader = this.reader;
     this.child = null;
     this.reader = null;
+    this.initialized = false;
+    this.loadedThreadIds.clear();
     this.turnCompletion = null;
     for (const waiter of this.pending.values()) {
       clearTimeout(waiter.timer);
@@ -697,6 +872,7 @@ function describeServerEvent(message: JsonRpcMessage): string {
 export async function runAssistantCompanion(): Promise<void> {
   const pollIntervalMs = parsePollInterval(process.env.PHONE_ASSISTANT_POLL_MS);
   let stopping = false;
+  const codexClient = new CodexAppServerClient();
   const stop = () => {
     stopping = true;
   };
@@ -706,37 +882,63 @@ export async function runAssistantCompanion(): Promise<void> {
   console.error("[phone-assistant-companion] waiting for a request typed in the Android app");
   console.error("[phone-assistant-companion] ensure adb forward tcp:8765 tcp:8765 and a logged-in Codex CLI are available");
 
-  while (!stopping) {
-    try {
-      const pending = await requestBridge(
-        { type: "pending_request", requestId: randomUUID() },
-        { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
-      );
-      if (pending.ok === true && pending.available === true) {
-        await processPendingRequest(pending);
-      } else if (pending.ok === false) {
-        console.error(`[phone-assistant-companion] phone bridge rejected poll: ${String(pending.message ?? "unknown error")}`);
+  try {
+    while (!stopping) {
+      const pollStartedAt = performance.now();
+      logCompanionPhase("poll:start");
+      try {
+        const pending = await requestBridge(
+          { type: "pending_request", requestId: randomUUID() },
+          { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
+        );
+        logCompanionPhase(
+          "poll:complete",
+          `durationMs=${Math.round(performance.now() - pollStartedAt)} available=${pending.available === true}`
+        );
+        if (pending.ok === true && pending.available === true) {
+          await processPendingRequest(pending, codexClient);
+        } else if (pending.ok === false) {
+          console.error(`[phone-assistant-companion] phone bridge rejected poll: ${String(pending.message ?? "unknown error")}`);
+        }
+      } catch (error) {
+        logCompanionPhase(
+          "poll:error",
+          `durationMs=${Math.round(performance.now() - pollStartedAt)}`
+        );
+        // The phone may be disconnected or the bridge may not be running yet.
+        // Keep polling so reconnecting the device does not require a restart.
+        console.error(`[phone-assistant-companion] ${error instanceof Error ? error.message : String(error)}`);
       }
-    } catch (error) {
-      // The phone may be disconnected or the bridge may not be running yet.
-      // Keep polling so reconnecting the device does not require a restart.
-      console.error(`[phone-assistant-companion] ${error instanceof Error ? error.message : String(error)}`);
+      if (!stopping) await delay(pollIntervalMs);
     }
-    if (!stopping) await delay(pollIntervalMs);
+  } finally {
+    await codexClient.close();
   }
 }
 
-async function processPendingRequest(pending: BridgeMessage): Promise<void> {
+async function processPendingRequest(
+  pending: BridgeMessage,
+  codexClient: CodexAppServerClient
+): Promise<void> {
   const sessionId = typeof pending.sessionId === "string" ? pending.sessionId : "";
   if (!sessionId) {
     console.error("[phone-assistant-companion] pending request did not include a session id");
     return;
   }
-  const claimed = await requestBridge({
-    type: "claim_request",
-    requestId: randomUUID(),
-    sessionId
-  });
+  const timing = new PhaseTimer(`phone-request:${sessionId}`);
+  timing.log("claim:start");
+  let claimed: BridgeMessage;
+  try {
+    claimed = await requestBridge({
+      type: "claim_request",
+      requestId: randomUUID(),
+      sessionId
+    });
+    timing.log("claim:complete", `ok=${claimed.ok === true}`);
+  } catch (error) {
+    timing.log("claim:error");
+    throw error;
+  }
   if (claimed.ok !== true) {
     // Another companion instance may have claimed it between polling and the
     // claim call. This is expected and is safe to ignore.
@@ -758,7 +960,7 @@ async function processPendingRequest(pending: BridgeMessage): Promise<void> {
     const conversationId = typeof claimed.conversationId === "string" ? claimed.conversationId : undefined;
     const existingThreadId = typeof claimed.codexThreadId === "string" ? claimed.codexThreadId : undefined;
     const threadTitle = typeof claimed.title === "string" ? claimed.title : request;
-    const result = await new CodexAppServerClient().runTurn(request, existingThreadId, threadTitle);
+    const result = await codexClient.runTurn(request, existingThreadId, threadTitle, timing);
     if (conversationId && result.threadId && result.threadId !== existingThreadId) {
       const bound = await requestBridge({
         type: "bind_codex_thread",
@@ -843,6 +1045,7 @@ function extractThreadId(value: unknown): string | null {
     const id = (thread as Record<string, unknown>).id;
     if (typeof id === "string" && id) return id;
   }
+  if (typeof record.threadId === "string" && record.threadId) return record.threadId;
   return typeof record.id === "string" && record.id ? record.id : null;
 }
 
@@ -996,6 +1199,11 @@ function extractTurnError(value: unknown): string {
   const turnError = extractRecord(turn?.error);
   if (typeof turnError?.message === "string") return turnError.message;
   return typeof record?.message === "string" ? record.message : "";
+}
+
+function resolveCodexRuntimeCwd(): string {
+  const configured = process.env.PHONE_ASSISTANT_CODEX_CWD?.trim();
+  return configured ? resolve(configured) : DEFAULT_CODEX_RUNTIME_CWD;
 }
 
 function extractRecord(value: unknown): Record<string, unknown> | null {

@@ -62,4 +62,62 @@ describe("Codex App Server agent-message extraction", () => {
       threadId: "thread-test"
     });
   });
+
+  it("initializes once and reuses a loaded thread across turns", async () => {
+    const client = new CodexAppServerClient();
+    const internals = client as any;
+    const requests: string[] = [];
+    const timingLogs: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      const line = args.map(String).join(" ");
+      if (line.includes("[dhd-timing]")) timingLogs.push(line);
+    };
+
+    internals.startProcess = () => {
+      internals.child = { pid: 1234, stdin: { destroyed: false } };
+    };
+    internals.notify = () => undefined;
+    internals.request = async (method: string) => {
+      requests.push(method);
+      if (method === "initialize") return { result: {} };
+      if (method === "thread/start") return { result: { thread: { id: "thread-loaded" } } };
+      if (method === "turn/start") {
+        queueMicrotask(() => {
+          internals.handleLine(JSON.stringify({
+            method: "turn/started",
+            params: { turn: { id: `turn-${requests.filter((entry) => entry === "turn/start").length}` } }
+          }));
+          internals.handleLine(JSON.stringify({
+            method: "item/started",
+            params: { item: { id: "user-message", type: "userMessage" } }
+          }));
+          internals.handleLine(JSON.stringify({
+            method: "turn/completed",
+            params: { turn: { status: "completed" } }
+          }));
+        });
+        return { result: { turn: { id: "turn-response" } } };
+      }
+      throw new Error(`Unexpected App Server request in test: ${method}`);
+    };
+
+    try {
+      await expect(client.runTurn("first request")).resolves.toMatchObject({
+        threadId: "thread-loaded"
+      });
+      await expect(client.runTurn("second request", "thread-loaded")).resolves.toMatchObject({
+        threadId: "thread-loaded"
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(requests.filter((method) => method === "initialize")).toHaveLength(1);
+    expect(requests.filter((method) => method === "thread/start")).toHaveLength(1);
+    expect(requests.filter((method) => method === "thread/resume")).toHaveLength(0);
+    expect(requests.filter((method) => method === "turn/start")).toHaveLength(2);
+    expect(timingLogs.some((line) => line.includes("phase=turn/started"))).toBe(true);
+    expect(timingLogs.some((line) => line.includes("phase=userMessage"))).toBe(true);
+  });
 });
