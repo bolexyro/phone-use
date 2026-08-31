@@ -3,7 +3,7 @@
 The desktop side of the pivot has two small local processes:
 
 1. `assistant:companion` watches the phone for a request typed in the Android
-   app and drives turns through one lazily-warmed Codex App Server process.
+   app and drives turns through one prewarmed Codex App Server process.
 2. `assistant:mcp` is the reusable MCP adapter for manual Codex/MCP clients.
    The companion uses the same phone-tool dispatcher directly, so a normal
    companion turn does not depend on a second MCP stdio process.
@@ -20,7 +20,7 @@ Android app (typed request)
         v
 pnpm assistant:companion
         |
-        | initialize once -> thread/start or thread/resume -> turn/start (x N)
+        | prewarm -> initialize once -> thread/start or thread/resume -> turn/start (x N)
         v
 Codex App Server (one persistent process; ChatGPT/Codex login)
         |
@@ -89,30 +89,54 @@ that route and therefore prevents dynamic phone actions from executing.
 
 ## Persistent App Server and isolated context
 
-The companion creates one `CodexAppServerClient` before it begins polling and
-closes it only when the companion exits. The first claimed request starts the
-process and performs the `initialize` handshake. Successful later requests
-reuse the already loaded DHD thread; `thread/resume` is sent only when the
-stored thread id is not loaded in that connection (for example after a
-companion restart). A three-hour DHD inactivity rotation still creates a new
-thread as before.
+The companion creates one `CodexAppServerClient`, prewarms it (including the
+`initialize` handshake) before it begins polling, and closes it only when the
+companion exits. If startup fails, it retries once and keeps polling; the next
+phone request retries startup again. When the DHD Activity becomes visible, it
+sets a one-shot warmup bit in the phone bridge. The next poll consumes that bit
+and warms the same connection in the background, so opening DHD can hide a
+desktop companion restart or crash recovery. Sending a request while warmup is
+in progress simply awaits the same idempotent startup operation.
+
+Successful later requests reuse the already loaded DHD thread; `thread/resume`
+is sent only when the stored thread id is not loaded in that connection (for
+example after a companion restart). At a three-hour DHD inactivity rotation,
+the companion sends `thread/unsubscribe` for the superseded loaded thread
+before starting the replacement, preventing old subscriptions from accumulating.
 
 The App Server child starts in a dedicated user runtime directory rather than
 the Phone Control repository: `%USERPROFILE%\\.dhd\\codex-runtime` by default.
 Override it with `PHONE_ASSISTANT_CODEX_CWD` when a different empty directory is
 needed. The companion also passes minimal App Server config overrides that
 disable configured MCP servers, project instruction loading, shell execution,
-apps, memories, multi-agent tools, hooks, remote plugins, and dependency
-installation. ChatGPT authentication remains in the user's normal Codex home;
-the isolated working directory only keeps DHD from inheriting the coding
-workspace's project context and tool catalog.
+apps, browser use, computer use, memories, multi-agent tools, plugins, remote
+plugins, skill search, unified exec, hooks, and dependency installation.
+It also turns off goals, shell snapshots, image generation, the in-app browser,
+tool suggestions, image viewing, and workspace dependencies for this child.
+ChatGPT authentication remains in the user's normal Codex home; the isolated
+working directory only keeps DHD from inheriting the coding workspace's project
+context and tool catalog. Code Mode host remains enabled because it is the
+transport that delivers the direct `phone_control_*` calls.
+Because table-valued CLI overrides can merge with a user's config, the
+companion also reads only the names of configured global MCP sections and adds
+an `enabled=false` override for each one. It never reads or logs their
+credentials, commands, URLs, or headers.
+
+As a smoke measurement on 31 August 2026, a fresh isolated diagnostic rollout
+contained a 41,285-character `world_state` payload. The comparable pre-change
+DHD rollout contained 48,316 characters, a reduction of about 14.5%. The
+remaining state is primarily Codex permission metadata and host-skill metadata;
+the feature overrides are a boundary and latency reduction, not a claim that
+the App Server has no global user metadata at all.
 
 Lifecycle timing is written to stderr as `[dhd-timing]` records with
 `tsMs` (wall-clock milliseconds) and `elapsedMs`. The records cover
-`poll:start/complete`, `claim:start/complete`, `spawn:start/complete`,
+`claim:start/complete`, `spawn:start/complete`,
 `initialize:start/complete`, `thread/start`, `resume`, `turn/start`,
-`turn/started`, `userMessage`, `turn/completed`, and timeout/error paths. They
-contain ids and phase metadata only, not request text, tool arguments,
+`thread/unsubscribe`, `turn/started`, `userMessage`, `turn/completed`, and
+timeout/error paths. Idle `poll:start/complete` timing is suppressed by
+default; set `PHONE_ASSISTANT_DEBUG_TIMING=true` when diagnosing poll latency.
+They contain ids and phase metadata only, not request text, tool arguments,
 screenshots, or model output.
 
 ## Action coverage
@@ -177,10 +201,12 @@ Start the companion in a second terminal:
 pnpm assistant:companion
 ```
 
-Now type a request in the Android app and press Run. The companion claims that
-request, starts the shared Codex App Server connection on the first request,
-and the model calls the phone tools. Later requests on the same companion
-reuse the initialized connection and loaded DHD thread.
+Now type a request in the Android app and press Run. The companion has already
+prewarmed the shared Codex App Server connection (or will retry if startup was
+temporarily unavailable), claims the request, and the model calls the phone
+tools. Later requests on the same companion reuse the initialized connection
+and loaded DHD thread. Opening DHD also sends the best-effort warmup signal
+described above.
 The phone stays in Watch mode: the target app opens and receives visible taps,
 typing, swipes, keypresses, and waits. The foreground notification and the
 in-app timeline show a compact, independently scrollable stack of each action's

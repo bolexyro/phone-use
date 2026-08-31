@@ -35,6 +35,7 @@ import java.net.Socket
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -64,6 +65,7 @@ class DevBridgeServer(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var started = false
+    private val codexWarmupRequested = AtomicBoolean(false)
     private val observations = Collections.synchronizedMap(
         object : LinkedHashMap<String, ObservationSnapshot>(MAX_OBSERVATIONS + 1, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ObservationSnapshot>?): Boolean =
@@ -99,6 +101,15 @@ class DevBridgeServer(
         serverSocket?.close()
         serverSocket = null
         scope.coroutineContext[Job]?.cancel()
+    }
+
+    /**
+     * Record that the DHD UI became visible. The desktop companion consumes
+     * this one-shot bit on its next pending-request poll and prewarms Codex in
+     * the background, without making the Android app wait for the desktop.
+     */
+    fun requestCodexWarmup() {
+        codexWarmupRequested.set(true)
     }
 
     private suspend fun handleClient(client: Socket) {
@@ -241,6 +252,7 @@ class DevBridgeServer(
             .put("requestId", requestId)
             .put("ok", true)
             .put("available", pending != null)
+            .put("warmupRequested", codexWarmupRequested.getAndSet(false))
         if (pending != null) {
             response
                 .put("sessionId", pending.sessionId)

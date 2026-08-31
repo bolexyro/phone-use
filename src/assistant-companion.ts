@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -25,13 +25,27 @@ const MINIMAL_CODEX_CONFIG_OVERRIDES = [
   "mcp_servers={}",
   "project_doc_max_bytes=0",
   "features.apps=false",
+  "features.browser_use=false",
+  "features.computer_use=false",
+  "features.goals=false",
   "features.hooks=false",
+  "features.image_generation=false",
+  "features.in_app_browser=false",
   "features.memories=false",
   "features.multi_agent=false",
+  "features.plugins=false",
   "features.remote_plugin=false",
+  "features.shell_snapshot=false",
   "features.shell_tool=false",
-  "features.skill_mcp_dependency_install=false"
+  "features.skill_mcp_dependency_install=false",
+  "features.skill_search=false",
+  "features.tool_suggest=false",
+  "features.unified_exec=false",
+  "features.view_image=false",
+  "features.workspace_dependencies=false"
 ];
+const PREWARM_ATTEMPTS = 2;
+const PREWARM_RETRY_DELAY_MS = 500;
 // DHD owns its App Server conversation settings. These defaults deliberately
 // do not depend on the user's interactive Codex chat or global config.
 const DEFAULT_CODEX_MODEL = "gpt-5.6-luna";
@@ -76,6 +90,12 @@ function logCompanionPhase(phase: string, details?: string): void {
   console.error(`[dhd-timing] scope=companion phase=${phase} tsMs=${Date.now()}${suffix}`);
 }
 
+function debugTimingEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes(
+    (process.env.PHONE_ASSISTANT_DEBUG_TIMING ?? "").trim().toLowerCase()
+  );
+}
+
 export interface DynamicToolCallResponse {
   contentItems: Array<
     | { type: "inputText"; text: string }
@@ -117,6 +137,7 @@ export class CodexAppServerClient {
     nextAgentMessageOrder: number;
   } | null = null;
   private activeThreadId: string | null = null;
+  private activeDhdThreadId: string | null = null;
   private activeTurnId: string | null = null;
   private turnStartedAt: number | null = null;
   private lastServerEvent: string | null = null;
@@ -185,6 +206,9 @@ export class CodexAppServerClient {
       };
 
       let threadId: string | null = null;
+      if (this.activeDhdThreadId && this.activeDhdThreadId !== existingThreadId) {
+        await this.unsubscribeThread(this.activeDhdThreadId, logger);
+      }
       if (existingThreadId && this.loadedThreadIds.has(existingThreadId)) {
         threadId = existingThreadId;
         logger.log("thread:reuse_loaded", `threadId=${threadId}`);
@@ -204,6 +228,7 @@ export class CodexAppServerClient {
       }
       if (!threadId) throw new Error("Codex App Server did not return a thread id.");
       this.activeThreadId = threadId;
+      this.activeDhdThreadId = threadId;
       this.loadedThreadIds.add(threadId);
       if (!existingThreadId && threadTitle?.trim()) {
         // Naming is best-effort: older App Server builds may not expose this
@@ -295,7 +320,10 @@ export class CodexAppServerClient {
     mkdirSync(this.runtimeCwd, { recursive: true });
     const command = process.env.PHONE_ASSISTANT_CODEX_BIN?.trim() || "codex";
     const args = ["app-server", "--listen", "stdio://"];
-    for (const override of MINIMAL_CODEX_CONFIG_OVERRIDES) {
+    for (const override of [
+      ...MINIMAL_CODEX_CONFIG_OVERRIDES,
+      ...disabledConfiguredMcpOverrides()
+    ]) {
       args.push("-c", override);
     }
     // In the current Codex App Server builds, the model's dynamic-tool router
@@ -379,13 +407,19 @@ export class CodexAppServerClient {
       if (threadId) this.loadedThreadIds.add(threadId);
     } else if (message.method === "thread/closed") {
       const threadId = extractThreadId(message.params);
-      if (threadId) this.loadedThreadIds.delete(threadId);
+      if (threadId) {
+        this.loadedThreadIds.delete(threadId);
+        if (this.activeDhdThreadId === threadId) this.activeDhdThreadId = null;
+      }
     } else if (message.method === "thread/status/changed") {
       const params = extractRecord(message.params);
       const status = extractRecord(params?.status);
       if (status?.type === "notLoaded") {
         const threadId = extractThreadId(message.params);
-        if (threadId) this.loadedThreadIds.delete(threadId);
+        if (threadId) {
+          this.loadedThreadIds.delete(threadId);
+          if (this.activeDhdThreadId === threadId) this.activeDhdThreadId = null;
+        }
       }
     }
 
@@ -458,6 +492,27 @@ export class CodexAppServerClient {
     if (!userMessage) return;
     this.userMessageLogged = true;
     this.activeTiming?.log("userMessage", `event=${event}`);
+  }
+
+  private async unsubscribeThread(threadId: string, timing: PhaseTimer): Promise<void> {
+    if (!this.loadedThreadIds.has(threadId)) {
+      if (this.activeDhdThreadId === threadId) this.activeDhdThreadId = null;
+      return;
+    }
+    timing.log("thread/unsubscribe:start", `threadId=${threadId}`);
+    try {
+      await this.request("thread/unsubscribe", { threadId });
+      timing.log("thread/unsubscribe:complete", `threadId=${threadId}`);
+    } catch (error) {
+      timing.log("thread/unsubscribe:error", `threadId=${threadId}`);
+      console.error(
+        `[codex-app-server] could not unsubscribe superseded thread ${threadId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`
+      );
+    } finally {
+      this.loadedThreadIds.delete(threadId);
+      if (this.activeDhdThreadId === threadId) this.activeDhdThreadId = null;
+    }
   }
 
   private async handleServerRequest(message: JsonRpcMessage): Promise<void> {
@@ -574,6 +629,7 @@ export class CodexAppServerClient {
     this.reader = null;
     this.initialized = false;
     this.loadedThreadIds.clear();
+    this.activeDhdThreadId = null;
     this.turnCompletion = null;
     for (const waiter of this.pending.values()) {
       clearTimeout(waiter.timer);
@@ -883,19 +939,30 @@ export async function runAssistantCompanion(): Promise<void> {
   console.error("[phone-assistant-companion] ensure adb forward tcp:8765 tcp:8765 and a logged-in Codex CLI are available");
 
   try {
+    await prewarmCodexClient(codexClient, "codex-prewarm");
     while (!stopping) {
       const pollStartedAt = performance.now();
-      logCompanionPhase("poll:start");
+      if (debugTimingEnabled()) logCompanionPhase("poll:start");
       try {
         const pending = await requestBridge(
           { type: "pending_request", requestId: randomUUID() },
           { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
         );
-        logCompanionPhase(
-          "poll:complete",
-          `durationMs=${Math.round(performance.now() - pollStartedAt)} available=${pending.available === true}`
-        );
+        if (debugTimingEnabled()) {
+          logCompanionPhase(
+            "poll:complete",
+            `durationMs=${Math.round(performance.now() - pollStartedAt)} available=${pending.available === true}`
+          );
+        }
+        if (pending.warmupRequested === true) {
+          logCompanionPhase("codex:warmup_requested");
+          await prewarmCodexClient(codexClient, "codex-app-open-warmup");
+        }
         if (pending.ok === true && pending.available === true) {
+          logCompanionPhase(
+            "poll:request_detected",
+            `durationMs=${Math.round(performance.now() - pollStartedAt)}`
+          );
           await processPendingRequest(pending, codexClient);
         } else if (pending.ok === false) {
           console.error(`[phone-assistant-companion] phone bridge rejected poll: ${String(pending.message ?? "unknown error")}`);
@@ -914,6 +981,30 @@ export async function runAssistantCompanion(): Promise<void> {
   } finally {
     await codexClient.close();
   }
+}
+
+async function prewarmCodexClient(
+  codexClient: CodexAppServerClient,
+  scope: string
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= PREWARM_ATTEMPTS; attempt += 1) {
+    const timing = new PhaseTimer(scope);
+    try {
+      timing.log("start", `attempt=${attempt}`);
+      await codexClient.start(timing);
+      timing.log("complete", `attempt=${attempt}`);
+      return true;
+    } catch (error) {
+      timing.log("error", `attempt=${attempt}`);
+      console.error(
+        `[phone-assistant-companion] Codex prewarm attempt ${attempt}/${PREWARM_ATTEMPTS} failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`
+      );
+      if (attempt < PREWARM_ATTEMPTS) await delay(PREWARM_RETRY_DELAY_MS);
+    }
+  }
+  console.error("[phone-assistant-companion] continuing without a warm Codex connection; the next request will retry startup");
+  return false;
 }
 
 async function processPendingRequest(
@@ -1204,6 +1295,30 @@ function extractTurnError(value: unknown): string {
 function resolveCodexRuntimeCwd(): string {
   const configured = process.env.PHONE_ASSISTANT_CODEX_CWD?.trim();
   return configured ? resolve(configured) : DEFAULT_CODEX_RUNTIME_CWD;
+}
+
+/**
+ * Codex merges table-valued `-c` overrides with the user's config. Explicitly
+ * disable each configured MCP server as well as passing `mcp_servers={}` so a
+ * DHD child cannot start unrelated user integrations during a phone turn.
+ * Only section names are read; credentials and command values never leave the
+ * user's normal Codex home or enter logs.
+ */
+function disabledConfiguredMcpOverrides(): string[] {
+  const codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  const configPath = join(codexHome, "config.toml");
+  let config: string;
+  try {
+    config = readFileSync(configPath, "utf8");
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const line of config.split(/\r?\n/)) {
+    const match = line.match(/^\s*\[mcp_servers\.([A-Za-z0-9_-]+)(?:[.\]])/);
+    if (match?.[1]) names.add(match[1]);
+  }
+  return [...names].sort().map((name) => `mcp_servers.${name}.enabled=false`);
 }
 
 function extractRecord(value: unknown): Record<string, unknown> | null {

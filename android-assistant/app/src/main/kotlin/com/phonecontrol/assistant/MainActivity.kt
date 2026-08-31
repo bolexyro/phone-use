@@ -39,6 +39,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        (application as? PhoneControlApplication)?.devBridgeServer?.requestCodexWarmup()
+    }
+
     private fun startSession(request: String, conversationId: String?) {
         if (request.isBlank()) return
         if (

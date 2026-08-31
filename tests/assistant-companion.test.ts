@@ -78,10 +78,15 @@ describe("Codex App Server agent-message extraction", () => {
       internals.child = { pid: 1234, stdin: { destroyed: false } };
     };
     internals.notify = () => undefined;
+    let threadStarts = 0;
     internals.request = async (method: string) => {
       requests.push(method);
       if (method === "initialize") return { result: {} };
-      if (method === "thread/start") return { result: { thread: { id: "thread-loaded" } } };
+      if (method === "thread/unsubscribe") return { result: {} };
+      if (method === "thread/start") {
+        threadStarts += 1;
+        return { result: { thread: { id: threadStarts === 1 ? "thread-loaded" : "thread-new" } } };
+      }
       if (method === "turn/start") {
         queueMicrotask(() => {
           internals.handleLine(JSON.stringify({
@@ -109,14 +114,18 @@ describe("Codex App Server agent-message extraction", () => {
       await expect(client.runTurn("second request", "thread-loaded")).resolves.toMatchObject({
         threadId: "thread-loaded"
       });
+      await expect(client.runTurn("rotated request")).resolves.toMatchObject({
+        threadId: "thread-new"
+      });
     } finally {
       console.error = originalError;
     }
 
     expect(requests.filter((method) => method === "initialize")).toHaveLength(1);
-    expect(requests.filter((method) => method === "thread/start")).toHaveLength(1);
+    expect(requests.filter((method) => method === "thread/start")).toHaveLength(2);
     expect(requests.filter((method) => method === "thread/resume")).toHaveLength(0);
-    expect(requests.filter((method) => method === "turn/start")).toHaveLength(2);
+    expect(requests.filter((method) => method === "thread/unsubscribe")).toHaveLength(1);
+    expect(requests.filter((method) => method === "turn/start")).toHaveLength(3);
     expect(timingLogs.some((line) => line.includes("phase=turn/started"))).toBe(true);
     expect(timingLogs.some((line) => line.includes("phase=userMessage"))).toBe(true);
   });
