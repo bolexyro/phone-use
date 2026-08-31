@@ -695,7 +695,7 @@ class DevBridgeServer(
                 OpenAppAction(packageName, metadata)
             }
 
-            "tap", "click_coordinate" -> TapAction(
+            "tap" -> TapAction(
                 x = json.getInt("x"),
                 y = json.getInt("y"),
                 metadata = metadata,

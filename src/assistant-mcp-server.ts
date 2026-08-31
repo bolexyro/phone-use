@@ -25,25 +25,17 @@ const actionMetadataSchema = z
  * shell command, package-manager operation, or arbitrary code payload.
  * `metadata.purpose` is user-visible in the phone timeline/notification.
  */
-export const phoneAssistantActionSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("open_app"),
-      packageName: packageNameSchema,
-      metadata: actionMetadataSchema
-    })
-    .strict(),
+export const dhdOpenAppInputSchema = z
+  .object({
+    packageName: packageNameSchema,
+    metadata: actionMetadataSchema
+  })
+  .strict();
+
+export const dhdExecuteActionSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("tap"),
-      x: z.number().int().min(0),
-      y: z.number().int().min(0),
-      metadata: actionMetadataSchema
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("click_coordinate"),
       x: z.number().int().min(0),
       y: z.number().int().min(0),
       metadata: actionMetadataSchema
@@ -97,7 +89,7 @@ export const phoneAssistantActionSchema = z.discriminatedUnion("type", [
     .strict()
 ]);
 
-export const observeInputSchema = z
+export const dhdObserveInputSchema = z
   .object({
     expectedPackageName: packageNameSchema.optional(),
     purpose: z.string().min(1).max(240).optional(),
@@ -105,15 +97,12 @@ export const observeInputSchema = z
   })
   .strict();
 
-export const PHONE_ASSISTANT_TOOL_NAMES = [
-  "phone_assistant_status",
-  "phone_assistant_pending_request",
-  "phone_assistant_list_allowed_apps",
-  "phone_assistant_start",
-  "phone_assistant_observe",
-  "phone_assistant_execute",
-  "phone_assistant_request_attention",
-  "phone_assistant_stop"
+export const DHD_TOOL_NAMES = [
+  "dhd_list_allowed_apps",
+  "dhd_observe",
+  "dhd_open_app",
+  "dhd_execute",
+  "dhd_request_attention"
 ] as const;
 
 function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
@@ -177,29 +166,16 @@ async function safely(work: () => Promise<BridgeMessage>) {
  * a Codex turn can call the phone directly. Keeping this dispatcher beside the
  * MCP registrations prevents the two tool surfaces from drifting apart.
  */
-export async function invokePhoneAssistantTool(
+export async function invokeDhdTool(
   name: string,
   input: unknown
 ): Promise<PhoneAssistantToolResult> {
   switch (name) {
-    case "phone_assistant_status":
-      return safely(() => requestBridge({ type: "status", requestId: randomUUID() }));
-    case "phone_assistant_pending_request":
-      return safely(() => requestBridge({ type: "pending_request", requestId: randomUUID() }));
-    case "phone_assistant_list_allowed_apps":
+    case "dhd_list_allowed_apps":
       return safely(() => requestBridge({ type: "allowed_apps", requestId: randomUUID() }));
-    case "phone_assistant_start":
+    case "dhd_observe":
       return safely(() => {
-        const request = parseInput(z.string().min(1).max(16_384), readRecord(input).request);
-        return requestBridge({
-          type: "start_session",
-          requestId: randomUUID(),
-          request
-        });
-      });
-    case "phone_assistant_observe":
-      return safely(() => {
-        const parsed = parseInput(observeInputSchema, input);
+        const parsed = parseInput(dhdObserveInputSchema, input);
         return requestBridge({
           type: "observe",
           requestId: randomUUID(),
@@ -208,30 +184,31 @@ export async function invokePhoneAssistantTool(
           ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {})
         });
       });
-    case "phone_assistant_execute":
+    case "dhd_open_app":
       return safely(() => {
-        const action = parseInput(phoneAssistantActionSchema, readRecord(input).action);
+        const parsed = parseInput(dhdOpenAppInputSchema, input);
+        return requestBridge({
+          type: "execute_action",
+          requestId: randomUUID(),
+          action: {
+            type: "open_app",
+            packageName: parsed.packageName,
+            metadata: parsed.metadata
+          }
+        });
+      });
+    case "dhd_execute":
+      return safely(() => {
+        const action = parseInput(dhdExecuteActionSchema, readRecord(input).action);
         return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
       });
-    case "phone_assistant_request_attention":
+    case "dhd_request_attention":
       return safely(() => {
         const reason = parseInput(z.string().min(1).max(240), readRecord(input).reason);
         return requestBridge({ type: "request_attention", requestId: randomUUID(), reason });
       });
-    case "phone_assistant_stop":
-      return safely(() => {
-        const record = readRecord(input);
-        const reason = record.reason === undefined
-          ? undefined
-          : parseInput(z.string().min(1).max(240), record.reason);
-        return requestBridge({
-          type: "stop_session",
-          requestId: randomUUID(),
-          ...(reason ? { reason } : {})
-        });
-      });
     default:
-      throw new Error(`Unknown phone assistant tool: ${name}`);
+      throw new Error(`Unknown DHD tool: ${name}`);
   }
 }
 
@@ -241,82 +218,55 @@ function readRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export function createPhoneAssistantMcpServer(
-  serverName = "phone-assistant",
+export function createDhdMcpServer(
+  serverName = "dhd",
   version = "0.1.0"
 ): McpServer {
   const server = new McpServer({ name: serverName, version });
 
   server.registerTool(
-    "phone_assistant_status",
-    {
-      description: "Report whether the phone-side assistant session is idle, running, paused, stopped, or completed.",
-      inputSchema: {}
-    },
-    async () => invokePhoneAssistantTool("phone_assistant_status", {})
-  );
-
-  server.registerTool(
-    "phone_assistant_pending_request",
-    {
-      description: "Check whether the phone has a typed request waiting for the desktop Codex companion. This is read-only; the companion claims requests separately.",
-      inputSchema: {}
-    },
-    async () => invokePhoneAssistantTool("phone_assistant_pending_request", {})
-  );
-
-  server.registerTool(
-    "phone_assistant_list_allowed_apps",
+    "dhd_list_allowed_apps",
     {
       description: "List the installed Android packages currently enabled in the phone-side per-app allowlist. Apps are off by default; use the phone settings screen to change this list.",
       inputSchema: {}
     },
-    async () => invokePhoneAssistantTool("phone_assistant_list_allowed_apps", {})
+    async () => invokeDhdTool("dhd_list_allowed_apps", {})
   );
 
   server.registerTool(
-    "phone_assistant_start",
-    {
-      description: "Start a phone-assistant session for a natural-language request. The phone remains the authority for app permissions, foreground checks, and cancellation.",
-      inputSchema: { request: z.string().min(1).max(16_384) }
-    },
-    async (input) => invokePhoneAssistantTool("phone_assistant_start", input)
-  );
-
-  server.registerTool(
-    "phone_assistant_observe",
+    "dhd_observe",
     {
       description: "Capture the current physical phone display as a PNG for visual context. Use it to choose the next typed action; screenshots do not block an action if the screen changes.",
-      inputSchema: observeInputSchema.shape
+      inputSchema: dhdObserveInputSchema.shape
     },
-    async (input) => invokePhoneAssistantTool("phone_assistant_observe", input)
+    async (input) => invokeDhdTool("dhd_observe", input)
   );
 
   server.registerTool(
-    "phone_assistant_execute",
+    "dhd_open_app",
     {
-      description: "Execute one typed phone action and return a post-action screenshot. Include a concise human-readable purpose such as 'Searching for jollof rice' or 'Selecting the delivery address'. Do not send shell commands.",
-      inputSchema: { action: phoneAssistantActionSchema }
+      description: "Open one allowlisted Android app and return a post-action screenshot. Include a meaningful user-facing purpose and concrete target description.",
+      inputSchema: dhdOpenAppInputSchema.shape
     },
-    async (input) => invokePhoneAssistantTool("phone_assistant_execute", input)
+    async (input) => invokeDhdTool("dhd_open_app", input)
   );
 
   server.registerTool(
-    "phone_assistant_request_attention",
+    "dhd_execute",
+    {
+      description: "Execute one typed phone interaction and return a post-action screenshot. Use tap, type, swipe, scroll, back, keypress, or wait. Include a meaningful user-facing purpose and concrete target description. Do not send shell commands.",
+      inputSchema: { action: dhdExecuteActionSchema }
+    },
+    async (input) => invokeDhdTool("dhd_execute", input)
+  );
+
+  server.registerTool(
+    "dhd_request_attention",
     {
       description: "Notify the user that the phone assistant needs their attention. This does not open the app automatically.",
       inputSchema: { reason: z.string().min(1).max(240) }
     },
-    async (input) => invokePhoneAssistantTool("phone_assistant_request_attention", input)
-  );
-
-  server.registerTool(
-    "phone_assistant_stop",
-    {
-      description: "Stop the active phone-assistant session and cancel further execution.",
-      inputSchema: { reason: z.string().min(1).max(240).optional() }
-    },
-    async (input) => invokePhoneAssistantTool("phone_assistant_stop", input)
+    async (input) => invokeDhdTool("dhd_request_attention", input)
   );
 
   return server;
@@ -328,7 +278,7 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  const server = createPhoneAssistantMcpServer();
+  const server = createDhdMcpServer();
   void server.connect(new StdioServerTransport()).catch((error: unknown) => {
     console.error(`[phone-assistant-mcp] startup failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

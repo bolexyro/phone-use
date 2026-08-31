@@ -102,7 +102,6 @@ import com.phonecontrol.assistant.apps.AppPermissionRepository
 import com.phonecontrol.assistant.apps.InstalledUserApp
 import com.phonecontrol.assistant.data.ConversationStore
 import com.phonecontrol.assistant.data.DHD_CONVERSATION_ID
-import com.phonecontrol.assistant.data.PHONE_ASSISTANT_EXECUTE_TOOL
 import com.phonecontrol.assistant.data.TimelineItem
 import com.phonecontrol.assistant.domain.userFacingActivityLabel
 import com.phonecontrol.assistant.session.SessionCoordinator
@@ -479,17 +478,17 @@ private fun groupTimeline(timeline: List<TimelineItem>): List<TaskGroup> {
                 }
             }
             is TimelineItem.Activity -> {
-                // The activity feed is an MCP trace, not a general-purpose
-                // session log. Keep only physical actions dispatched through
-                // phone_assistant_execute and omit legacy confirmation rows.
-                if (item.isMcpExecuteActivity()) builder.activities += item
+                // The activity feed is a DHD tool trace, not a general-purpose
+                // session log. Keep only physical action events and omit
+                // legacy confirmation rows.
+                if (item.isDhdActionActivity()) builder.activities += item
             }
         }
     }
     return builders.values.map(TaskGroupBuilder::build).sortedBy { it.timestampEpochMs }
 }
 
-private fun TimelineItem.Activity.isMcpExecuteActivity(): Boolean =
+private fun TimelineItem.Activity.isDhdActionActivity(): Boolean =
     !status.equals("confirmation", ignoreCase = true)
 
 @Composable
@@ -898,9 +897,7 @@ private fun thinkingDetail(currentPurpose: String, elapsedSeconds: Long): String
     currentPurpose.equals("Preparing request", ignoreCase = true) && elapsedSeconds >= COMPANION_WAIT_CALLOUT_SECONDS ->
         "Waiting for the desktop companion"
     currentPurpose.equals("Preparing request", ignoreCase = true) -> "Connecting to the desktop companion"
-    currentPurpose.equals("Codex is planning", ignoreCase = true) && elapsedSeconds >= LONG_WAIT_SECONDS ->
-        "Codex is still preparing the first phone check"
-    currentPurpose.equals("Codex is planning", ignoreCase = true) -> "Preparing the first phone check"
+    currentPurpose.equals("Codex is planning", ignoreCase = true) -> "Thinking…"
     else -> currentPurpose.ifBlank { "Preparing the next step" }
 }
 
@@ -1068,7 +1065,6 @@ private fun nextThinkingWordIndex(previous: Int): Int {
 }
 
 private const val COMPANION_WAIT_CALLOUT_SECONDS = 15L
-private const val LONG_WAIT_SECONDS = 30L
 
 @Composable
 private fun MessageBubble(message: TimelineItem.Message) {

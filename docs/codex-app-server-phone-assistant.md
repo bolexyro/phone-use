@@ -24,7 +24,7 @@ pnpm assistant:companion
         v
 Codex App Server (one persistent process; ChatGPT/Codex login)
         |
-        | direct dynamic phone_control_* tools
+        | direct dynamic dhd_* tools
         v
 phone-tool dispatcher (shared with assistant:mcp)
         |
@@ -42,12 +42,12 @@ Add an entry to the local Codex config (`%USERPROFILE%\.codex\config.toml`).
 Use forward slashes in the Windows paths if desired:
 
 ```toml
-[mcp_servers.phone_assistant]
+[mcp_servers.dhd]
 command = "C:/Program Files/nodejs/pnpm.cmd"
 args = ["assistant:mcp"]
 cwd = "C:/Users/USER/Documents/ChatGPT/Project Phone Control"
 
-[mcp_servers.phone_assistant.env]
+[mcp_servers.dhd.env]
 PHONE_ASSISTANT_BRIDGE_HOST = "127.0.0.1"
 PHONE_ASSISTANT_BRIDGE_PORT = "8765"
 ```
@@ -62,28 +62,25 @@ Start the phone-side app and forward its loopback port:
 adb forward tcp:8765 tcp:8765
 ```
 
-Codex App Server can then discover these tools from the `phone_assistant`
+Codex App Server can then discover this five-tool DHD surface from the `dhd`
 MCP server:
 
-- `phone_assistant_start` — create a user-requested session.
-- `phone_assistant_list_allowed_apps` — show the phone-side packages currently
-  enabled in the per-app allowlist (all apps start disabled).
-- `phone_assistant_observe` — return the current screenshot and foreground
-  context for the next action.
-- `phone_assistant_execute` — execute one typed action and return a post-action
-  PNG screenshot. A changed screenshot does not by itself reject the action.
-- `phone_assistant_request_attention` — post an attention notification without
-  opening the assistant Activity.
-- `phone_assistant_status` — read the phone session state/current purpose.
-- `phone_assistant_pending_request` — inspect whether a phone request is
-  waiting for the companion (read-only; the companion performs the claim).
-- `phone_assistant_stop` — cancel the active session.
+- `dhd_list_allowed_apps` — show the phone-side packages currently enabled in
+  the per-app allowlist (all apps start disabled).
+- `dhd_observe` — return the current screenshot and foreground context for the
+  next action.
+- `dhd_open_app` — open one allowlisted app and return a post-action PNG
+  screenshot.
+- `dhd_execute` — execute one typed interaction and return a post-action PNG
+  screenshot. It handles tap, type, swipe, scroll, back, keypress, and wait.
+- `dhd_request_attention` — post an attention notification without opening the
+  assistant Activity.
 
-The configured MCP server remains available for direct MCP clients and for
-backwards-compatible/manual use. The phone companion additionally registers
-`phone_control_*` dynamic tools on each App Server thread and maps them to the
-same dispatcher. In current Codex App Server builds those calls are delivered
-through the bundled Code Mode host, which the companion enables by default.
+The phone companion registers the same `dhd_*` dynamic tools on each App
+Server thread and maps them to the same dispatcher. Session lifecycle
+operations remain internal to the companion and phone bridge. In current Codex
+App Server builds these calls are delivered through the bundled Code Mode
+host, which the companion enables by default.
 Setting `PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST=false` intentionally disables
 that route and therefore prevents dynamic phone actions from executing.
 
@@ -118,7 +115,7 @@ tool suggestions, image viewing, and workspace dependencies for this child.
 ChatGPT authentication remains in the user's normal Codex home; the isolated
 working directory only keeps DHD from inheriting the coding workspace's project
 context and tool catalog. Code Mode host remains enabled because it is the
-transport that delivers the direct `phone_control_*` calls.
+transport that delivers the direct `dhd_*` calls.
 Because table-valued CLI overrides can merge with a user's config, the
 companion also reads only the names of configured global MCP sections and adds
 an `enabled=false` override for each one. It never reads or logs their
@@ -147,8 +144,8 @@ The bridge preserves the pre-pivot MCP primitives in phone-owned form:
 
 | MCP-stage interaction | Phone action | Notes |
 | --- | --- | --- |
-| Open app | `open_app` | Launch component is resolved by Android; allowlist is enforced on the phone. |
-| Coordinate click | `tap` / `click_coordinate` | Coordinates are checked against the current screenshot bounds; screenshot freshness checks are deferred. |
+| Open app | `dhd_open_app` / `open_app` internally | Launch component is resolved by Android; allowlist is enforced on the phone. |
+| Coordinate tap | `tap` | Coordinates are checked against the current screenshot bounds; screenshot freshness checks are deferred. |
 | Directional scroll | `scroll` | Android derives a bounded swipe from direction + amount. |
 | Explicit gesture | `swipe` | Start/end coordinates and duration are bounds checked. |
 | Type text | `type` | Uses Android `input text`; text is never copied into the activity log. |
@@ -170,15 +167,15 @@ items remain progress output; only the latest completed `agentMessage` with
 not accidentally prefixed to the final result.
 
 The companion treats `turn/completed` as the App Server transport reaching its
-terminal state, not as proof that the user's phone task succeeded. The injected
-prompt explicitly requires the model to continue past progress states such as
-opening an app or reaching a setup screen, and to use fresh observations to
-verify every requested step before giving its final message. A terminal-turn
-log line therefore means that Codex stopped producing work; the following
-`complete_session` call is the point at which the phone timeline is closed.
+terminal state, not as independent proof that the user's phone task succeeded.
+The request itself is passed to App Server unchanged; persistent DHD behavior
+belongs in the runtime `AGENTS.md`, while phone capabilities and argument
+constraints belong in the direct tool contracts. A terminal-turn log line means
+that Codex stopped producing work; the following `complete_session` call is the
+point at which the phone timeline is closed.
 
 When the model needs a human to look at the phone, it can call
-`phone_control_request_attention` with a short reason. The phone posts a
+`dhd_request_attention` with a short reason. The phone posts a
 high-priority notification and updates the conversation, but does not force the
 assistant Activity over whatever app is visible in Watch mode.
 
@@ -219,7 +216,7 @@ reasoning by default, independently of the interactive Codex chat's settings.
 Set `PHONE_ASSISTANT_CODEX_MODEL` or `PHONE_ASSISTANT_CODEX_REASONING_EFFORT`
 only when intentionally overriding that development default. The companion runs
 `codex app-server --listen stdio:// --enable code_mode_host` so the App Server's
-dynamic-tool router can deliver calls to the direct `phone_control_*` tools.
+dynamic-tool router can deliver calls to the direct `dhd_*` tools.
 Set `PHONE_ASSISTANT_CODEX_BIN` when the Codex executable is not available
 through the desktop PATH. Set `PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST=false`
 only when intentionally testing a configuration without the bundled host; phone
@@ -256,7 +253,7 @@ the JSON-RPC lifecycle used by the companion.
 ## Run a local smoke check
 
 Build the desktop adapter, then ask the MCP client to call
-`phone_assistant_status` or run it directly to verify that it starts and waits
+`dhd_list_allowed_apps` or run it directly to verify that it starts and waits
 for MCP input:
 
 ```powershell

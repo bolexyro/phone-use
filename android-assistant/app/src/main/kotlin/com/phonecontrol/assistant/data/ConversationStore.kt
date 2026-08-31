@@ -23,7 +23,8 @@ import java.util.UUID
 
 const val DHD_CONVERSATION_ID = "dhd-assistant"
 const val DHD_THREAD_INACTIVITY_MS = 3 * 60 * 60 * 1000L
-const val PHONE_ASSISTANT_EXECUTE_TOOL = "phone_assistant_execute"
+const val DHD_EXECUTE_TOOL = "dhd_execute"
+const val DHD_OPEN_APP_TOOL = "dhd_open_app"
 
 /** Local, app-private conversation metadata. Codex remains the remote context source of truth. */
 @Entity(tableName = "conversations")
@@ -377,11 +378,14 @@ class ConversationStore(context: Context) {
                         sequence = dao.listActivities(runId).size.toLong(),
                         purpose = purpose,
                         targetDescription = event.targetDescription?.trim()?.take(MAX_PURPOSE_CHARS),
-                        // Action lifecycle events are emitted by the phone's
-                        // phone_assistant_execute MCP boundary. Keep the
-                        // protocol name so the UI can distinguish real tool
-                        // calls from system/agent activity.
-                        toolName = PHONE_ASSISTANT_EXECUTE_TOOL.takeIf { event.actionType != null },
+                        // Action lifecycle events are emitted by the DHD tool
+                        // boundary. Keep the public tool name so the UI can
+                        // distinguish real tool calls from system activity.
+                        toolName = when (event.actionType) {
+                            ActionType.OPEN_APP -> DHD_OPEN_APP_TOOL
+                            null -> null
+                            else -> DHD_EXECUTE_TOOL
+                        },
                         actionType = actionName,
                         status = status,
                         message = message,

@@ -4,7 +4,23 @@
 
 Phone Control is a local MCP server that lets AI agents control approved Android apps from a computer. It exposes specific phone actions instead of giving agents access to an ADB shell.
 
-The first version supports one connected Android phone and uses an app allowlist for authorization. It does not include an Android companion app.
+The first version supports one connected Android phone and uses an app allowlist for authorization.
+
+DHD is the phone assistant built around Phone Control. It helps the user do
+things on their phone by understanding the request, keeping the user informed
+about progress, and carrying out approved actions safely. DHD should stay
+focused on the user's goal and verify the result before saying the task is
+complete.
+
+## DHD layers
+
+1. **Assistant layer** — understands the user's request and decides what needs
+   to happen.
+2. **Companion layer** — coordinates the work and keeps the assistant connected
+   to the phone.
+3. **Phone layer** — observes the current phone state, enforces user control,
+   and performs approved actions.
+4. **App layer** — the Android apps where the user's task is carried out.
 
 ## How it works
 

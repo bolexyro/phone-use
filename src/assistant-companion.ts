@@ -7,7 +7,7 @@ import { performance } from "node:perf_hooks";
 import * as readline from "node:readline";
 
 import {
-  invokePhoneAssistantTool,
+  invokeDhdTool,
   type PhoneAssistantToolResult
 } from "./assistant-mcp-server.js";
 import { requestBridge, type BridgeMessage } from "./phone-assistant-bridge.js";
@@ -210,7 +210,7 @@ export class CodexAppServerClient {
       await this.start(logger);
 
       const threadParams: Record<string, unknown> = {
-        dynamicTools: buildPhoneAssistantDynamicTools(),
+        dynamicTools: buildDhdDynamicTools(),
         model: resolveCodexModel(),
         cwd: this.runtimeCwd
       };
@@ -269,7 +269,7 @@ export class CodexAppServerClient {
           model: resolveCodexModel(),
           effort: resolveCodexEffort(),
           cwd: this.runtimeCwd,
-          input: [{ type: "text", text: buildPhonePrompt(phoneRequest) }]
+          input: [{ type: "text", text: phoneRequest }]
         });
         // `turn/start` returns the initial turn object. The notification is
         // also tracked below, but capturing this response makes cancellation
@@ -694,15 +694,12 @@ export class CodexAppServerClient {
   }
 }
 
-const PHONE_DYNAMIC_TOOL_TO_MCP = {
-  phone_control_status: "phone_assistant_status",
-  phone_control_pending_request: "phone_assistant_pending_request",
-  phone_control_list_allowed_apps: "phone_assistant_list_allowed_apps",
-  phone_control_start: "phone_assistant_start",
-  phone_control_observe: "phone_assistant_observe",
-  phone_control_execute: "phone_assistant_execute",
-  phone_control_request_attention: "phone_assistant_request_attention",
-  phone_control_stop: "phone_assistant_stop"
+const DHD_DYNAMIC_TOOL_TO_DISPATCH = {
+  dhd_list_allowed_apps: "dhd_list_allowed_apps",
+  dhd_observe: "dhd_observe",
+  dhd_open_app: "dhd_open_app",
+  dhd_execute: "dhd_execute",
+  dhd_request_attention: "dhd_request_attention"
 } as const;
 
 type DynamicToolSpec = Record<string, unknown>;
@@ -713,7 +710,7 @@ type DynamicToolSpec = Record<string, unknown>;
  * delivers their calls to this companion; current builds normally reach that
  * request path through the bundled Code Mode host.
  */
-export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
+export function buildDhdDynamicTools(): DynamicToolSpec[] {
   const metadata = {
     type: "object",
     properties: {
@@ -735,15 +732,7 @@ export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
   const action = {
     oneOf: [
       actionObject(
-        { type: { const: "open_app" }, packageName: { type: "string", minLength: 1 } },
-        ["type", "packageName"]
-      ),
-      actionObject(
         { type: { const: "tap" }, x: { type: "integer", minimum: 0 }, y: { type: "integer", minimum: 0 } },
-        ["type", "x", "y"]
-      ),
-      actionObject(
-        { type: { const: "click_coordinate" }, x: { type: "integer", minimum: 0 }, y: { type: "integer", minimum: 0 } },
         ["type", "x", "y"]
       ),
       actionObject(
@@ -783,32 +772,12 @@ export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
 
   return [
     dynamicTool(
-      "phone_control_status",
-      "Read the phone assistant session state and current user-visible action.",
-      emptySchema()
-    ),
-    dynamicTool(
-      "phone_control_pending_request",
-      "Read whether the Android app has a typed request waiting for this companion.",
-      emptySchema()
-    ),
-    dynamicTool(
-      "phone_control_list_allowed_apps",
+      "dhd_list_allowed_apps",
       "List Android packages enabled in the phone-side per-app allowlist.",
       emptySchema()
     ),
     dynamicTool(
-      "phone_control_start",
-      "Start a phone-side assistant session for a typed natural-language request.",
-      {
-        type: "object",
-        properties: { request: { type: "string", minLength: 1, maxLength: 16_384 } },
-        required: ["request"],
-        additionalProperties: false
-      }
-    ),
-    dynamicTool(
-      "phone_control_observe",
+      "dhd_observe",
       "Capture the current physical Android display and return a screenshot for visual context. Include a concise purpose when this observation should appear in the user's activity timeline. Screen changes do not block a subsequent typed action.",
       {
         type: "object",
@@ -821,7 +790,20 @@ export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
       }
     ),
     dynamicTool(
-      "phone_control_execute",
+      "dhd_open_app",
+      "Open one allowlisted Android app and return a post-action screenshot. Include a meaningful user-facing purpose and concrete target description.",
+      {
+        type: "object",
+        properties: {
+          packageName: { type: "string", minLength: 1 },
+          metadata
+        },
+        required: ["packageName", "metadata"],
+        additionalProperties: false
+      }
+    ),
+    dynamicTool(
+      "dhd_execute",
       "Execute one typed phone action with metadata.purpose, then return a post-action screenshot. Never use shell commands. Actions are not rejected because the screenshot changed.",
       {
         type: "object",
@@ -831,21 +813,12 @@ export function buildPhoneAssistantDynamicTools(): DynamicToolSpec[] {
       }
     ),
     dynamicTool(
-      "phone_control_request_attention",
+      "dhd_request_attention",
       "Notify the user that their attention is needed without bringing the assistant app to the foreground. Use this when the user must review or take over; do not continue phone actions afterward.",
       {
         type: "object",
         properties: { reason: { type: "string", minLength: 1, maxLength: 240 } },
         required: ["reason"],
-        additionalProperties: false
-      }
-    ),
-    dynamicTool(
-      "phone_control_stop",
-      "Stop the active phone-side assistant session.",
-      {
-        type: "object",
-        properties: { reason: { type: "string", minLength: 1, maxLength: 240 } },
         additionalProperties: false
       }
     )
@@ -866,14 +839,14 @@ async function handleDynamicToolCall(value: unknown): Promise<DynamicToolCallRes
   const name = requestedName.includes(".")
     ? requestedName.slice(requestedName.lastIndexOf(".") + 1)
     : requestedName;
-  const mappedName = PHONE_DYNAMIC_TOOL_TO_MCP[name as keyof typeof PHONE_DYNAMIC_TOOL_TO_MCP];
+  const mappedName = DHD_DYNAMIC_TOOL_TO_DISPATCH[name as keyof typeof DHD_DYNAMIC_TOOL_TO_DISPATCH];
   if (!mappedName) {
     return dynamicToolFailure(`Unsupported dynamic phone tool: ${requestedName || "(missing tool name)"}`);
   }
 
   const input = normalizeDynamicArguments(params.arguments);
   console.error(`[codex-app-server] invoking ${name}`);
-  const result = await invokePhoneAssistantTool(mappedName, input);
+  const result = await invokeDhdTool(mappedName, input);
   return toDynamicToolResponse(result);
 }
 
@@ -1261,26 +1234,6 @@ async function releaseRequest(sessionId: string): Promise<void> {
   } catch (error) {
     console.error(`[phone-assistant-companion] could not release request: ${error instanceof Error ? error.message : String(error)}`);
   }
-}
-
-function buildPhonePrompt(phoneRequest: string): string {
-  return [
-    "Operate the user's physical Android phone for the request below.",
-    "A phone-side session is already running; do not call phone_assistant_start.",
-    "Use only the direct phone_control_* tools exposed by this companion. Do not use arbitrary exec code, shell commands, or the configured phone_assistant_* MCP wrappers. Code Mode may be the App Server transport for these direct tools; never use it to run unrelated code.",
-    "For a multi-step request, use the update_plan tool to keep a short internal checklist: one step in_progress at a time, mark a step completed only after observing the resulting screen, and revise the plan when the app or goal changes. Do not expose private reasoning; the phone only receives safe purpose-bearing activity summaries.",
-    "Begin with phone_control_list_allowed_apps if you need the allowlist, then phone_control_observe.",
-    "Before actions, use phone_control_observe when you need visual context. After every action, inspect the returned screenshot before proposing the next action.",
-    "Every action must include a concise, user-facing metadata.purpose and metadata.targetDescription. Never send shell commands or bypass a phone policy decision.",
-    "If the phone asks for user attention because the screen or foreground app changed, use phone_control_request_attention with a concise explanation, stop taking phone actions, and explain what the user must do.",
-    "Do not end the turn merely because you observed a screen, opened an app, reached a setup screen, or completed one action; those are progress states whenever the request has more work.",
-    "For a request with a count, sequence, destination, or verification requirement, continue until every requirement is completed and freshly verified. A benchmark setup screen is not completion when benchmark rounds were requested.",
-    "Before sending a final message, compare the current phone state against every requirement in the user request. If work remains, keep using the phone tools. If safe progress is blocked by a failed app state or user attention, call phone_control_request_attention with the exact blocker instead of claiming success.",
-    "When the user says go on, continue, or otherwise asks to resume, continue the outstanding task from the current phone state; do not stop after merely reopening or observing the app.",
-    "When the request is complete, give a short result summary; the desktop companion will close the phone session.",
-    "",
-    `User request: ${phoneRequest}`
-  ].join("\n");
 }
 
 function normalizeAgentFeedback(text: string): string {
