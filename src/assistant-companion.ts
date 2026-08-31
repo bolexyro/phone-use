@@ -21,6 +21,7 @@ const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_AGENT_FEEDBACK_CHARS = 4_000;
 const MAX_STEER_CHARS = 4_000;
+const DEFAULT_CODEX_HOME = join(homedir(), ".dhd", "codex-home");
 const DEFAULT_CODEX_RUNTIME_CWD = join(homedir(), ".dhd", "codex-runtime");
 const MINIMAL_CODEX_CONFIG_OVERRIDES = [
   "mcp_servers={}",
@@ -120,6 +121,8 @@ interface AgentMessageState {
 /**
  * Persistent Codex App Server client. Authentication stays in the Codex
  * CLI/App Server; this process never handles ChatGPT cookies or API keys.
+ * DHD gives the child App Server its own Codex home so global coding-agent
+ * configuration and credentials do not leak into phone turns.
  */
 export class CodexAppServerClient {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -129,6 +132,7 @@ export class CodexAppServerClient {
   private startPromise: Promise<void> | null = null;
   private initialized = false;
   private loadedThreadIds = new Set<string>();
+  private readonly codexHome = resolveCodexHome();
   private readonly runtimeCwd = resolveCodexRuntimeCwd();
   private turnCompletion: {
     resolve: (result: TurnResult) => void;
@@ -172,7 +176,7 @@ export class CodexAppServerClient {
     const logger = timing ?? new PhaseTimer("codex-connection");
     this.startPromise = (async () => {
       if (this.child) await this.stopProcess();
-      logger.log("spawn:start", `cwd=${this.runtimeCwd}`);
+      logger.log("spawn:start", `cwd=${this.runtimeCwd} codexHome=${this.codexHome}`);
       this.startProcess();
       logger.log("spawn:complete", `pid=${this.child?.pid ?? "?"}`);
       logger.log("initialize:start");
@@ -369,12 +373,13 @@ export class CodexAppServerClient {
 
   private startProcess(): void {
     if (this.child) throw new Error("Codex App Server client is already running.");
+    mkdirSync(this.codexHome, { recursive: true });
     mkdirSync(this.runtimeCwd, { recursive: true });
     const command = process.env.PHONE_ASSISTANT_CODEX_BIN?.trim() || "codex";
     const args = ["app-server", "--listen", "stdio://"];
     for (const override of [
       ...MINIMAL_CODEX_CONFIG_OVERRIDES,
-      ...disabledConfiguredMcpOverrides()
+      ...disabledConfiguredMcpOverrides(this.codexHome)
     ]) {
       args.push("-c", override);
     }
@@ -399,7 +404,10 @@ export class CodexAppServerClient {
       // native executable. Let cmd.exe resolve that user-installed command.
       shell: process.platform === "win32",
       windowsHide: true,
-      env: process.env
+      env: {
+        ...process.env,
+        CODEX_HOME: this.codexHome
+      }
     });
     this.child = child;
     this.reader = readline.createInterface({ input: child.stdout });
@@ -1418,20 +1426,24 @@ function extractTurnError(value: unknown): string {
   return typeof record?.message === "string" ? record.message : "";
 }
 
+function resolveCodexHome(): string {
+  const configured = process.env.PHONE_ASSISTANT_CODEX_HOME?.trim();
+  return configured ? resolve(configured) : DEFAULT_CODEX_HOME;
+}
+
 function resolveCodexRuntimeCwd(): string {
   const configured = process.env.PHONE_ASSISTANT_CODEX_CWD?.trim();
   return configured ? resolve(configured) : DEFAULT_CODEX_RUNTIME_CWD;
 }
 
 /**
- * Codex merges table-valued `-c` overrides with the user's config. Explicitly
- * disable each configured MCP server as well as passing `mcp_servers={}` so a
- * DHD child cannot start unrelated user integrations during a phone turn.
- * Only section names are read; credentials and command values never leave the
- * user's normal Codex home or enter logs.
+ * Codex merges table-valued `-c` overrides with the selected home config.
+ * Explicitly disable each MCP server configured in that same home as well as
+ * passing `mcp_servers={}` so a DHD child cannot start unrelated integrations
+ * during a phone turn. Only section names are read; credentials and command
+ * values never enter logs.
  */
-function disabledConfiguredMcpOverrides(): string[] {
-  const codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+function disabledConfiguredMcpOverrides(codexHome: string): string[] {
   const configPath = join(codexHome, "config.toml");
   let config: string;
   try {

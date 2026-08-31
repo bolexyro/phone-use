@@ -107,22 +107,28 @@ starting the replacement, preventing old subscriptions from accumulating.
 The App Server child starts in a dedicated user runtime directory rather than
 the Phone Control repository: `%USERPROFILE%\\.dhd\\codex-runtime` by default.
 Override it with `PHONE_ASSISTANT_CODEX_CWD` when a different empty directory is
-needed. The companion passes minimal App Server config overrides that disable
-configured MCP servers, shell execution, apps, browser use, computer use,
-memories, multi-agent tools, plugins, remote plugins, skill search, unified
-exec, hooks, and dependency installation. Project instructions are not capped:
-the runtime can provide its own small `AGENTS.md` for DHD-specific guidance,
-without inheriting the Phone Control repository's project instructions.
+needed. It also uses a dedicated Codex home at
+`%USERPROFILE%\\.dhd\\codex-home` by default; override it with
+`PHONE_ASSISTANT_CODEX_HOME` when a different authenticated home is needed.
+Authenticate that home once with `CODEX_HOME` pointing to it before starting
+the companion. The companion passes `CODEX_HOME` only to the App Server child,
+so it does not change the desktop Codex process or the parent environment.
+The companion passes minimal App Server config overrides that disable configured
+MCP servers, shell execution, apps, browser use, computer use, memories,
+multi-agent tools, plugins, remote plugins, skill search, unified exec, hooks,
+and dependency installation. Project instructions are not capped: the runtime
+can provide its own small `AGENTS.md` for DHD-specific guidance, without
+inheriting the Phone Control repository's project instructions.
 It also turns off goals, shell snapshots, image generation, the in-app browser,
 tool suggestions, image viewing, and workspace dependencies for this child.
-ChatGPT authentication remains in the user's normal Codex home; the isolated
-working directory only keeps DHD from inheriting the coding workspace's project
-context and tool catalog. Code Mode host remains enabled because it is the
-transport that delivers the direct `dhd_*` calls.
+ChatGPT authentication is stored in DHD's dedicated Codex home; the isolated
+home and working directory keep DHD from inheriting the coding workspace's
+global configuration, project context, and tool catalog. Code Mode host remains
+enabled because it is the transport that delivers the direct `dhd_*` calls.
 Because table-valued CLI overrides can merge with a user's config, the
-companion also reads only the names of configured global MCP sections and adds
-an `enabled=false` override for each one. It never reads or logs their
-credentials, commands, URLs, or headers.
+companion also reads only the names of MCP sections configured in the selected
+DHD Codex home and adds an `enabled=false` override for each one. It never
+reads or logs their credentials, commands, URLs, or headers.
 
 As a smoke measurement on 31 August 2026, a fresh isolated diagnostic rollout
 contained a 41,285-character `world_state` payload. The comparable pre-change
@@ -247,9 +253,9 @@ within three hours of the last local activity. At or after three hours idle,
 the phone removes that stored remote thread id before handoff, so the next
 request starts a new Codex App Server thread without deleting the local history.
 
-This route uses the Codex CLI/App Server's existing ChatGPT-managed login and
-subscription. It does not copy cookies, call private ChatGPT endpoints, or
-assume native Codex execution on Android. See the official
+This route uses the Codex CLI/App Server's ChatGPT-managed login stored in the
+DHD Codex home and the user's subscription. It does not copy cookies, call
+private ChatGPT endpoints, or assume native Codex execution on Android. See the official
 [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server) for
 the JSON-RPC lifecycle used by the companion.
 

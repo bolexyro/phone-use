@@ -56,6 +56,56 @@ clients); setup and the typed action contract are in
 Run `pnpm assistant:companion` after forwarding port `8765` to let requests
 typed in the phone app start Codex turns automatically.
 
+### DHD Codex home and authentication
+
+DHD keeps its Codex identity separate from the normal desktop Codex home:
+
+- `%USERPROFILE%\.dhd\codex-home` stores DHD's Codex configuration and login.
+- `%USERPROFILE%\.dhd\codex-runtime` is the App Server working directory and
+  contains DHD's `AGENTS.md`.
+
+Authenticate the DHD home once from PowerShell. The environment override below
+is restored when the command finishes; it does not change Windows or the
+desktop Codex process:
+
+```powershell
+$dhdHome = Join-Path $env:USERPROFILE ".dhd\codex-home"
+New-Item -ItemType Directory -Force -Path $dhdHome | Out-Null
+
+$oldCodexHome = $env:CODEX_HOME
+try {
+  $env:CODEX_HOME = $dhdHome
+  codex login
+  codex login status
+} finally {
+  if ($null -eq $oldCodexHome) {
+    Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue
+  } else {
+    $env:CODEX_HOME = $oldCodexHome
+  }
+}
+```
+
+Choose **Sign in with ChatGPT**. Login is normally a one-time setup; repeat it
+only if the credentials expire or are revoked, you log out, or the DHD home is
+deleted. Do not copy credentials from `%USERPROFILE%\.codex`.
+
+After authentication, run:
+
+```powershell
+pnpm assistant:companion
+```
+
+The companion passes `CODEX_HOME` only to its App Server child, so no manual
+environment override is needed for normal DHD use. Set
+`PHONE_ASSISTANT_CODEX_HOME` to use another authenticated home, or
+`PHONE_ASSISTANT_CODEX_CWD` to use another runtime directory. The
+`assistant:app-server` script starts Codex directly and does not apply this DHD
+child-process wiring.
+
+See the [official Codex CLI sign-in documentation](https://learn.chatgpt.com/docs/codex/cli)
+for the general login flow.
+
 The phone conversation shows user-facing completion feedback and summarized
 tool steps. Completion and attention notifications open the conversation when
 tapped; the assistant does not automatically steal the foreground from the
