@@ -4,6 +4,7 @@
     <string name="notification_channel_description">Live status for DHD phone sessions</string>
     <string name="notification_result_channel_name">DHD results</string>
     <string name="notification_result_channel_description">Completion messages from DHD</string>
+    <string name="notification_completion_title">DHD finished</string>
     <string name="notification_attention_channel_name">DHD attention</string>
     <string name="notification_attention_channel_description">Important requests for your attention from DHD</string>
 </resources>

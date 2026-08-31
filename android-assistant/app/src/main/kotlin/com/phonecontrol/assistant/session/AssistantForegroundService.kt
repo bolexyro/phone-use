@@ -166,14 +166,12 @@ class AssistantForegroundService : Service() {
         /** Post a result notification without bringing the assistant to the foreground. */
         fun showCompletionNotification(context: Context, message: String, conversationId: String? = null) {
             createNotificationChannels(context)
-            val safeMessage = message.trim()
-                .ifBlank { "Codex completed the phone request." }
-                .take(MAX_NOTIFICATION_TEXT_CHARS)
+            val preview = completionNotificationPreview(message)
             val notification = NotificationCompat.Builder(context, RESULT_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(context.getString(R.string.app_name))
-                .setContentText("Task complete")
-                .setStyle(NotificationCompat.BigTextStyle().bigText(safeMessage))
+                .setContentTitle(context.getString(R.string.notification_completion_title))
+                .setContentText(preview)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(preview))
                 .setContentIntent(openAssistantIntent(context, REQUEST_OPEN_APP + 1, conversationId))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)

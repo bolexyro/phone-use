@@ -185,7 +185,10 @@ rice` or `Selecting the delivery address`. That purpose is safe to show in the
 foreground notification and the in-app conversation timeline. The companion
 also forwards the final user-facing Codex message as `feedback` on
 `complete_session`; the phone renders it as an assistant message and sends a
-separate completion notification. Sensitive action payloads and private
+separate completion notification. That notification shows the first useful
+sentence of the final answer as its preview, while tapping it opens the full
+conversation. If no final message payload is available, it shows `Your DHD
+task is ready to review.` Sensitive action payloads and private
 reasoning are not written to the timeline.
 
 Agent messages are kept separate by their App Server `itemId`. Commentary

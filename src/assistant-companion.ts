@@ -27,6 +27,7 @@ const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_AGENT_FEEDBACK_CHARS = 4_000;
 const MAX_STEER_CHARS = 4_000;
+const DEFAULT_COMPLETION_MESSAGE = "Your DHD task is ready to review.";
 const DEFAULT_CODEX_HOME = join(homedir(), ".dhd", "codex-home");
 const DEFAULT_CODEX_RUNTIME_CWD = join(homedir(), ".dhd", "codex-runtime");
 const MINIMAL_CODEX_CONFIG_OVERRIDES = [
@@ -1149,7 +1150,7 @@ async function processPendingRequest(
       type: "complete_session",
       requestId: randomUUID(),
       sessionId,
-      message: feedback || "Codex completed the request. See the activity timeline for the actions it performed.",
+      message: feedback || DEFAULT_COMPLETION_MESSAGE,
       ...(feedback ? { feedback } : {})
     });
     if (completed.ok !== true) {

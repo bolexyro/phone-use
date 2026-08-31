@@ -616,8 +616,9 @@ private fun TaskGroupCard(
             }
         }
 
-        // When completed (!active): everything collapses under "Worked for Xs >"
-        if (!active && (group.assistantMessages.isNotEmpty() || group.activities.isNotEmpty())) {
+        // Completed runs with phone actions keep a collapsible trace. Direct
+        // responses should flow directly from the user message to the answer.
+        if (!active && group.activities.isNotEmpty()) {
             WorkedTraceSection(
                 durationSeconds = durationSeconds,
                 activities = group.activities,
@@ -1178,28 +1179,8 @@ private fun WorkedTraceSection(
                     .padding(top = 8.dp, bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (activities.isEmpty()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.padding(vertical = 3.dp, horizontal = 2.dp),
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_connected_nodes),
-                            contentDescription = "Finished",
-                            tint = colors.textSecondary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Text(
-                            text = "Completed in ${durationSeconds}s · Direct response",
-                            fontSize = 13.5.sp,
-                            color = colors.textSecondary,
-                        )
-                    }
-                } else {
-                    activities.forEach { activity ->
-                        TraceStepRow(activity)
-                    }
+                activities.forEach { activity ->
+                    TraceStepRow(activity)
                 }
             }
         }
