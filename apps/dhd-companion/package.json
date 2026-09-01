@@ -1,0 +1,22 @@
+{
+  "name": "@dhd/dhd-companion",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/assistant-companion.js",
+  "types": "./dist/assistant-companion.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-companion-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "dashboard": "tsx src/companion-web/server.ts",
+    "worker": "tsx src/assistant-companion.ts",
+    "tools": "tsx src/dhd-tools.ts",
+    "bridge-demo": "tsx src/desktop-codex-bridge-demo.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "3.25.76"
+  }
+}

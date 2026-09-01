@@ -1,19 +1,13 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "rootDir": "src",
-    "outDir": "dist",
-    "strict": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "declaration": true,
-    "sourceMap": true,
-    "types": ["node"]
+    "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.cts"],
-  "exclude": ["node_modules", "dist", "tests"]
+  "files": [],
+  "references": [
+    { "path": "./packages/phone-control" },
+    { "path": "./apps/phone-control-mcp" },
+    { "path": "./apps/phone-viewer" },
+    { "path": "./apps/dhd-companion" }
+  ]
 }

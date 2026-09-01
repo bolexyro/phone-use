@@ -2,9 +2,9 @@
 
 The desktop side of the pivot has two small local processes:
 
-1. `assistant:companion` watches the phone for a request typed in the Android
+1. `companion:worker` watches the phone for a request typed in the Android
    app and drives turns through one prewarmed Codex App Server process.
-2. `assistant:mcp` is the reusable MCP adapter for manual Codex/MCP clients.
+2. `companion:tools` is the reusable DHD tool adapter for manual Codex/MCP clients.
    The companion uses the same phone-tool dispatcher directly, so a normal
    companion turn does not depend on a second MCP stdio process.
 
@@ -18,7 +18,7 @@ Android app (typed request)
         |
         | Wi-Fi TCP/NDJSON + pairing token
         v
-pnpm assistant:companion
+pnpm companion:worker
         |
         | prewarm -> initialize once -> thread/start or thread/resume -> turn/start (x N)
         v
@@ -26,7 +26,7 @@ Codex App Server (one persistent process; ChatGPT/Codex login)
         |
         | direct dynamic dhd_* tools
         v
-phone-tool dispatcher (shared with assistant:mcp)
+phone-tool dispatcher (shared with companion:tools)
         |
         | same authenticated phone link
         v
@@ -44,7 +44,7 @@ Use forward slashes in the Windows paths if desired:
 ```toml
 [mcp_servers.dhd]
 command = "C:/Program Files/nodejs/pnpm.cmd"
-args = ["assistant:mcp"]
+args = ["companion:tools"]
 cwd = "C:/Users/USER/Documents/ChatGPT/Project Phone Control"
 
 [mcp_servers.dhd.env]
@@ -66,14 +66,14 @@ Wi-Fi network:
 $env:PHONE_ASSISTANT_BRIDGE_HOST = "192.168.1.42"
 $env:PHONE_ASSISTANT_BRIDGE_PORT = "8765"
 $env:PHONE_ASSISTANT_BRIDGE_TOKEN = "copy-the-token-from-dhd-settings"
-pnpm assistant:companion
+pnpm companion:worker
 ```
 
 For a desktop dashboard around the same worker, run this from the repository
 root:
 
 ```powershell
-pnpm companion:desktop
+pnpm companion:dashboard
 ```
 
 The Electron companion lets you save the bridge host, port, and token, check
@@ -240,7 +240,7 @@ adb forward tcp:8765 tcp:8765
 Start the companion in a second terminal:
 
 ```powershell
-pnpm assistant:companion
+pnpm companion:worker
 ```
 
 Now type a request in the Android app and press Run. The companion has already
@@ -301,7 +301,7 @@ for MCP input:
 
 ```powershell
 pnpm build
-pnpm assistant:mcp
+pnpm companion:tools
 ```
 
 The process communicates on stdio; its phone connection is opened only when a
@@ -313,5 +313,5 @@ For a deterministic bridge-only check, the older development stub remains
 available:
 
 ```powershell
-pnpm bridge:demo -- --host 192.168.1.42 --token copy-the-token-from-dhd-settings --package com.phonecontrol.coordinatebenchmark --x 500 --y 900
+pnpm companion:bridge-demo -- --host 192.168.1.42 --token copy-the-token-from-dhd-settings --package com.phonecontrol.coordinatebenchmark --x 500 --y 900
 ```

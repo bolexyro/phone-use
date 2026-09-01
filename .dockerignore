@@ -1,9 +1,11 @@
 node_modules/
 dist/
+apps/*/dist/
+packages/*/dist/
 coverage/
 logs/
+*.tsbuildinfo
 .git/
 .env
 .env.*
 !.env.example
-

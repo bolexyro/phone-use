@@ -48,18 +48,18 @@ Use `PHONE_CONTROL_DEVICE_SERIAL` when more than one authorized device is connec
 
 ## Phone-assistant pivot
 
-The standalone `android-assistant/` app is now the phone-side Watch-mode
+The standalone `apps/dhd-android/` app is now the phone-side Watch-mode
 authority. The companion registers direct `dhd_*` tools with each Codex App
 Server turn (and the reusable DHD MCP adapter remains available for manual MCP
 clients); setup and the typed action contract are in
 [`docs/codex-app-server-phone-assistant.md`](docs/codex-app-server-phone-assistant.md).
-Run `pnpm assistant:companion` to let requests typed in the phone app start
+Run `pnpm companion:worker` to let requests typed in the phone app start
 Codex turns automatically. The normal development path is now wireless: DHD
 shows its Wi-Fi address and pairing token in Settings, and the companion dials
 the phone over the local network. `adb forward` remains available as a
 loopback-only fallback.
 
-The desktop companion dashboard is available with `pnpm companion:desktop`.
+The desktop companion dashboard is available with `pnpm companion:dashboard`.
 It uses the already-installed Electron dependency, lets you save the phone
 host/port/token, checks the phone link, starts or stops the existing companion
 worker, and shows local activity. The token is kept in Electron's OS-backed
@@ -103,14 +103,14 @@ deleted. Do not copy credentials from `%USERPROFILE%\.codex`.
 After authentication, run:
 
 ```powershell
-pnpm assistant:companion
+pnpm companion:worker
 ```
 
 The companion passes `CODEX_HOME` only to its App Server child, so no manual
 environment override is needed for normal DHD use. Set
 `PHONE_ASSISTANT_CODEX_HOME` to use another authenticated home, or
 `PHONE_ASSISTANT_CODEX_CWD` to use another runtime directory. The
-`assistant:app-server` script starts Codex directly and does not apply this DHD
+`codex:app-server` script starts Codex directly and does not apply this DHD
 child-process wiring.
 
 See the [official Codex CLI sign-in documentation](https://learn.chatgpt.com/docs/codex/cli)

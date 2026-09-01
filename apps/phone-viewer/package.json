@@ -1,0 +1,19 @@
+{
+  "name": "@dhd/phone-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/viewer/main.js",
+  "types": "./dist/viewer/main.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm --filter @dhd/phone-control build && vitest run --config vitest.config.ts",
+    "start": "electron dist/viewer/main.js"
+  },
+  "dependencies": {
+    "@dhd/phone-control": "workspace:*",
+    "electron": "36.4.0"
+  }
+}

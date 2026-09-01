@@ -5,14 +5,12 @@ WORKDIR /app
 RUN corepack enable
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY tsconfig.json vitest.config.ts ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY config ./config
-COPY src ./src
-COPY tests ./tests
+COPY packages/phone-control ./packages/phone-control
+COPY apps/phone-control-mcp ./apps/phone-control-mcp
 
-RUN pnpm typecheck && pnpm test && pnpm build
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @dhd/phone-control build && pnpm --filter @dhd/phone-control-mcp build
 
 CMD ["pnpm", "start"]

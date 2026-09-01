@@ -1,5 +1,5 @@
 {
-  "name": "phone-use-mcp",
+  "name": "phone-control-workspace",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -9,27 +9,20 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-companion-assets.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts",
-    "viewer": "electron dist/viewer/main.js",
-    "companion:build": "pnpm build",
-    "companion:web": "tsx src/companion-web/server.ts",
-    "companion": "pnpm companion:web",
-    "bridge:demo": "tsx src/desktop-codex-bridge-demo.ts",
-    "assistant:mcp": "tsx src/assistant-mcp-server.ts",
-    "assistant:app-server": "codex app-server --listen stdio://",
-    "assistant:companion": "tsx src/assistant-companion.ts"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
-    "zod": "3.25.76"
+    "build": "pnpm --recursive --if-present --sort build",
+    "typecheck": "pnpm --filter @dhd/phone-control build && pnpm --recursive --if-present --sort typecheck",
+    "test": "pnpm --filter @dhd/phone-control build && pnpm --recursive --if-present --sort test",
+    "phone-control-mcp:start": "pnpm --filter @dhd/phone-control-mcp start",
+    "phone-control-mcp:dev": "pnpm --filter @dhd/phone-control-mcp dev",
+    "phone-control-viewer:start": "pnpm --filter @dhd/phone-viewer start",
+    "companion:build": "pnpm --filter @dhd/dhd-companion build",
+    "companion:dashboard": "pnpm --filter @dhd/dhd-companion dashboard",
+    "companion:worker": "pnpm --filter @dhd/dhd-companion worker",
+    "companion:tools": "pnpm --filter @dhd/dhd-companion tools",
+    "companion:bridge-demo": "pnpm --filter @dhd/dhd-companion bridge-demo"
   },
   "devDependencies": {
     "@types/node": "22.15.21",
-    "electron": "36.4.0",
     "tsx": "^4.23.12",
     "typescript": "5.8.3",
     "vitest": "3.2.4"

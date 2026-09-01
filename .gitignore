@@ -1,7 +1,8 @@
-/node_modules/
-/dist/
-/coverage/
-/logs/
+node_modules/
+dist/
+coverage/
+logs/
+*.tsbuildinfo
 /\.firecrawl/
 /\.runtime/
 /config/phone-control.json
