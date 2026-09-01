@@ -402,7 +402,7 @@ export class CodexAppServerClient {
       args.push("--enable", "code_mode_host");
     }
     const windowsCommand = process.platform === "win32"
-      ? `${quoteWindowsCommand(command)} ${args.join(" ")}`
+      ? `${quoteWindowsCommand(command)} ${args.map(quoteWindowsCommand).join(" ")}`
       : command;
     const child = spawn(windowsCommand, process.platform === "win32" ? [] : args, {
       stdio: ["pipe", "pipe", "pipe"],

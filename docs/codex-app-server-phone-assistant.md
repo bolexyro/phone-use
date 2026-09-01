@@ -69,6 +69,19 @@ $env:PHONE_ASSISTANT_BRIDGE_TOKEN = "copy-the-token-from-dhd-settings"
 pnpm assistant:companion
 ```
 
+For a desktop dashboard around the same worker, run this from the repository
+root:
+
+```powershell
+pnpm companion:desktop
+```
+
+The Electron companion lets you save the bridge host, port, and token, check
+the phone link, start or stop the existing Codex companion worker, and inspect
+its local activity timeline. It does not replace the phone-owned policy or
+action layer. The command uses the repository's installed Electron dependency
+and does not require Docker or a new dependency download.
+
 The token is required for non-loopback connections. It is a bearer token for
 this development bridge, so use it only on a trusted local network and do not
 forward port `8765` from the router to the internet.

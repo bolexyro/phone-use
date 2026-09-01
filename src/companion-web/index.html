@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';"
+    />
+    <title>DHD Companion</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-container">
+      <!-- Top Navigation & Header -->
+      <header class="app-header">
+        <div class="header-left">
+          <div class="brand">
+            <span class="brand-logo font-mono">DHD</span>
+            <span class="brand-sub">Companion</span>
+            <span class="brand-tag font-mono">v0.1.0</span>
+          </div>
+          <div class="divider-vertical"></div>
+          <div class="breadcrumb-trail font-mono">
+            <span class="crumb-dim">Target</span>
+            <span id="header-target" class="crumb-active">127.0.0.1:8765</span>
+          </div>
+        </div>
+
+        <div class="header-right">
+          <div class="header-actions">
+            <button id="theme-toggle" class="action-btn secondary icon-btn" type="button" title="Toggle theme (Light / Dark)">
+              <svg class="btn-svg theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+              <svg class="btn-svg theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display: none;"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            </button>
+            <button id="check-connection" class="action-btn secondary" type="button" title="Test Phone Bridge Reachability">
+              <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6"/><path d="M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+              <span>Check link</span>
+            </button>
+            <button id="start-companion" class="action-btn primary" type="button">
+              <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+              <span>Start worker</span>
+            </button>
+            <button id="stop-companion" class="action-btn danger" type="button" disabled style="display: none;">
+              <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect width="14" height="14" x="5" y="5" rx="2"/></svg>
+              <span>Stop worker</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <!-- Center Segmented Tabs -->
+      <div class="subbar">
+        <nav class="tab-nav" aria-label="Views">
+          <button class="tab-btn active" data-tab="dashboard" type="button">
+            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+            <span>Overview</span>
+          </button>
+          <button class="tab-btn" data-tab="connection" type="button">
+            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg>
+            <span>Connection</span>
+          </button>
+          <button class="tab-btn" data-tab="logs" type="button">
+            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            <span>Console</span>
+            <span class="tab-count font-mono" id="log-count-badge">0</span>
+          </button>
+        </nav>
+        <div class="subbar-detail" id="app-status-detail">Ready</div>
+      </div>
+
+      <!-- Main Content Area -->
+      <main class="main-body">
+        <!-- TAB 1: DASHBOARD -->
+        <section id="tab-dashboard" class="tab-panel active">
+          <div class="dashboard-stack">
+            <!-- Active Phone Session Card -->
+            <div class="panel session-hero">
+              <div class="panel-header">
+                <div class="panel-header-left">
+                  <span class="section-tag">Active Session</span>
+                </div>
+                <span class="state-badge font-mono" id="session-badge">IDLE</span>
+              </div>
+              <div class="session-hero-body">
+                <div class="session-title-wrap">
+                  <h1 class="session-main-title font-mono" id="phone-purpose">Waiting for phone session...</h1>
+                </div>
+                <div class="code-box" id="phone-request-container">
+                  <div class="code-box-header">
+                    <span class="code-box-title font-mono">Incoming Request</span>
+                    <span class="code-box-meta font-mono">phone-authorized</span>
+                  </div>
+                  <pre id="phone-request" class="code-box-content font-mono">No active request reported by the phone.</pre>
+                </div>
+                <div id="last-error" class="error-box" hidden></div>
+              </div>
+            </div>
+
+            <!-- 2-Column Overview Cards -->
+            <div class="grid-two-col">
+              <!-- Phone Bridge Card -->
+              <div class="panel">
+                <div class="panel-header compact">
+                  <div class="panel-header-left">
+                    <span class="section-tag">Phone Bridge</span>
+                  </div>
+                  <span id="bridge-state" class="state-badge font-mono unknown">UNKNOWN</span>
+                </div>
+                <div class="panel-body compact">
+                  <div class="data-row">
+                    <span class="data-key">Target Address</span>
+                    <span class="data-val font-mono" id="bridge-target">127.0.0.1:8765</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-key">Device State</span>
+                    <span class="data-val font-mono" id="phone-state">NOT_CHECKED</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-key">Authentication</span>
+                    <span class="data-val font-mono" id="token-state">NOT_CONFIGURED</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Companion Worker Card -->
+              <div class="panel">
+                <div class="panel-header compact">
+                  <div class="panel-header-left">
+                    <span class="section-tag">Companion Worker</span>
+                  </div>
+                  <span id="process-state" class="state-badge font-mono stopped">STOPPED</span>
+                </div>
+                <div class="panel-body compact">
+                  <div class="data-row">
+                    <span class="data-key">Runtime Process</span>
+                    <span class="data-val font-mono">App Server</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-key">Transport</span>
+                    <span class="data-val font-mono">Typed RPC</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-key">Security Model</span>
+                    <span class="data-val font-mono">Phone-Enforced</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 2: CONNECTION SETTINGS -->
+        <section id="tab-connection" class="tab-panel">
+          <div class="connection-layout">
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-header-left">
+                  <span class="section-tag">Bridge Connection</span>
+                </div>
+              </div>
+              <div class="panel-body">
+                <form id="connection-form" onsubmit="return false;">
+                  <div class="form-row two-col">
+                    <div class="form-field">
+                      <label for="host-input" class="form-label">Bridge Host</label>
+                      <input id="host-input" class="form-input font-mono" type="text" autocomplete="off" spellcheck="false" value="127.0.0.1" placeholder="127.0.0.1" />
+                    </div>
+                    <div class="form-field">
+                      <label for="port-input" class="form-label">Port</label>
+                      <input id="port-input" class="form-input font-mono" type="number" min="1" max="65535" value="8765" placeholder="8765" />
+                    </div>
+                  </div>
+
+                  <div class="form-field">
+                    <label for="token-input" class="form-label">Pairing Token</label>
+                    <div class="password-input-wrap">
+                      <input id="token-input" class="form-input font-mono" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste pairing token from DHD Settings" />
+                      <button type="button" class="btn-toggle-password" id="toggle-token-visibility" title="Toggle visibility">
+                        <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="form-footer">
+                    <span class="footer-note font-mono">Stored securely in ~/.dhd/companion-connection.json</span>
+                    <button id="save-settings" class="action-btn primary" type="button">Save Settings</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 3: CONSOLE LOGS -->
+        <section id="tab-logs" class="tab-panel">
+          <div class="panel console-panel">
+            <div class="panel-header console-header">
+              <div class="panel-header-left">
+                <span class="section-tag">Event Console</span>
+                <span class="log-count font-mono" id="log-count">0 events</span>
+              </div>
+              <div class="console-controls">
+                <button id="clear-logs" class="action-btn secondary small" type="button">
+                  <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  <span>Clear</span>
+                </button>
+              </div>
+            </div>
+            <div class="console-body" id="log-scroll-container">
+              <div id="log-list" class="log-stream font-mono">
+                <div class="empty-console font-mono">No events recorded yet. Start the companion worker or test the phone link.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast-box font-mono" role="status" aria-live="polite"></div>
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

@@ -19,6 +19,9 @@ export interface BridgeRequest {
 
 export interface BridgeRequestOptions {
   timeoutMs?: number;
+  host?: string;
+  port?: number;
+  token?: string;
 }
 
 export const bridgeHost = process.env.PHONE_ASSISTANT_BRIDGE_HOST?.trim() || DEFAULT_BRIDGE_HOST;
@@ -62,9 +65,10 @@ export function isLoopbackBridgeHost(host: string): boolean {
 
 export function buildBridgePayload(
   request: BridgeRequest,
-  token: string | undefined = bridgeToken,
+  token?: string,
 ): BridgeRequest {
-  const safeToken = token?.trim();
+  const effectiveToken = arguments.length > 1 ? token : bridgeToken;
+  const safeToken = effectiveToken?.trim();
   return safeToken ? { ...request, authToken: safeToken } : { ...request };
 }
 
@@ -83,10 +87,13 @@ export function requestBridge(
   request: BridgeRequest,
   options: BridgeRequestOptions = {}
 ): Promise<BridgeMessage> {
-  const configurationError = bridgeConfigurationError();
+  const host = options.host ?? bridgeHost;
+  const port = options.port ?? bridgePort;
+  const token = options.token ?? bridgeToken;
+  const configurationError = bridgeConfigurationError(host, token);
   if (configurationError) return Promise.reject(new Error(configurationError));
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: bridgeHost, port: bridgePort });
+    const socket = net.createConnection({ host, port });
     let buffer = "";
     let responseBytes = 0;
     let settled = false;
@@ -103,13 +110,13 @@ export function requestBridge(
       finish(new Error("Timed out waiting for the phone assistant bridge."));
     });
     socket.once("error", (error) => {
-      finish(new Error(`Could not connect to the phone assistant bridge at ${bridgeHost}:${bridgePort}: ${error.message}`));
+      finish(new Error(`Could not connect to the phone assistant bridge at ${host}:${port}: ${error.message}`));
     });
     socket.once("close", () => {
       if (!settled) finish(new Error("The phone assistant bridge closed before completing the request."));
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify(buildBridgePayload(request))}\n`);
+      socket.write(`${JSON.stringify(buildBridgePayload(request, token))}\n`);
     });
     socket.on("data", (chunk: Buffer) => {
       responseBytes += chunk.byteLength;

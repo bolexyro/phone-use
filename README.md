@@ -59,6 +59,13 @@ shows its Wi-Fi address and pairing token in Settings, and the companion dials
 the phone over the local network. `adb forward` remains available as a
 loopback-only fallback.
 
+The desktop companion dashboard is available with `pnpm companion:desktop`.
+It uses the already-installed Electron dependency, lets you save the phone
+host/port/token, checks the phone link, starts or stops the existing companion
+worker, and shows local activity. The token is kept in Electron's OS-backed
+secure storage when the platform provides it; no Docker build or dependency
+install is part of this command.
+
 ### DHD Codex home and authentication
 
 DHD keeps its Codex identity separate from the normal desktop Codex home:

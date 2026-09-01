@@ -9,12 +9,15 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-companion-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "viewer": "electron dist/viewer/main.js",
+    "companion:build": "pnpm build",
+    "companion:web": "tsx src/companion-web/server.ts",
+    "companion": "pnpm companion:web",
     "bridge:demo": "tsx src/desktop-codex-bridge-demo.ts",
     "assistant:mcp": "tsx src/assistant-mcp-server.ts",
     "assistant:app-server": "codex app-server --listen stdio://",
