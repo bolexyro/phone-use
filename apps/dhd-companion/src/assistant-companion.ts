@@ -115,6 +115,14 @@ export interface DynamicToolCallResponse {
 interface TurnResult {
   text: string;
   threadId: string;
+  phoneToolFailures: PhoneToolFailure[];
+}
+
+interface PhoneToolFailure {
+  tool: string;
+  code?: string;
+  outcome?: string;
+  message: string;
 }
 
 interface AgentMessageState {
@@ -146,6 +154,7 @@ export class CodexAppServerClient {
     reject: (error: Error) => void;
     agentMessages: Map<string, AgentMessageState>;
     nextAgentMessageOrder: number;
+    phoneToolFailures: PhoneToolFailure[];
   } | null = null;
   private activeThreadId: string | null = null;
   private activeDhdThreadId: string | null = null;
@@ -277,7 +286,8 @@ export class CodexAppServerClient {
           resolve,
           reject,
           agentMessages: new Map(),
-          nextAgentMessageOrder: 0
+          nextAgentMessageOrder: 0,
+          phoneToolFailures: []
         };
       });
       try {
@@ -525,7 +535,8 @@ export class CodexAppServerClient {
       } else if (status === "completed") {
         completion.resolve({
           text: selectFinalAgentMessageText(completion.agentMessages) || extractText(message.params),
-          threadId: this.activeThreadId || ""
+          threadId: this.activeThreadId || "",
+          phoneToolFailures: [...(completion.phoneToolFailures ?? [])]
         });
       } else {
         completion.reject(
@@ -591,6 +602,7 @@ export class CodexAppServerClient {
       switch (method) {
         case "item/tool/call": {
           const result = await handleDynamicToolCall(message.params);
+          this.recordDynamicToolResult(message.params, result);
           this.respond(id, result);
           return;
         }
@@ -627,6 +639,15 @@ export class CodexAppServerClient {
     } catch (error) {
       this.respondError(id, -32000, error instanceof Error ? error.message : String(error));
     }
+  }
+
+  private recordDynamicToolResult(value: unknown, result: DynamicToolCallResponse): void {
+    if (result.success || !this.turnCompletion) return;
+    const failure = extractDynamicToolFailure(result);
+    this.turnCompletion.phoneToolFailures.push({
+      tool: extractDynamicToolName(value) || "phone tool",
+      ...failure,
+    });
   }
 
   private respond(id: JsonRpcId, result: unknown): void {
@@ -861,7 +882,7 @@ function emptySchema(): Record<string, unknown> {
 
 async function handleDynamicToolCall(value: unknown): Promise<DynamicToolCallResponse> {
   const params = extractRecord(value) ?? {};
-  const requestedName = typeof params.tool === "string" ? params.tool : "";
+  const requestedName = extractDynamicToolName(value);
   const name = requestedName.includes(".")
     ? requestedName.slice(requestedName.lastIndexOf(".") + 1)
     : requestedName;
@@ -884,6 +905,39 @@ function normalizeDynamicArguments(value: unknown): unknown {
   } catch {
     return { __invalidArguments: value.slice(0, 240) };
   }
+}
+
+function extractDynamicToolName(value: unknown): string {
+  const params = extractRecord(value);
+  return typeof params?.tool === "string" ? params.tool : "";
+}
+
+function extractDynamicToolFailure(
+  result: DynamicToolCallResponse
+): Omit<PhoneToolFailure, "tool"> {
+  for (const item of result.contentItems) {
+    if (item.type !== "inputText") continue;
+    try {
+      const record = extractRecord(JSON.parse(item.text));
+      if (!record) continue;
+      const failure: Omit<PhoneToolFailure, "tool"> = {
+        message: typeof record.message === "string" && record.message.trim()
+          ? record.message.trim()
+          : "DHD phone tool failed."
+      };
+      if (typeof record.code === "string" && record.code.trim()) {
+        failure.code = record.code.trim();
+      }
+      if (typeof record.outcome === "string" && record.outcome.trim()) {
+        failure.outcome = record.outcome.trim();
+      }
+      return failure;
+    } catch {
+      // The App Server still receives success=false. Keep a safe fallback for
+      // an adapter response that is not JSON text.
+    }
+  }
+  return { message: "DHD phone tool failed." };
 }
 
 export function toDynamicToolResponse(result: PhoneAssistantToolResult): DynamicToolCallResponse {
@@ -1130,6 +1184,24 @@ async function processPendingRequest(
     const existingThreadId = typeof claimed.codexThreadId === "string" ? claimed.codexThreadId : undefined;
     const threadTitle = typeof claimed.title === "string" ? claimed.title : request;
     const result = await codexClient.runTurn(request, existingThreadId, threadTitle, timing);
+    const phoneToolFailure = result.phoneToolFailures.at(-1);
+    if (phoneToolFailure) {
+      const reason = formatPhoneToolFailure(phoneToolFailure);
+      timing.log("phone-tool:failed", `tool=${phoneToolFailure.tool}`);
+      console.error(
+        `[phone-assistant-companion] phone tool failed; refusing to report success: ${reason}`
+      );
+      const failed = await requestBridge({
+        type: "fail_session",
+        requestId: randomUUID(),
+        sessionId,
+        reason
+      });
+      if (failed.ok !== true) {
+        console.error(`[phone-assistant-companion] could not mark the phone session failed: ${String(failed.message ?? "unknown error")}`);
+      }
+      return;
+    }
     if (conversationId && result.threadId && result.threadId !== existingThreadId) {
       const bound = await requestBridge({
         type: "bind_codex_thread",
@@ -1271,6 +1343,16 @@ async function releaseRequest(sessionId: string): Promise<void> {
 function normalizeAgentFeedback(text: string): string {
   return text
     .replace(/\r\n?/g, "\n")
+    .trim()
+    .slice(0, MAX_AGENT_FEEDBACK_CHARS);
+}
+
+function formatPhoneToolFailure(failure: PhoneToolFailure): string {
+  const code = failure.code ? ` (${failure.code})` : "";
+  const outcome = failure.outcome?.toLowerCase() === "unknown"
+    ? "could not be verified"
+    : "failed";
+  return `${failure.tool} ${outcome}${code}: ${failure.message}`
     .trim()
     .slice(0, MAX_AGENT_FEEDBACK_CHARS);
 }

@@ -86,6 +86,11 @@ class SessionCoordinator(
     private val policyEngine: PolicyEngine,
     private val transport: PhoneActionTransport,
     private val conversationStore: ConversationStore? = null,
+    /**
+     * Phone actions stay queued until their local execution prerequisites are
+     * ready. The default keeps the coordinator easy to exercise in unit tests.
+     */
+    private val phoneActionsReadyProvider: () -> Boolean = { true },
 ) {
     private val lock = Any()
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
@@ -125,6 +130,10 @@ class SessionCoordinator(
     /** Return the active phone request until a desktop companion claims it. */
     fun pendingRequest(): PendingRequest? = synchronized(lock) {
         val running = _state.value as? SessionState.Running ?: return@synchronized null
+        // Keep the request on the phone while Shizuku (the current phone
+        // execution prerequisite) is unavailable. The companion must not
+        // start an LLM turn that cannot safely reach the phone.
+        if (!phoneActionsReadyProvider()) return@synchronized null
         if (claimedRequestSessionId == running.sessionId) return@synchronized null
         pendingRequestFor(running)
     }
@@ -204,6 +213,7 @@ class SessionCoordinator(
         if (expectedSessionId != null && expectedSessionId != running.sessionId) {
             return@synchronized null
         }
+        if (!phoneActionsReadyProvider()) return@synchronized null
         if (claimedRequestSessionId == running.sessionId) return@synchronized null
         claimedRequestSessionId = running.sessionId
         _state.value = running.copy(currentPurpose = "Codex is planning")

@@ -129,6 +129,7 @@ fun PhoneControlApp(
     val permissions = application.appPermissionRepository
     val shizukuController = application.shizukuController
     val shizukuStatus by shizukuController.status.collectAsState()
+    val companionConnected by application.devBridgeServer.companionConnected.collectAsState()
     val apps = remember { InstalledAppsRepository(context).listLaunchableUserApps() }
 
     val navController = rememberNavController()
@@ -191,6 +192,7 @@ fun PhoneControlApp(
                                 conversationStore.deleteConversation(DHD_CONVERSATION_ID)
                             },
                             shizukuStatus = shizukuStatus,
+                            companionConnected = companionConnected,
                             onOpenShizuku = {
                                 val shizukuIntent = context.packageManager
                                     .getLaunchIntentForPackage(SHIZUKU_PACKAGE)

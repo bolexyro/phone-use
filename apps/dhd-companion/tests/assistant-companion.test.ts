@@ -59,7 +59,38 @@ describe("Codex App Server agent-message extraction", () => {
 
     await expect(resultPromise).resolves.toEqual({
       text: "The run failed on round 4; I requested your attention.",
-      threadId: "thread-test"
+      threadId: "thread-test",
+      phoneToolFailures: []
+    });
+  });
+
+  it("retains a failed dynamic phone tool when the App Server turn completes", async () => {
+    const client = new CodexAppServerClient() as any;
+    const resultPromise = new Promise<any>((resolve, reject) => {
+      client.activeThreadId = "thread-failure";
+      client.turnCompletion = {
+        resolve,
+        reject,
+        agentMessages: new Map(),
+        nextAgentMessageOrder: 0,
+        phoneToolFailures: []
+      };
+    });
+    client.send = () => undefined;
+
+    await client.handleServerRequest({
+      id: "tool-1",
+      method: "item/tool/call",
+      params: { tool: "unsupported_phone_tool", arguments: {} }
+    });
+    client.handleLine(JSON.stringify({ method: "turn/completed", params: { turn: { status: "completed" } } }));
+
+    await expect(resultPromise).resolves.toMatchObject({
+      threadId: "thread-failure",
+      phoneToolFailures: [{
+        tool: "unsupported_phone_tool",
+        message: "Unsupported dynamic phone tool: unsupported_phone_tool"
+      }]
     });
   });
 

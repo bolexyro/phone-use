@@ -42,7 +42,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        (application as? PhoneControlApplication)?.devBridgeServer?.requestCodexWarmup()
+        (application as? PhoneControlApplication)?.let { app ->
+            app.shizukuController.refresh()
+            app.devBridgeServer.requestCodexWarmup()
+        }
     }
 
     private fun startSession(request: String, conversationId: String?) {

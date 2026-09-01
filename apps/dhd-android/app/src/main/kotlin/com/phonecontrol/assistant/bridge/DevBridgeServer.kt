@@ -50,6 +50,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -89,6 +93,8 @@ class DevBridgeServer(
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var pairingSocket: DatagramSocket? = null
     @Volatile private var started = false
+    @Volatile private var lastCompanionSeenEpochMs: Long = 0L
+    private val _companionConnected = MutableStateFlow(false)
     private val pairingCodeLock = Any()
     @Volatile private var pairingCodeValue: String = loadOrCreatePairingCode()
     private val codexWarmupRequested = AtomicBoolean(false)
@@ -101,6 +107,8 @@ class DevBridgeServer(
 
     val pairingCode: String
         get() = pairingCodeValue
+
+    val companionConnected: StateFlow<Boolean> = _companionConnected.asStateFlow()
 
     fun refreshPairingCode(): String = synchronized(pairingCodeLock) {
         rotatePairingCodeLocked()
@@ -159,6 +167,7 @@ class DevBridgeServer(
             }
         }
         scope.launch { runPairingDiscovery() }
+        scope.launch { monitorCompanionPresence() }
     }
 
     fun stop() {
@@ -167,7 +176,26 @@ class DevBridgeServer(
         serverSocket = null
         pairingSocket?.close()
         pairingSocket = null
+        lastCompanionSeenEpochMs = 0L
+        _companionConnected.value = false
         scope.coroutineContext[Job]?.cancel()
+    }
+
+    private suspend fun monitorCompanionPresence() {
+        while (currentCoroutineContext().isActive) {
+            val lastSeen = lastCompanionSeenEpochMs
+            val connected = lastSeen > 0L &&
+                System.currentTimeMillis() - lastSeen <= COMPANION_PRESENCE_TIMEOUT_MS
+            if (_companionConnected.value != connected) {
+                _companionConnected.value = connected
+            }
+            delay(COMPANION_PRESENCE_CHECK_INTERVAL_MS)
+        }
+    }
+
+    private fun markCompanionSeen() {
+        lastCompanionSeenEpochMs = System.currentTimeMillis()
+        _companionConnected.value = true
     }
 
     private fun runPairingDiscovery() {
@@ -356,6 +384,7 @@ class DevBridgeServer(
             .put("ok", true)
             .put("state", stateName(state))
             .put("active", state is SessionState.Running || state is SessionState.Paused)
+            .put("companionConnected", companionConnected.value)
         when (state) {
             is SessionState.Running -> response
                 .put("sessionId", state.sessionId)
@@ -377,6 +406,10 @@ class DevBridgeServer(
         requestId: String,
         writer: BufferedWriter,
     ) {
+        // The companion's normal pending-request poll doubles as its
+        // heartbeat. The phone uses this to render the existing recovery card
+        // without exposing the request or requiring another protocol.
+        markCompanionSeen()
         val pending = coordinator.pendingRequest()
         val response = JSONObject()
             .put("type", "pending_request")
@@ -428,6 +461,7 @@ class DevBridgeServer(
         json: JSONObject,
         writer: BufferedWriter,
     ) {
+        markCompanionSeen()
         val expectedSessionId = json.optString("sessionId").trim().ifBlank { null }
         val state = coordinator.state.value
         val pending = coordinator.pendingSteer(expectedSessionId)
@@ -728,9 +762,18 @@ class DevBridgeServer(
                 ?.let { observations[it] }
                 ?: observations.values.lastOrNull()
         } ?: when (val captured = captureWithRetry(null, emptyList())) {
-            is ObservationCaptureResult.Failed -> throw IllegalArgumentException(
-                "The action could not get a current phone screenshot: ${captured.message}",
-            )
+            is ObservationCaptureResult.Failed -> {
+                val message = "The action could not get a current phone screenshot: ${captured.message}"
+                write(
+                    writer,
+                    errorResponse(requestId, message)
+                        .put("action", wireActionName(action))
+                        .put("code", observationFailureCode(captured.message))
+                        .put("outcome", "failed")
+                        .put("executed", false),
+                )
+                return
+            }
 
             is ObservationCaptureResult.Succeeded -> captured.snapshot.also(::remember)
         }
@@ -1122,6 +1165,15 @@ class DevBridgeServer(
         .put("ok", false)
         .put("message", message)
 
+    private fun observationFailureCode(message: String): String =
+        if (message.contains("Shizuku", ignoreCase = true) &&
+            message.contains("unavailable", ignoreCase = true)
+        ) {
+            "SHIZUKU_UNAVAILABLE"
+        } else {
+            "OBSERVATION_FAILED"
+        }
+
     private fun write(writer: BufferedWriter, json: JSONObject) {
         writer.write(json.toString())
         writer.newLine()
@@ -1177,6 +1229,8 @@ class DevBridgeServer(
         const val KEY_PAIRING_CODE = "pairing_code"
         const val PAIRING_CODE_LENGTH = 8
         const val PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        const val COMPANION_PRESENCE_TIMEOUT_MS = 5_000L
+        const val COMPANION_PRESENCE_CHECK_INTERVAL_MS = 1_000L
         const val MAX_REQUEST_CHARS = 16_384
         const val MAX_TEXT_CHARS = 240
         const val MAX_AGENT_FEEDBACK_CHARS = 4_000

@@ -129,6 +129,7 @@ fun AssistantScreen(
     onOpenSettings: () -> Unit,
     onStartFresh: () -> Unit,
     shizukuStatus: ShizukuStatus,
+    companionConnected: Boolean,
     onOpenShizuku: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
@@ -270,6 +271,7 @@ fun AssistantScreen(
                         timeline = recentTimeline,
                         state = state,
                         shizukuStatus = shizukuStatus,
+                        companionConnected = companionConnected,
                         onOpenSettings = onOpenSettings,
                         onOpenShizuku = onOpenShizuku,
                         onStopSession = onStopSession,
@@ -517,6 +519,7 @@ private fun ConversationTimeline(
     timeline: List<TimelineItem>,
     state: SessionState,
     shizukuStatus: ShizukuStatus,
+    companionConnected: Boolean,
     onOpenSettings: () -> Unit,
     onOpenShizuku: () -> Unit,
     onStopSession: () -> Unit,
@@ -543,6 +546,7 @@ private fun ConversationTimeline(
                 group = group,
                 state = state,
                 shizukuStatus = shizukuStatus,
+                companionConnected = companionConnected,
                 onOpenSettings = onOpenSettings,
                 onOpenShizuku = onOpenShizuku,
                 onStopSession = onStopSession,
@@ -557,6 +561,7 @@ private fun TaskGroupCard(
     group: TaskGroup,
     state: SessionState,
     shizukuStatus: ShizukuStatus,
+    companionConnected: Boolean,
     onOpenSettings: () -> Unit,
     onOpenShizuku: () -> Unit,
     onStopSession: () -> Unit,
@@ -591,6 +596,7 @@ private fun TaskGroupCard(
                     currentPurpose = state.currentPurpose,
                     startedAtEpochMs = state.startedAtEpochMs,
                     shizukuStatus = shizukuStatus,
+                    companionConnected = companionConnected,
                     onOpenSettings = onOpenSettings,
                     onOpenShizuku = onOpenShizuku,
                     onStopSession = onStopSession,
@@ -637,6 +643,7 @@ private fun RunningStatusIndicator(
     currentPurpose: String,
     startedAtEpochMs: Long,
     shizukuStatus: ShizukuStatus,
+    companionConnected: Boolean,
     onOpenSettings: () -> Unit,
     onOpenShizuku: () -> Unit,
     onStopSession: () -> Unit,
@@ -652,7 +659,8 @@ private fun RunningStatusIndicator(
         return
     }
 
-    val waitingForCompanion = currentPurpose.equals("Waiting for desktop Codex bridge", ignoreCase = true) ||
+    val waitingForCompanion = !companionConnected ||
+        currentPurpose.equals("Waiting for desktop Codex bridge", ignoreCase = true) ||
         (currentPurpose.equals("Preparing request", ignoreCase = true) && elapsedSeconds >= COMPANION_WAIT_CALLOUT_SECONDS)
     if (waitingForCompanion) {
         CompanionRecoveryCard(

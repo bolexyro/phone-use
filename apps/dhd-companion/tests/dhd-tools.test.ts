@@ -5,7 +5,7 @@ import {
   dhdExecuteActionSchema,
   dhdOpenAppInputSchema
 } from "../src/dhd-tools.js";
-import { buildDhdDynamicTools } from "../src/assistant-companion.js";
+import { buildDhdDynamicTools, toDynamicToolResponse } from "../src/assistant-companion.js";
 
 const metadata = {
   purpose: "Searching for iced tea",
@@ -65,5 +65,38 @@ describe("DHD phone tool contract", () => {
       y: 20,
       metadata
     }).success).toBe(false);
+  });
+
+  it("preserves phone-tool failures as unsuccessful App Server results", () => {
+    const response = toDynamicToolResponse({
+      isError: true,
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          ok: false,
+          code: "SHIZUKU_UNAVAILABLE",
+          outcome: "failed",
+          message: "Shizuku is unavailable."
+        })
+      }],
+      structuredContent: {
+        ok: false,
+        code: "SHIZUKU_UNAVAILABLE",
+        outcome: "failed",
+        message: "Shizuku is unavailable."
+      }
+    });
+
+    expect(response.success).toBe(false);
+    expect(response.contentItems).toHaveLength(1);
+    expect(response.contentItems[0]).toEqual({
+      type: "inputText",
+      text: JSON.stringify({
+        ok: false,
+        code: "SHIZUKU_UNAVAILABLE",
+        outcome: "failed",
+        message: "Shizuku is unavailable."
+      })
+    });
   });
 });

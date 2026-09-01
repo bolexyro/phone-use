@@ -9,9 +9,13 @@ The desktop side of the pivot has two small local processes:
    companion turn does not depend on a second MCP stdio process.
 
 The Android app remains the authority for Shizuku, app allowlisting,
-confirmation boundaries, and stop/pause state. The companion
-claims a request before starting a turn and releases it if the desktop side
-fails, so a temporary disconnect does not silently lose the user's request.
+confirmation boundaries, and stop/pause state. A request is kept queued on the
+phone until Shizuku is ready; the companion's normal poll is also the heartbeat
+used by the existing desktop-companion recovery card. The companion claims a
+request before starting a turn and releases it if the desktop side fails, so a
+temporary disconnect does not silently lose the user's request. A completed
+App Server turn is not treated as phone-task success when any DHD tool returned
+an error; the companion closes that session as failed instead.
 
 ```text
 Android app (typed request)

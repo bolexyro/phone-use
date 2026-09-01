@@ -47,6 +47,7 @@ class PhoneControlApplication : Application() {
                 enforceObservationFreshness = false,
             ),
             conversationStore = conversationStore,
+            phoneActionsReadyProvider = { shizukuController.status.value.privilegedApiReady },
         )
         // The bridge accepts paired LAN connections for the development
         // companion. adb forwarding remains compatible because forwarded

@@ -77,6 +77,25 @@ class SessionCoordinatorTest {
     }
 
     @Test
+    fun `desktop request stays queued until phone actions are ready`() {
+        var phoneActionsReady = false
+        val coordinator = coordinator { phoneActionsReady }
+        coordinator.start("Open Spotify")
+
+        assertNull(coordinator.pendingRequest())
+
+        phoneActionsReady = true
+        val pending = coordinator.pendingRequest()
+        assertNotNull(pending)
+
+        phoneActionsReady = false
+        assertNull(coordinator.claimRequest(pending!!.sessionId))
+
+        phoneActionsReady = true
+        assertEquals(pending, coordinator.claimRequest(pending.sessionId))
+    }
+
+    @Test
     fun `steer request can be claimed once and completed`() {
         val coordinator = coordinator()
         assertTrue(coordinator.start("Find a restaurant"))
@@ -150,7 +169,7 @@ class SessionCoordinatorTest {
         })
     }
 
-    private fun coordinator(): SessionCoordinator = SessionCoordinator(
+    private fun coordinator(phoneActionsReady: () -> Boolean = { true }): SessionCoordinator = SessionCoordinator(
         enabledPackagesProvider = { setOf("com.example.shop") },
         policyEngine = PolicyEngine(),
         transport = object : PhoneActionTransport {
@@ -159,5 +178,6 @@ class SessionCoordinatorTest {
                 observation: ObservationSnapshot?,
             ): TransportResult = TransportResult.Succeeded("executed")
         },
+        phoneActionsReadyProvider = phoneActionsReady,
     )
 }
