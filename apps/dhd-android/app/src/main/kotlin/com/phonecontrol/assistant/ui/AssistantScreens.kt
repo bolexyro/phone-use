@@ -5,12 +5,12 @@ package com.phonecontrol.assistant.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -52,6 +53,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -676,17 +680,13 @@ private fun RunningStatusIndicator(
     }
 
     ShimmerThinkingIndicator(
-        currentPurpose = currentPurpose,
         startedAtEpochMs = startedAtEpochMs,
-        elapsedSeconds = elapsedSeconds,
     )
 }
 
 @Composable
 private fun ShimmerThinkingIndicator(
-    currentPurpose: String,
     startedAtEpochMs: Long,
-    elapsedSeconds: Long,
 ) {
     val colors = LocalAssistantColors.current
     var wordIndex by rememberSaveable(startedAtEpochMs) {
@@ -694,7 +694,7 @@ private fun ShimmerThinkingIndicator(
     }
     LaunchedEffect(startedAtEpochMs) {
         while (true) {
-            delay(2_400L)
+            delay(THINKING_WORD_INTERVAL_MS)
             wordIndex = nextThinkingWordIndex(wordIndex)
         }
     }
@@ -732,27 +732,22 @@ private fun ShimmerThinkingIndicator(
         end = Offset(shimmerTranslate + 160f, 0f),
     )
 
-    Column(modifier = Modifier.padding(vertical = 4.dp, horizontal = 2.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                painter = painterResource(R.drawable.ic_bot),
-                contentDescription = "Thinking",
-                tint = colors.accentBlue.copy(alpha = pulseAlpha),
-                modifier = Modifier.size(16.dp),
-            )
-            Spacer(Modifier.width(7.dp))
-            Text(
-                text = THINKING_WORDS[wordIndex],
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                style = TextStyle(brush = shimmerBrush),
-            )
-        }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(vertical = 4.dp, horizontal = 2.dp),
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_bot),
+            contentDescription = "Thinking",
+            tint = colors.accentBlue.copy(alpha = pulseAlpha),
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(7.dp))
         Text(
-            text = "${thinkingDetail(currentPurpose, elapsedSeconds)} · ${elapsedSeconds}s",
-            fontSize = 12.sp,
-            color = colors.textSecondary,
-            modifier = Modifier.padding(start = 23.dp, top = 2.dp),
+            text = THINKING_WORDS[wordIndex],
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            style = TextStyle(brush = shimmerBrush),
         )
     }
 }
@@ -1095,6 +1090,7 @@ private fun nextThinkingWordIndex(previous: Int): Int {
 }
 
 private const val COMPANION_WAIT_CALLOUT_SECONDS = 15L
+private const val THINKING_WORD_INTERVAL_MS = 4_000L
 
 @Composable
 private fun MessageBubble(message: TimelineItem.Message) {
@@ -1417,36 +1413,55 @@ private fun RequestComposer(
     }
 
     val hasText = textFieldValue.text.isNotBlank()
-    val isExpanded = !isImeHiding && (isImeVisible || (isFocused && hasText))
+    val isExpanded = hasText || (!isImeHiding && isImeVisible)
+    val isWidened = hasText || (!isImeHiding && isImeVisible)
+
+    val horizontalPadding by animateDpAsState(
+        targetValue = if (isWidened) 14.dp else 36.dp,
+        animationSpec = tween(
+            durationMillis = 120,
+            easing = FastOutSlowInEasing,
+        ),
+        label = "composer_horizontal_padding",
+    )
+
+    val cornerRadius by animateDpAsState(
+        targetValue = if (isExpanded) 22.dp else 28.dp,
+        animationSpec = tween(
+            durationMillis = 120,
+            easing = FastOutSlowInEasing,
+        ),
+        label = "composer_corner_radius",
+    )
 
     Surface(
         color = colors.composerBackground,
-        shape = RoundedCornerShape(if (isExpanded) 22.dp else 30.dp),
+        shape = RoundedCornerShape(cornerRadius),
         border = BorderStroke(1.dp, colors.borderColor),
         shadowElevation = 4.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = horizontalPadding),
     ) {
         Column(
             modifier = Modifier
-                .animateContentSize(
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioNoBouncy,
-                        stiffness = Spring.StiffnessMediumLow,
-                    ),
-                )
                 .padding(
-                    start = 18.dp,
+                    start = 10.dp,
                     end = 10.dp,
-                    top = if (isExpanded) 12.dp else 7.dp,
-                    bottom = if (isExpanded) 10.dp else 7.dp,
+                    top = 7.dp,
+                    bottom = 7.dp,
                 ),
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 36.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (!isExpanded) {
+                    AttachButton(colors = colors)
+                    Spacer(Modifier.width(10.dp))
+                }
                 BasicTextField(
                     value = textFieldValue,
                     onValueChange = { nextValue ->
@@ -1469,18 +1484,22 @@ private fun RequestComposer(
                     cursorBrush = SolidColor(colors.accentBlue),
                     modifier = Modifier
                         .weight(1f)
-                        .padding(end = 12.dp)
+                        .padding(
+                            start = if (isExpanded) 4.dp else 0.dp,
+                            end = if (isExpanded) 4.dp else 10.dp,
+                            top = if (isExpanded) 4.dp else 0.dp,
+                        )
                         .focusRequester(composerFocusRequester)
                         .semantics {
                             contentDescription = "Ask DHD input"
                         }
                         .onFocusChanged { isFocused = it.isFocused },
-                    minLines = if (isExpanded) 2 else 1,
+                    minLines = 1,
                     maxLines = 5,
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Sentences,
                         keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Send,
+                        imeAction = ImeAction.Default,
                     ),
                     keyboardActions = KeyboardActions(
                         onSend = {
@@ -1490,11 +1509,7 @@ private fun RequestComposer(
                     decorationBox = { innerTextField ->
                         if (textFieldValue.text.isEmpty()) {
                             Text(
-                                text = when {
-                                    canSteer -> "Do anything"
-                                    enabled -> "Ask DHD"
-                                    else -> "DHD is working…"
-                                },
+                                text = if (enabled) "Ask DHD" else "DHD is working…",
                                 color = colors.textSecondary,
                                 fontSize = 16.sp,
                             )
@@ -1503,11 +1518,7 @@ private fun RequestComposer(
                     },
                 )
 
-                AnimatedVisibility(
-                    visible = !isExpanded,
-                    enter = fadeIn(animationSpec = tween(120)),
-                    exit = fadeOut(animationSpec = tween(50)),
-                ) {
+                if (!isExpanded) {
                     ActionOrSendButton(
                         isActive = isActive,
                         hasText = hasText,
@@ -1522,16 +1533,23 @@ private fun RequestComposer(
 
             AnimatedVisibility(
                 visible = isExpanded,
-                enter = fadeIn(animationSpec = tween(120)),
-                exit = fadeOut(animationSpec = tween(50)),
+                enter = expandVertically(
+                    animationSpec = tween(120),
+                    expandFrom = Alignment.Top,
+                ) + fadeIn(animationSpec = tween(80)),
+                exit = shrinkVertically(
+                    animationSpec = tween(100),
+                    shrinkTowards = Alignment.Top,
+                ) + fadeOut(animationSpec = tween(60)),
             ) {
                 Column {
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(14.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.End,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
+                        AttachButton(colors = colors)
                         ActionOrSendButton(
                             isActive = isActive,
                             hasText = hasText,
@@ -1544,6 +1562,30 @@ private fun RequestComposer(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AttachButton(
+    colors: AssistantColorScheme,
+    onClick: () -> Unit = {},
+) {
+    Surface(
+        shape = CircleShape,
+        color = Color.Transparent,
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .clickable { onClick() },
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painterResource(R.drawable.ic_plus),
+                contentDescription = "Attach",
+                tint = colors.textPrimary,
+                modifier = Modifier.size(24.dp),
+            )
         }
     }
 }
@@ -1627,26 +1669,30 @@ fun SettingsScreen(
     permissions: AppPermissionRepository,
     shizukuStatus: ShizukuStatus,
     bridgeServer: DevBridgeServer,
-    isDarkMode: Boolean,
-    onToggleDarkMode: (Boolean) -> Unit,
+    themeMode: ThemeMode,
+    onSelectThemeMode: (ThemeMode) -> Unit,
     onRequestShizukuPermission: () -> Unit,
     onOpenApprovedApps: () -> Unit,
+    onOpenCompanion: () -> Unit,
     onBack: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
+    val isFullAccess = remember(permissions.isFullAccessEnabled()) { permissions.isFullAccessEnabled() }
     val enabledCount = remember(permissions.enabledPackages()) { permissions.enabledPackages().size }
-    var lanAddresses by remember { mutableStateOf(bridgeServer.lanIpv4Addresses()) }
-    var pairingCode by remember { mutableStateOf(bridgeServer.pairingCode) }
+    val lanAddresses = remember { bridgeServer.lanIpv4Addresses() }
+    var isAppearanceMenuOpen by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = colors.background,
         topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                     containerColor = colors.background,
                     titleContentColor = colors.textPrimary,
+                    navigationIconContentColor = colors.textPrimary,
+                    actionIconContentColor = colors.textPrimary,
                 ),
-                title = { Text("Settings", fontWeight = FontWeight.Bold) },
+                title = { Text("Settings", fontWeight = FontWeight.SemiBold, fontSize = 17.sp) },
                 navigationIcon = {
                     Surface(
                         shape = CircleShape,
@@ -1654,7 +1700,7 @@ fun SettingsScreen(
                         border = BorderStroke(1.dp, colors.borderColor),
                         modifier = Modifier
                             .padding(start = 12.dp)
-                            .size(44.dp)
+                            .size(40.dp)
                             .clip(CircleShape)
                             .clickable { onBack() },
                     ) {
@@ -1663,7 +1709,7 @@ fun SettingsScreen(
                                 painter = painterResource(R.drawable.ic_arrow_back),
                                 contentDescription = "Back",
                                 tint = colors.textPrimary,
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(18.dp),
                             )
                         }
                     }
@@ -1677,29 +1723,30 @@ fun SettingsScreen(
                 .padding(paddingValues)
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
-            contentPadding = PaddingValues(top = 16.dp, bottom = 24.dp),
+            contentPadding = PaddingValues(top = 14.dp, bottom = 24.dp),
         ) {
             // Preferences Section
             item {
                 SettingsSectionHeader("Preferences")
                 Surface(
                     shape = RoundedCornerShape(20.dp),
-                    color = colors.surfaceCard,
-                    border = BorderStroke(1.dp, colors.borderColor),
+                    color = colors.settingsCard,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column {
-                        // Dark Mode Toggle Row
+                        // Appearance Selector Row (with DropdownMenu anchored to right side)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                                .clickable { isAppearanceMenuOpen = true }
                                 .padding(horizontal = 16.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
-                                painter = painterResource(if (isDarkMode) R.drawable.ic_moon else R.drawable.ic_sun),
-                                contentDescription = "Theme",
-                                tint = colors.accentBlue,
+                                painter = painterResource(R.drawable.ic_sun),
+                                contentDescription = "Appearance",
+                                tint = colors.textPrimary,
                                 modifier = Modifier.size(22.dp),
                             )
                             Column(
@@ -1708,33 +1755,70 @@ fun SettingsScreen(
                                     .padding(start = 14.dp),
                             ) {
                                 Text(
-                                    text = "Dark mode",
+                                    text = "Appearance",
                                     fontWeight = FontWeight.Medium,
                                     color = colors.textPrimary,
                                     fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = if (isDarkMode) "OLED dark mode" else "Light mode",
+                                    text = themeMode.label,
                                     fontSize = 12.sp,
                                     color = colors.textSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            Switch(
-                                checked = isDarkMode,
-                                onCheckedChange = onToggleDarkMode,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = colors.accentBlue,
-                                    uncheckedThumbColor = colors.textSecondary,
-                                    uncheckedTrackColor = if (colors.isDark) Color(0xFF2C2C2E) else Color(0xFFE5E7EB),
-                                    uncheckedBorderColor = colors.borderColor,
-                                ),
-                            )
+                            Box(modifier = Modifier.wrapContentSize(Alignment.TopEnd)) {
+                                Icon(
+                                    painter = painterResource(if (isAppearanceMenuOpen) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
+                                    contentDescription = "Select appearance",
+                                    tint = colors.textSecondary,
+                                    modifier = Modifier.size(18.dp),
+                                )
+
+                                DropdownMenu(
+                                    expanded = isAppearanceMenuOpen,
+                                    onDismissRequest = { isAppearanceMenuOpen = false },
+                                    shape = RoundedCornerShape(16.dp),
+                                    containerColor = if (colors.isDark) Color(0xFF262628) else Color(0xFFFFFFFF),
+                                    border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF38383B) else Color(0xFFE5E7EB)),
+                                    modifier = Modifier.width(220.dp),
+                                ) {
+                                    ThemeMode.entries.forEach { mode ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = mode.label,
+                                                    color = colors.textPrimary,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = if (themeMode == mode) FontWeight.SemiBold else FontWeight.Normal,
+                                                )
+                                            },
+                                            trailingIcon = {
+                                                if (themeMode == mode) {
+                                                    Icon(
+                                                        painter = painterResource(R.drawable.ic_check),
+                                                        contentDescription = "Selected",
+                                                        tint = colors.textPrimary,
+                                                        modifier = Modifier.size(18.dp),
+                                                    )
+                                                }
+                                            },
+                                            onClick = {
+                                                onSelectThemeMode(mode)
+                                                isAppearanceMenuOpen = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
                         }
 
-                        HorizontalDivider(color = colors.borderColor)
+                        HorizontalDivider(thickness = 2.dp, color = colors.cardDivider)
 
-                        // Approved Apps Row (Navigates to dedicated page)
+                        // Approved Apps Row
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1755,15 +1839,19 @@ fun SettingsScreen(
                                     .padding(start = 14.dp),
                             ) {
                                 Text(
-                                    text = "Approved Apps",
+                                    text = "Approved apps",
                                     fontWeight = FontWeight.Medium,
                                     color = colors.textPrimary,
                                     fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = "$enabledCount of ${apps.size} apps enabled",
+                                    text = if (isFullAccess) "Full access enabled" else "$enabledCount of ${apps.size} enabled",
                                     fontSize = 12.sp,
                                     color = colors.textSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                             Icon(
@@ -1777,24 +1865,28 @@ fun SettingsScreen(
                 }
             }
 
-            // Desktop companion connection
+            // Integrations & System Section
             item {
-                SettingsSectionHeader("Companion connection")
+                SettingsSectionHeader("Integrations")
                 Surface(
                     shape = RoundedCornerShape(20.dp),
-                    color = colors.surfaceCard,
-                    border = BorderStroke(1.dp, colors.borderColor),
+                    color = colors.settingsCard,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                    Column {
+                        // Desktop companion Row -> Opens dedicated screen
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                                .clickable { onOpenCompanion() }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_laptop),
                                 contentDescription = "Desktop companion",
-                                tint = colors.accentBlue,
+                                tint = colors.textPrimary,
                                 modifier = Modifier.size(22.dp),
                             )
                             Column(
@@ -1803,90 +1895,53 @@ fun SettingsScreen(
                                     .padding(start = 14.dp),
                             ) {
                                 Text(
-                                    text = "Wireless bridge",
+                                    text = "Desktop companion",
                                     fontWeight = FontWeight.Medium,
                                     color = colors.textPrimary,
                                     fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = if (lanAddresses.isEmpty()) {
-                                        "Join the phone and companion to the same Wi-Fi"
-                                    } else {
-                                        "Ready for a paired companion on Wi-Fi"
-                                    },
+                                    text = if (lanAddresses.isEmpty()) "Offline" else "Ready on Wi-Fi",
                                     fontSize = 12.sp,
                                     color = colors.textSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            Surface(
-                                shape = CircleShape,
-                                color = if (lanAddresses.isEmpty()) {
-                                    colors.warningAmber.copy(alpha = 0.2f)
-                                } else {
-                                    colors.accentGreen.copy(alpha = 0.2f)
-                                },
-                            ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = if (lanAddresses.isEmpty()) "Offline" else "Ready",
-                                    color = if (lanAddresses.isEmpty()) colors.warningAmber else colors.accentGreen,
-                                    fontSize = 11.sp,
+                                    color = colors.textSecondary,
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                                    modifier = Modifier.padding(end = 4.dp),
+                                )
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_chevron_right),
+                                    contentDescription = "Open Companion settings",
+                                    tint = colors.textSecondary,
+                                    modifier = Modifier.size(18.dp),
                                 )
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Pairing code",
-                            fontSize = 12.sp,
-                            color = colors.textSecondary,
-                        )
-                        Text(
-                            text = pairingCode.chunked(4).joinToString("-"),
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 2.sp,
-                            color = colors.textPrimary,
-                            modifier = Modifier.padding(top = 5.dp),
-                        )
-                        Text(
-                            text = "Enter this code in the companion. It stays valid until you refresh it, which revokes the old code.",
-                            fontSize = 12.sp,
-                            color = colors.textSecondary,
-                            modifier = Modifier.padding(top = 5.dp),
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            TextButton(onClick = {
-                                pairingCode = bridgeServer.refreshPairingCode()
-                                lanAddresses = bridgeServer.lanIpv4Addresses()
-                            }) {
-                                Text("Refresh pairing code", color = colors.accentBlue)
-                            }
-                        }
-                    }
-                }
-            }
+                        HorizontalDivider(thickness = 2.dp, color = colors.cardDivider)
 
-            // Shizuku & Transport Section
-            item {
-                SettingsSectionHeader("Shizuku & Transport")
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = colors.surfaceCard,
-                    border = BorderStroke(1.dp, colors.borderColor),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                        // Shizuku Service Row (with terminal/service icon)
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
+                                .clickable(enabled = shizukuStatus.binderAvailable && !shizukuStatus.permissionGranted) {
+                                    onRequestShizukuPermission()
+                                }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
-                                painter = painterResource(R.drawable.ic_shield),
+                                painter = painterResource(R.drawable.ic_terminal),
                                 contentDescription = "Shizuku",
                                 tint = colors.textPrimary,
                                 modifier = Modifier.size(22.dp),
@@ -1897,42 +1952,34 @@ fun SettingsScreen(
                                     .padding(start = 14.dp),
                             ) {
                                 Text(
-                                    text = "Shizuku Service",
+                                    text = "Shizuku service",
                                     fontWeight = FontWeight.Medium,
                                     color = colors.textPrimary,
                                     fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = shizukuStatus.message,
+                                    text = if (shizukuStatus.permissionGranted) {
+                                        "Shizuku is ready"
+                                    } else if (shizukuStatus.binderAvailable) {
+                                        "Permission required"
+                                    } else {
+                                        "Service unavailable"
+                                    },
                                     fontSize = 12.sp,
                                     color = colors.textSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            Surface(
-                                shape = CircleShape,
-                                color = if (shizukuStatus.permissionGranted) colors.accentGreen.copy(alpha = 0.2f) else colors.warningAmber.copy(alpha = 0.2f),
-                            ) {
-                                Text(
-                                    text = if (shizukuStatus.permissionGranted) "Active" else "Action needed",
-                                    color = if (shizukuStatus.permissionGranted) colors.accentGreen else colors.warningAmber,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
-                                )
-                            }
-                        }
-                        if (shizukuStatus.binderAvailable && !shizukuStatus.permissionGranted) {
-                            Row(
-                                modifier = Modifier.padding(start = 36.dp, top = 10.dp),
-                            ) {
-                                Button(
-                                    onClick = onRequestShizukuPermission,
-                                    colors = ButtonDefaults.buttonColors(containerColor = colors.accentBlue),
-                                    shape = RoundedCornerShape(12.dp),
-                                ) {
-                                    Text("Request permission", fontSize = 12.sp)
-                                }
-                            }
+                            Text(
+                                text = if (shizukuStatus.permissionGranted) "Active" else "Action needed",
+                                color = if (shizukuStatus.permissionGranted) colors.textSecondary else colors.accentBlue,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(start = 8.dp),
+                            )
                         }
                     }
                 }
@@ -1943,8 +1990,7 @@ fun SettingsScreen(
                 SettingsSectionHeader("About")
                 Surface(
                     shape = RoundedCornerShape(20.dp),
-                    color = colors.surfaceCard,
-                    border = BorderStroke(1.dp, colors.borderColor),
+                    color = colors.settingsCard,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Row(
@@ -1958,7 +2004,7 @@ fun SettingsScreen(
                             contentDescription = "Version",
                             tint = colors.textPrimary,
                             modifier = Modifier.size(22.dp),
-                            )
+                        )
                         Column(
                             modifier = Modifier
                                 .weight(1f)
@@ -1969,15 +2015,167 @@ fun SettingsScreen(
                                 fontWeight = FontWeight.Medium,
                                 color = colors.textPrimary,
                                 fontSize = 15.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                             Text(
                                 text = "0.1.0 • Android SDK 35",
                                 fontSize = 12.sp,
                                 color = colors.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun CompanionScreen(
+    bridgeServer: DevBridgeServer,
+    onBack: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    var lanAddresses by remember { mutableStateOf(bridgeServer.lanIpv4Addresses()) }
+    var pairingCode by remember { mutableStateOf(bridgeServer.pairingCode) }
+
+    Scaffold(
+        containerColor = colors.background,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = colors.background,
+                    titleContentColor = colors.textPrimary,
+                    navigationIconContentColor = colors.textPrimary,
+                ),
+                title = { Text("Desktop Companion", fontWeight = FontWeight.SemiBold, fontSize = 17.sp) },
+                navigationIcon = {
+                    Surface(
+                        shape = CircleShape,
+                        color = colors.composerBackground,
+                        border = BorderStroke(1.dp, colors.borderColor),
+                        modifier = Modifier
+                            .padding(start = 12.dp)
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .clickable { onBack() },
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_arrow_back),
+                                contentDescription = "Back",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                },
+            )
+        },
+    ) { paddingValues ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(top = 14.dp, bottom = 24.dp),
+        ) {
+            item {
+                SettingsSectionHeader("Connection")
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = colors.settingsCard,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_laptop),
+                                contentDescription = "Desktop companion",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 14.dp),
+                            ) {
+                                Text(
+                                    text = "Wireless bridge",
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.textPrimary,
+                                    fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = if (lanAddresses.isEmpty()) "Offline" else "Connected on local Wi-Fi",
+                                    fontSize = 12.sp,
+                                    color = colors.textSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Text(
+                                text = if (lanAddresses.isEmpty()) "Offline" else "Ready",
+                                color = colors.textSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(start = 8.dp),
+                            )
+                        }
+
+                        HorizontalDivider(thickness = 2.dp, color = colors.cardDivider)
+
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "Pairing code",
+                                    fontSize = 12.sp,
+                                    color = colors.textSecondary,
+                                )
+                                TextButton(
+                                    onClick = {
+                                        pairingCode = bridgeServer.refreshPairingCode()
+                                        lanAddresses = bridgeServer.lanIpv4Addresses()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                ) {
+                                    Text("Refresh", color = colors.accentBlue, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
+                            Text(
+                                text = pairingCode.chunked(4).joinToString("-"),
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 2.sp,
+                                color = colors.textPrimary,
+                                modifier = Modifier.padding(vertical = 4.dp),
+                            )
+                            Text(
+                                text = "Enter code in desktop companion",
+                                fontSize = 12.sp,
+                                color = colors.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+                SettingsSectionFooter("The companion coordinates requests with desktop Codex over your local Wi-Fi.")
             }
         }
     }
@@ -1990,6 +2188,8 @@ fun ApprovedAppsScreen(
     onBack: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
+    var isFullAccess by remember { mutableStateOf(permissions.isFullAccessEnabled()) }
+    var showFullAccessConfirmDialog by rememberSaveable { mutableStateOf(false) }
     var enabledPackages by remember { mutableStateOf(permissions.enabledPackages()) }
     var isSearchOpen by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -2032,7 +2232,7 @@ fun ApprovedAppsScreen(
                         title = {
                             Surface(
                                 shape = RoundedCornerShape(24.dp),
-                                color = colors.surfaceCard,
+                                color = colors.composerBackground,
                                 border = BorderStroke(1.dp, colors.borderColor),
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -2114,13 +2314,14 @@ fun ApprovedAppsScreen(
                         },
                     )
                 } else {
-                    TopAppBar(
-                        colors = TopAppBarDefaults.topAppBarColors(
+                    CenterAlignedTopAppBar(
+                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                             containerColor = colors.background,
                             titleContentColor = colors.textPrimary,
                             actionIconContentColor = colors.textPrimary,
+                            navigationIconContentColor = colors.textPrimary,
                         ),
-                        title = { Text("Approved Apps", fontWeight = FontWeight.Bold) },
+                        title = { Text("Approved Apps", fontWeight = FontWeight.SemiBold, fontSize = 17.sp) },
                         navigationIcon = {
                             Surface(
                                 shape = CircleShape,
@@ -2128,7 +2329,7 @@ fun ApprovedAppsScreen(
                                 border = BorderStroke(1.dp, colors.borderColor),
                                 modifier = Modifier
                                     .padding(start = 12.dp)
-                                    .size(44.dp)
+                                    .size(40.dp)
                                     .clip(CircleShape)
                                     .clickable { onBack() },
                             ) {
@@ -2137,7 +2338,7 @@ fun ApprovedAppsScreen(
                                         painter = painterResource(R.drawable.ic_arrow_back),
                                         contentDescription = "Back",
                                         tint = colors.textPrimary,
-                                        modifier = Modifier.size(20.dp),
+                                        modifier = Modifier.size(18.dp),
                                     )
                                 }
                             }
@@ -2149,7 +2350,7 @@ fun ApprovedAppsScreen(
                                 border = BorderStroke(1.dp, colors.borderColor),
                                 modifier = Modifier
                                     .padding(end = 12.dp)
-                                    .size(44.dp)
+                                    .size(40.dp)
                                     .clip(CircleShape)
                                     .clickable { isSearchOpen = true },
                             ) {
@@ -2158,7 +2359,7 @@ fun ApprovedAppsScreen(
                                         painter = painterResource(R.drawable.ic_search),
                                         contentDescription = "Search",
                                         tint = colors.textPrimary,
-                                        modifier = Modifier.size(20.dp),
+                                        modifier = Modifier.size(18.dp),
                                     )
                                 }
                             }
@@ -2173,30 +2374,86 @@ fun ApprovedAppsScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(top = 14.dp, bottom = 24.dp),
         ) {
-            if (filteredApps.isEmpty()) {
-                item {
+            // Full Access Section
+            item {
+                SettingsSectionHeader("Global access")
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = colors.settingsCard,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_shield),
+                            contentDescription = "Full access",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 14.dp),
+                        ) {
+                            Text(
+                                text = "Full access",
+                                fontWeight = FontWeight.Medium,
+                                color = colors.textPrimary,
+                                fontSize = 15.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "Allow access to all installed apps",
+                                fontSize = 12.sp,
+                                color = colors.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Switch(
+                            checked = isFullAccess,
+                            onCheckedChange = { checked ->
+                                if (checked) {
+                                    showFullAccessConfirmDialog = true
+                                } else {
+                                    permissions.setFullAccessEnabled(false)
+                                    isFullAccess = false
+                                }
+                            },
+                            colors = assistantSwitchColors(colors),
+                        )
+                    }
+                }
+            }
+
+            // Per-App List Section
+            item {
+                SettingsSectionHeader(if (isFullAccess) "Apps allowlist (Full access active)" else "Allowed apps")
+                if (filteredApps.isEmpty()) {
                     Text(
                         text = if (searchQuery.isBlank()) "No launchable user apps found." else "No matching apps found.",
                         color = colors.textSecondary,
                         fontSize = 13.sp,
-                        modifier = Modifier.padding(vertical = 12.dp),
+                        modifier = Modifier.padding(start = 8.dp, top = 8.dp),
                     )
-                }
-            } else {
-                // Continuous joined card container for all apps
-                item {
+                } else {
+                    // Continuous joined card container for all apps with black dividers
                     Surface(
                         shape = RoundedCornerShape(20.dp),
-                        color = colors.surfaceCard,
-                        border = BorderStroke(1.dp, colors.borderColor),
+                        color = colors.settingsCard,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column {
                             filteredApps.forEachIndexed { index, app ->
-                                val enabled = app.packageName in enabledPackages
+                                val enabled = if (isFullAccess) true else (app.packageName in enabledPackages)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -2209,30 +2466,29 @@ fun ApprovedAppsScreen(
                                             fontWeight = FontWeight.Medium,
                                             color = colors.textPrimary,
                                             fontSize = 14.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                         )
                                         Text(
                                             text = app.packageName,
                                             fontSize = 12.sp,
                                             color = colors.textSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                         )
                                     }
                                     Switch(
                                         checked = enabled,
+                                        enabled = !isFullAccess,
                                         onCheckedChange = { checked ->
                                             permissions.setEnabled(app.packageName, checked)
                                             enabledPackages = permissions.enabledPackages()
                                         },
-                                        colors = SwitchDefaults.colors(
-                                            checkedThumbColor = Color.White,
-                                            checkedTrackColor = colors.accentBlue,
-                                            uncheckedThumbColor = colors.textSecondary,
-                                            uncheckedTrackColor = if (colors.isDark) Color(0xFF2C2C2E) else Color(0xFFE5E7EB),
-                                            uncheckedBorderColor = colors.borderColor,
-                                        ),
+                                        colors = assistantSwitchColors(colors),
                                     )
                                 }
                                 if (index < filteredApps.lastIndex) {
-                                    HorizontalDivider(color = colors.borderColor)
+                                    HorizontalDivider(thickness = 2.dp, color = colors.cardDivider)
                                 }
                             }
                         }
@@ -2241,7 +2497,56 @@ fun ApprovedAppsScreen(
             }
         }
     }
+
+    if (showFullAccessConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showFullAccessConfirmDialog = false },
+            containerColor = colors.surfaceCard,
+            titleContentColor = colors.textPrimary,
+            textContentColor = colors.textSecondary,
+            shape = RoundedCornerShape(20.dp),
+            title = { Text("Enable Full Access?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "Full Access allows DHD to open, inspect, and operate any application installed on this device.\n\n" +
+                        "This bypasses the per-app allowlist and lets DHD carry out tasks across all your apps.",
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showFullAccessConfirmDialog = false
+                        permissions.setFullAccessEnabled(true)
+                        isFullAccess = true
+                    },
+                ) {
+                    Text("Enable", color = colors.accentBlue, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFullAccessConfirmDialog = false }) {
+                    Text("Cancel", color = colors.textSecondary)
+                }
+            },
+        )
+    }
 }
+
+@Composable
+fun assistantSwitchColors(colors: AssistantColorScheme) = SwitchDefaults.colors(
+    checkedThumbColor = if (colors.isDark) Color.Black else Color.White,
+    checkedTrackColor = if (colors.isDark) Color.White else Color.Black,
+    checkedBorderColor = Color.Transparent,
+    uncheckedThumbColor = if (colors.isDark) Color(0xFF8E8E93) else Color(0xFF9CA3AF),
+    uncheckedTrackColor = if (colors.isDark) Color(0xFF212124) else Color(0xFFE5E7EB),
+    uncheckedBorderColor = Color.Transparent,
+    disabledCheckedThumbColor = if (colors.isDark) Color.Black.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.6f),
+    disabledCheckedTrackColor = if (colors.isDark) Color.White.copy(alpha = 0.5f) else Color.Black.copy(alpha = 0.5f),
+    disabledUncheckedThumbColor = if (colors.isDark) Color(0xFF8E8E93).copy(alpha = 0.4f) else Color(0xFF9CA3AF).copy(alpha = 0.4f),
+    disabledUncheckedTrackColor = if (colors.isDark) Color(0xFF212124).copy(alpha = 0.4f) else Color(0xFFE5E7EB).copy(alpha = 0.4f),
+)
 
 @Composable
 private fun SettingsSectionHeader(title: String) {
@@ -2251,7 +2556,19 @@ private fun SettingsSectionHeader(title: String) {
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         color = colors.textSecondary,
-        modifier = Modifier.padding(start = 6.dp, bottom = 6.dp),
+        modifier = Modifier.padding(start = 8.dp, bottom = 6.dp),
+    )
+}
+
+@Composable
+private fun SettingsSectionFooter(text: String) {
+    val colors = LocalAssistantColors.current
+    Text(
+        text = text,
+        fontSize = 12.sp,
+        color = colors.textSecondary,
+        lineHeight = 16.sp,
+        modifier = Modifier.padding(start = 8.dp, top = 6.dp, end = 8.dp),
     )
 }
 

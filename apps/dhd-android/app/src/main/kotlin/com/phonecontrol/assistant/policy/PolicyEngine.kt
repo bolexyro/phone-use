@@ -9,6 +9,7 @@ data class PolicyContext(
     val enabledPackages: Set<String>,
     val foregroundPackage: String?,
     val currentObservationId: String?,
+    val fullAccess: Boolean = false,
 )
 
 sealed interface PolicyDecision {
@@ -60,27 +61,29 @@ class PolicyEngine(
             )
         }
 
-        when (action) {
-            is OpenAppAction -> {
-                if (action.packageName !in context.enabledPackages) {
-                    return PolicyDecision.Denied(
-                        DenialCode.APP_NOT_ALLOWED,
-                        "The app ${action.packageName} is not enabled for Phone Control.",
-                    )
+        if (!context.fullAccess) {
+            when (action) {
+                is OpenAppAction -> {
+                    if (action.packageName !in context.enabledPackages) {
+                        return PolicyDecision.Denied(
+                            DenialCode.APP_NOT_ALLOWED,
+                            "The app ${action.packageName} is not enabled for Phone Control.",
+                        )
+                    }
                 }
-            }
 
-            else -> {
-                val foregroundPackage = context.foregroundPackage
-                    ?: return PolicyDecision.Denied(
-                        DenialCode.NO_FOREGROUND_PACKAGE,
-                        "No foreground app is available for this action.",
-                    )
-                if (foregroundPackage !in context.enabledPackages) {
-                    return PolicyDecision.Denied(
-                        DenialCode.APP_NOT_ALLOWED,
-                        "The foreground app is not enabled for Phone Control.",
-                    )
+                else -> {
+                    val foregroundPackage = context.foregroundPackage
+                        ?: return PolicyDecision.Denied(
+                            DenialCode.NO_FOREGROUND_PACKAGE,
+                            "No foreground app is available for this action.",
+                        )
+                    if (foregroundPackage !in context.enabledPackages) {
+                        return PolicyDecision.Denied(
+                            DenialCode.APP_NOT_ALLOWED,
+                            "The foreground app is not enabled for Phone Control.",
+                        )
+                    }
                 }
             }
         }

@@ -227,7 +227,7 @@ export function createDhdMcpServer(
   server.registerTool(
     "dhd_list_allowed_apps",
     {
-      description: "List the installed Android packages currently enabled in the phone-side per-app allowlist. Apps are off by default; use the phone settings screen to change this list.",
+      description: "Check the phone's app-access mode. In restricted mode, return the explicit allowlist; when Full Access is active, return a concise capability message saying you can use any launchable app without enumerating installed apps.",
       inputSchema: {}
     },
     async () => invokeDhdTool("dhd_list_allowed_apps", {})
@@ -245,7 +245,7 @@ export function createDhdMcpServer(
   server.registerTool(
     "dhd_open_app",
     {
-      description: "Open one allowlisted Android app and return a post-action screenshot. Include a meaningful user-facing purpose and concrete target description.",
+      description: "Open one launchable Android app and return a post-action screenshot. In restricted mode the app must be on the explicit allowlist; Full Access lets you use any launchable app. Include a meaningful user-facing purpose and concrete target description.",
       inputSchema: dhdOpenAppInputSchema.shape
     },
     async (input) => invokeDhdTool("dhd_open_app", input)

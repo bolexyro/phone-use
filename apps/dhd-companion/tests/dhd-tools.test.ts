@@ -21,6 +21,8 @@ function record(value: unknown): Record<string, unknown> {
 describe("DHD phone tool contract", () => {
   it("uses the same five canonical names for the MCP and App Server surfaces", () => {
     const dynamicNames = buildDhdDynamicTools().map((tool) => String(tool.name));
+    const listTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_list_allowed_apps"));
+    const openAppTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_open_app"));
 
     expect(DHD_TOOL_NAMES).toEqual([
       "dhd_list_allowed_apps",
@@ -31,6 +33,9 @@ describe("DHD phone tool contract", () => {
     ]);
     expect(dynamicNames).toEqual([...DHD_TOOL_NAMES]);
     expect(dynamicNames.some((name) => name.startsWith("phone_"))).toBe(false);
+    expect(String(listTool.description)).toContain("Full Access");
+    expect(String(listTool.description)).toContain("without enumerating installed apps");
+    expect(String(openAppTool.description)).toContain("Full Access");
   });
 
   it("keeps app launch separate from typed execution", () => {

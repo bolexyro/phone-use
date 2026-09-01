@@ -91,6 +91,7 @@ class SessionCoordinator(
      * ready. The default keeps the coordinator easy to exercise in unit tests.
      */
     private val phoneActionsReadyProvider: () -> Boolean = { true },
+    private val fullAccessProvider: () -> Boolean = { false },
 ) {
     private val lock = Any()
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
@@ -443,6 +444,7 @@ class SessionCoordinator(
                 enabledPackages = enabledPackagesProvider(),
                 foregroundPackage = observation?.packageName,
                 currentObservationId = observation?.id,
+                fullAccess = fullAccessProvider(),
             ),
         )
         when (decision) {

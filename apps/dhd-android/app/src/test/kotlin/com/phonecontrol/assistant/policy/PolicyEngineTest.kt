@@ -90,6 +90,35 @@ class PolicyEngineTest {
     }
 
     @Test
+    fun `allows action on non-allowlisted app when full access is enabled`() {
+        val decision = engine.evaluate(
+            TapAction(500, 900, metadata("Select restaurant")),
+            context(
+                enabledPackages = emptySet(),
+                foregroundPackage = "com.unlisted.app",
+            ).copy(fullAccess = true),
+        )
+
+        assertEquals(PolicyDecision.Allowed, decision)
+    }
+
+    @Test
+    fun `allows open app action for non-allowlisted package when full access is enabled`() {
+        val decision = engine.evaluate(
+            OpenAppAction(
+                packageName = "com.unlisted.app",
+                metadata = metadata("Open unlisted app"),
+            ),
+            context(
+                enabledPackages = emptySet(),
+                foregroundPackage = null,
+            ).copy(fullAccess = true),
+        )
+
+        assertEquals(PolicyDecision.Allowed, decision)
+    }
+
+    @Test
     fun `allows action without observation when freshness is disabled`() {
         val decision = relaxedEngine.evaluate(
             TapAction(500, 900, metadata("Select restaurant", observationId = "")),

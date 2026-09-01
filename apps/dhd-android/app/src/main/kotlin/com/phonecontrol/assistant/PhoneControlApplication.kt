@@ -48,6 +48,7 @@ class PhoneControlApplication : Application() {
             ),
             conversationStore = conversationStore,
             phoneActionsReadyProvider = { shizukuController.status.value.privilegedApiReady },
+            fullAccessProvider = { appPermissionRepository.isFullAccessEnabled() },
         )
         // The bridge accepts paired LAN connections for the development
         // companion. adb forwarding remains compatible because forwarded
@@ -56,7 +57,8 @@ class PhoneControlApplication : Application() {
             context = this,
             coordinator = sessionCoordinator,
             observationProvider = observationProvider,
-            allowedPackagesProvider = appPermissionRepository::enabledPackages,
+            allowedPackagesProvider = { appPermissionRepository.enabledPackages() },
+            fullAccessProvider = { appPermissionRepository.isFullAccessEnabled() },
         ).also { it.start() }
     }
 }

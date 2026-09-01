@@ -820,7 +820,7 @@ export function buildDhdDynamicTools(): DynamicToolSpec[] {
   return [
     dynamicTool(
       "dhd_list_allowed_apps",
-      "List Android packages enabled in the phone-side per-app allowlist.",
+      "Check the phone's app-access mode. In restricted mode, return the explicit allowlist; when Full Access is active, return a concise capability message saying you can use any launchable app without enumerating installed apps.",
       emptySchema()
     ),
     dynamicTool(
@@ -838,7 +838,7 @@ export function buildDhdDynamicTools(): DynamicToolSpec[] {
     ),
     dynamicTool(
       "dhd_open_app",
-      "Open one allowlisted Android app and return a post-action screenshot. Include a meaningful user-facing purpose and concrete target description.",
+      "Open one launchable Android app and return a post-action screenshot. In restricted mode the app must be on the explicit allowlist; Full Access lets you use any launchable app. Include a meaningful user-facing purpose and concrete target description.",
       {
         type: "object",
         properties: {

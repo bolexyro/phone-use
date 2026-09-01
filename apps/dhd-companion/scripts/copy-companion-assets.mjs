@@ -10,7 +10,7 @@ for (const dirName of ["companion-web"]) {
 
   if (existsSync(sourceDirectory)) {
     mkdirSync(outputDirectory, { recursive: true });
-    for (const file of ["index.html", "styles.css"]) {
+    for (const file of ["index.html", "styles.css", "favicon.png"]) {
       const sourceFile = resolve(sourceDirectory, file);
       if (existsSync(sourceFile)) {
         cpSync(sourceFile, resolve(outputDirectory, file));

@@ -74,6 +74,7 @@ class DevBridgeServer(
     private val observationProvider: ShizukuObservationProvider,
     private val allowedPackagesProvider: () -> Set<String>,
     private val port: Int = DEFAULT_PORT,
+    private val fullAccessProvider: () -> Boolean = { false },
 ) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     val authenticationToken: String = preferences.getString(KEY_AUTH_TOKEN, null)
@@ -706,15 +707,14 @@ class DevBridgeServer(
         requestId: String,
         writer: BufferedWriter,
     ) {
-        val packages = allowedPackagesProvider().toList().sorted()
+        val fullAccess = fullAccessProvider()
         write(
             writer,
-            JSONObject()
-                .put("type", "allowed_apps")
-                .put("requestId", requestId)
-                .put("ok", true)
-                .put("allowedPackages", JSONArray(packages))
-                .put("count", packages.size),
+            buildAllowedAppsResponse(
+                requestId = requestId,
+                fullAccess = fullAccess,
+                allowedPackages = if (fullAccess) emptySet() else allowedPackagesProvider(),
+            ),
         )
     }
 
@@ -1243,6 +1243,30 @@ class DevBridgeServer(
         val PACKAGE_PATTERN = Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+")
         val secureRandom = SecureRandom()
     }
+}
+
+internal fun buildAllowedAppsResponse(
+    requestId: String,
+    fullAccess: Boolean,
+    allowedPackages: Set<String>,
+): JSONObject {
+    val response = JSONObject()
+        .put("type", "allowed_apps")
+        .put("requestId", requestId)
+        .put("ok", true)
+        .put("fullAccess", fullAccess)
+        .put("accessMode", if (fullAccess) "full_access" else "allowlist")
+
+    if (fullAccess) {
+        response.put("message", "Full Access is enabled. You can use any launchable app on the phone.")
+    } else {
+        val packages = allowedPackages.toList().sorted()
+        response
+            .put("allowedPackages", JSONArray(packages))
+            .put("count", packages.size)
+    }
+
+    return response
 }
 
 private fun ActionExecutionResult.isSuccessful(): Boolean = this is ActionExecutionResult.TransportFinished &&

@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -36,6 +37,8 @@ data class AssistantColorScheme(
     val isDark: Boolean,
     val background: Color,
     val surfaceCard: Color,
+    val settingsCard: Color,
+    val cardDivider: Color,
     val composerBackground: Color,
     val borderColor: Color,
     val textPrimary: Color,
@@ -56,7 +59,9 @@ data class AssistantColorScheme(
 val DarkAssistantColors = AssistantColorScheme(
     isDark = true,
     background = Color(0xFF000000),
-    surfaceCard = Color(0xFF212121),
+    surfaceCard = Color(0xFF1C1C1E),
+    settingsCard = Color(0xFF484848),
+    cardDivider = Color(0xFF000000),
     composerBackground = Color(0xFF212121),
     borderColor = Color(0xFF2C2C2E),
     textPrimary = Color(0xFFECECEC),
@@ -67,8 +72,8 @@ val DarkAssistantColors = AssistantColorScheme(
     accentGreen = Color(0xFF10A37F),
     errorRed = Color(0xFFEF4444),
     warningAmber = Color(0xFFF59E0B),
-    sendButtonActiveBg = Color.White,
-    sendButtonActiveIcon = Color.Black,
+    sendButtonActiveBg = Color(0xFF2C67C5), // App blue
+    sendButtonActiveIcon = Color.White,
     sendButtonInactiveBg = Color(0xFF333333),
     sendButtonInactiveIcon = Color(0xFF8E8E93),
 )
@@ -78,6 +83,8 @@ val LightAssistantColors = AssistantColorScheme(
     isDark = false,
     background = Color(0xFFFFFFFF),
     surfaceCard = Color(0xFFF4F4F5),
+    settingsCard = Color(0xFFF4F4F5),
+    cardDivider = Color(0xFFE5E7EB),
     composerBackground = Color(0xFFF4F4F5),
     borderColor = Color(0xFFE5E7EB),
     textPrimary = Color(0xFF0D0D0D),
@@ -88,7 +95,7 @@ val LightAssistantColors = AssistantColorScheme(
     accentGreen = Color(0xFF10A37F),
     errorRed = Color(0xFFDC2626),
     warningAmber = Color(0xFFD97706),
-    sendButtonActiveBg = Color(0xFF0D0D0D),
+    sendButtonActiveBg = Color(0xFF2C67C5), // App blue
     sendButtonActiveIcon = Color.White,
     sendButtonInactiveBg = Color(0xFFE5E7EB),
     sendButtonInactiveIcon = Color(0xFF9CA3AF),
@@ -97,12 +104,24 @@ val LightAssistantColors = AssistantColorScheme(
 val LocalAssistantColors = staticCompositionLocalOf { DarkAssistantColors }
 
 private const val PREFS_NAME = "dhd_ui_preferences"
-private const val KEY_DARK_MODE = "pref_is_dark_mode"
+private const val KEY_THEME_MODE = "pref_theme_mode"
+
+enum class ThemeMode(val storageValue: String, val label: String) {
+    SYSTEM("system", "System (Default)"),
+    LIGHT("light", "Light"),
+    DARK("dark", "Dark");
+
+    companion object {
+        fun fromStorage(value: String?): ThemeMode =
+            entries.firstOrNull { it.storageValue == value } ?: DARK
+    }
+}
 
 object AppRoutes {
     const val MAIN = "main"
     const val SETTINGS = "settings"
     const val APPROVED_APPS = "approved_apps"
+    const val COMPANION = "companion"
 }
 
 @Composable
@@ -114,13 +133,20 @@ fun PhoneControlApp(
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
-    var isDarkMode by rememberSaveable {
-        mutableStateOf(prefs.getBoolean(KEY_DARK_MODE, true))
+    val isSystemDark = isSystemInDarkTheme()
+    var themeMode by rememberSaveable {
+        mutableStateOf(ThemeMode.fromStorage(prefs.getString(KEY_THEME_MODE, "dark")))
     }
 
-    val setDarkMode: (Boolean) -> Unit = { enabled ->
-        isDarkMode = enabled
-        prefs.edit().putBoolean(KEY_DARK_MODE, enabled).apply()
+    val isDarkMode = when (themeMode) {
+        ThemeMode.SYSTEM -> isSystemDark
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
+
+    val setThemeMode: (ThemeMode) -> Unit = { mode ->
+        themeMode = mode
+        prefs.edit().putString(KEY_THEME_MODE, mode.storageValue).apply()
     }
 
     val application = context.applicationContext as PhoneControlApplication
@@ -211,10 +237,18 @@ fun PhoneControlApp(
                             permissions = permissions,
                             shizukuStatus = shizukuStatus,
                             bridgeServer = application.devBridgeServer,
-                            isDarkMode = isDarkMode,
-                            onToggleDarkMode = setDarkMode,
+                            themeMode = themeMode,
+                            onSelectThemeMode = setThemeMode,
                             onRequestShizukuPermission = { shizukuController.requestPermission() },
                             onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
+                            onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(AppRoutes.COMPANION) {
+                        CompanionScreen(
+                            bridgeServer = application.devBridgeServer,
                             onBack = { navController.popBackStack() },
                         )
                     }

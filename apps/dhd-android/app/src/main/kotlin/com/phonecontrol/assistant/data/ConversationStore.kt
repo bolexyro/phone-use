@@ -243,25 +243,32 @@ class ConversationStore(context: Context) {
         require(safeRequest.isNotEmpty()) { "A request is required." }
 
         // DHD is one assistant, not a collection of user-facing chats. Keep a
-        // stable local conversation row while allowing the Codex thread behind
-        // it to rotate after a period of inactivity.
+        // stable local conversation row until it has been inactive long enough
+        // to require a full fresh conversation.
         val existing = dao.findConversation(DHD_CONVERSATION_ID)
-        val rotateCodexThread = existing?.codexThreadId != null &&
+        val resetConversation = existing != null &&
             now - existing.updatedAtEpochMs >= DHD_THREAD_INACTIVITY_MS
-        val conversation = existing ?: ConversationEntity(
-            id = DHD_CONVERSATION_ID,
-            title = titleFor(safeRequest),
-            createdAtEpochMs = now,
-            updatedAtEpochMs = now,
-        )
-        if (existing == null) dao.insertConversation(conversation)
-        else dao.updateConversation(
-            conversation.copy(
+        if (resetConversation) {
+            // A thread rotation is a full conversation reset from the user's
+            // perspective. Keep the old remote Codex thread unbound, but clear
+            // the local presentation history before creating the new run.
+            clearConversationRows(DHD_CONVERSATION_ID)
+        }
+        val conversation = if (existing == null || resetConversation) {
+            ConversationEntity(
+                id = DHD_CONVERSATION_ID,
+                title = titleFor(safeRequest),
+                createdAtEpochMs = now,
+                updatedAtEpochMs = now,
+            )
+        } else {
+            existing.copy(
                 updatedAtEpochMs = now,
                 deleted = false,
-                codexThreadId = if (rotateCodexThread) null else conversation.codexThreadId,
-            ),
-        )
+            )
+        }
+        if (existing == null || resetConversation) dao.insertConversation(conversation)
+        else dao.updateConversation(conversation)
 
         val messageId = UUID.randomUUID().toString()
         dao.insertMessage(
@@ -458,12 +465,7 @@ class ConversationStore(context: Context) {
     fun deleteConversation(conversationId: String): Boolean = synchronized(lock) {
         val canonicalId = canonicalConversationId(conversationId)
         if (dao.findConversation(canonicalId) == null) return@synchronized false
-        database.runInTransaction {
-            dao.deleteActivities(canonicalId)
-            dao.deleteMessages(canonicalId)
-            dao.deleteRuns(canonicalId)
-            dao.deleteConversation(canonicalId)
-        }
+        clearConversationRows(canonicalId)
         // Keep the flow instance that Compose is already collecting alive and
         // publish the empty state before dropping it from the cache. A
         // collector must not stay stuck displaying the deleted timeline.
@@ -471,6 +473,16 @@ class ConversationStore(context: Context) {
         timelineFlows.remove(canonicalId)
         refreshConversations()
         true
+    }
+
+    private fun clearConversationRows(conversationId: String) {
+        database.runInTransaction {
+            dao.deleteActivities(conversationId)
+            dao.deleteMessages(conversationId)
+            dao.deleteRuns(conversationId)
+            dao.deleteConversation(conversationId)
+        }
+        timelineFlows[conversationId]?.value = emptyList()
     }
 
     private fun refresh(conversationId: String) {

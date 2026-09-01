@@ -461,22 +461,61 @@ function getContentType(path: string): string {
   if (path.endsWith(".css")) return "text/css; charset=utf-8";
   if (path.endsWith(".js")) return "application/javascript; charset=utf-8";
   if (path.endsWith(".json")) return "application/json; charset=utf-8";
+  if (path.endsWith(".png")) return "image/png";
   if (path.endsWith(".svg")) return "image/svg+xml";
   return "text/plain; charset=utf-8";
 }
 
+function transpileTsFile(tsCode: string): string {
+  return ts.transpileModule(tsCode, {
+    compilerOptions: {
+      module: ts.ModuleKind.ESNext,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true,
+      sourceMap: false
+    }
+  }).outputText;
+}
+
 async function serveStaticFile(res: http.ServerResponse, fileName: string): Promise<void> {
+  // If a JS module is requested, check if a corresponding TS source exists and transpile on-the-fly
+  if (fileName.endsWith(".js")) {
+    const tsFileName = fileName.replace(/\.js$/, ".ts");
+    const srcTsPath = resolve(PROJECT_ROOT, "src/companion-web", tsFileName);
+    if (existsSync(srcTsPath)) {
+      try {
+        const tsCode = await readFile(srcTsPath, "utf8");
+        const jsCode = transpileTsFile(tsCode);
+        res.writeHead(200, {
+          "Content-Type": "application/javascript; charset=utf-8",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0"
+        });
+        res.end(jsCode);
+        return;
+      } catch (err) {
+        console.error(`Failed to transpile ${tsFileName}:`, err);
+      }
+    }
+  }
+
   const candidatePaths = [
+    resolve(PROJECT_ROOT, "src/companion-web", fileName),
     resolve(WEB_DIRECTORY, fileName),
-    resolve(PROJECT_ROOT, "dist/companion-web", fileName),
-    resolve(PROJECT_ROOT, "src/companion-web", fileName)
+    resolve(PROJECT_ROOT, "dist/companion-web", fileName)
   ];
 
   for (const filePath of candidatePaths) {
     if (existsSync(filePath)) {
       try {
         const content = await readFile(filePath);
-        res.writeHead(200, { "Content-Type": getContentType(fileName) });
+        res.writeHead(200, {
+          "Content-Type": getContentType(fileName),
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0"
+        });
         res.end(content);
         return;
       } catch {
@@ -604,6 +643,9 @@ export function createCompanionWebServer(): http.Server {
     }
     if (pathname === "/styles.css") {
       return serveStaticFile(res, "styles.css");
+    }
+    if (pathname === "/favicon.png") {
+      return serveStaticFile(res, "favicon.png");
     }
     if (pathname === "/renderer.js" || pathname === "/renderer.ts") {
       return serveStaticFile(res, "renderer.js");
