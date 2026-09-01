@@ -11,6 +11,7 @@ import com.phonecontrol.assistant.domain.KeypressKey
 import com.phonecontrol.assistant.domain.OpenAppAction
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.PhoneAction
+import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.ScrollAction
 import com.phonecontrol.assistant.domain.ScrollAmount
 import com.phonecontrol.assistant.domain.ScrollDirection
@@ -339,7 +340,10 @@ class DevBridgeServer(
             "request must be 1-$MAX_REQUEST_CHARS characters."
         }
         val conversationId = json.optString("conversationId").trim().ifBlank { null }
-        if (!coordinator.start(request, conversationId)) {
+        val reasoningEffort = json.optString("reasoningEffort")
+            .trim()
+            .ifBlank { ReasoningEffort.default.codexValue }
+        if (!coordinator.start(request, conversationId, reasoningEffort)) {
             write(writer, errorResponse(requestId, "The phone already has an active session."))
             return
         }
@@ -352,6 +356,7 @@ class DevBridgeServer(
             val serviceIntent = Intent(context, AssistantForegroundService::class.java)
                 .setAction(AssistantForegroundService.ACTION_START)
                 .putExtra(AssistantForegroundService.EXTRA_REQUEST, request)
+                .putExtra(AssistantForegroundService.EXTRA_REASONING_EFFORT, reasoningEffort)
             if (!conversationId.isNullOrBlank()) {
                 serviceIntent.putExtra(AssistantForegroundService.EXTRA_CONVERSATION_ID, conversationId)
             }
@@ -370,6 +375,7 @@ class DevBridgeServer(
                 .put("ok", true)
                 .put("sessionId", sessionId)
                 .put("conversationId", (state as? SessionState.Running)?.conversationId ?: JSONObject.NULL)
+                .put("reasoningEffort", (state as? SessionState.Running)?.reasoningEffort ?: ReasoningEffort.default.codexValue)
                 .put("message", "Phone assistant session started."),
         )
     }
@@ -423,6 +429,7 @@ class DevBridgeServer(
                 .put("sessionId", pending.sessionId)
                 .put("conversationId", pending.conversationId ?: JSONObject.NULL)
                 .put("codexThreadId", pending.codexThreadId ?: JSONObject.NULL)
+                .put("reasoningEffort", pending.reasoningEffort)
                 .put("request", pending.request)
         }
         write(writer, response)
@@ -452,6 +459,7 @@ class DevBridgeServer(
                 .put("sessionId", claimed.sessionId)
                 .put("conversationId", claimed.conversationId ?: JSONObject.NULL)
                 .put("codexThreadId", claimed.codexThreadId ?: JSONObject.NULL)
+                .put("reasoningEffort", claimed.reasoningEffort)
                 .put("request", claimed.request)
                 .put("message", "Phone request claimed by the desktop Codex companion."),
         )

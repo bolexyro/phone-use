@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import com.phonecontrol.assistant.MainActivity
 import com.phonecontrol.assistant.PhoneControlApplication
 import com.phonecontrol.assistant.R
+import com.phonecontrol.assistant.domain.ReasoningEffort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -53,6 +54,8 @@ class AssistantForegroundService : Service() {
                     coordinator.start(
                         request = request,
                         conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID),
+                        reasoningEffort = intent.getStringExtra(EXTRA_REASONING_EFFORT)
+                            ?: ReasoningEffort.default.codexValue,
                     )
                 }
             }
@@ -151,6 +154,7 @@ class AssistantForegroundService : Service() {
         const val ACTION_STOP = "com.phonecontrol.assistant.action.STOP"
         const val EXTRA_REQUEST = "com.phonecontrol.assistant.extra.REQUEST"
         const val EXTRA_CONVERSATION_ID = "com.phonecontrol.assistant.extra.CONVERSATION_ID"
+        const val EXTRA_REASONING_EFFORT = "com.phonecontrol.assistant.extra.REASONING_EFFORT"
 
         private const val CHANNEL_ID = "assistant_sessions"
         private const val RESULT_CHANNEL_ID = "assistant_results"

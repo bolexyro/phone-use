@@ -16,14 +16,16 @@ import com.phonecontrol.assistant.ui.PhoneControlApp
 class MainActivity : ComponentActivity() {
     private var pendingRequest: String? = null
     private var pendingConversationId: String? = null
+    private var pendingReasoningEffort: String? = null
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            pendingRequest?.let { launchSession(it, pendingConversationId) }
+            pendingRequest?.let { launchSession(it, pendingConversationId, pendingReasoningEffort) }
         }
         pendingRequest = null
         pendingConversationId = null
+        pendingReasoningEffort = null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,7 +50,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startSession(request: String, conversationId: String?) {
+    private fun startSession(request: String, conversationId: String?, reasoningEffort: String?) {
         if (request.isBlank()) return
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -57,18 +59,26 @@ class MainActivity : ComponentActivity() {
         ) {
             pendingRequest = request
             pendingConversationId = conversationId
+            pendingReasoningEffort = reasoningEffort
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            launchSession(request, conversationId)
+            launchSession(request, conversationId, reasoningEffort)
         }
     }
 
-    private fun launchSession(request: String, conversationId: String? = null) {
+    private fun launchSession(
+        request: String,
+        conversationId: String? = null,
+        reasoningEffort: String? = null,
+    ) {
         val intent = Intent(this, AssistantForegroundService::class.java)
             .setAction(AssistantForegroundService.ACTION_START)
             .putExtra(AssistantForegroundService.EXTRA_REQUEST, request)
         if (!conversationId.isNullOrBlank()) {
             intent.putExtra(AssistantForegroundService.EXTRA_CONVERSATION_ID, conversationId)
+        }
+        if (!reasoningEffort.isNullOrBlank()) {
+            intent.putExtra(AssistantForegroundService.EXTRA_REASONING_EFFORT, reasoningEffort)
         }
         ContextCompat.startForegroundService(this, intent)
     }

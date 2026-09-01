@@ -4,6 +4,7 @@ import com.phonecontrol.assistant.domain.ActivityEvent
 import com.phonecontrol.assistant.domain.ActivityEventKind
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.PhoneAction
+import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.userFacingActivityLabel
 import com.phonecontrol.assistant.data.ConversationStore
 import com.phonecontrol.assistant.data.RunStatus
@@ -28,6 +29,7 @@ sealed interface SessionState {
         val currentPurpose: String,
         val startedAtEpochMs: Long,
         val conversationId: String? = null,
+        val reasoningEffort: String = ReasoningEffort.default.codexValue,
     ) : SessionState
 
     data class Paused(
@@ -36,6 +38,7 @@ sealed interface SessionState {
         val currentPurpose: String,
         val startedAtEpochMs: Long,
         val conversationId: String? = null,
+        val reasoningEffort: String = ReasoningEffort.default.codexValue,
     ) : SessionState
 
     data class Stopped(
@@ -67,6 +70,7 @@ data class PendingRequest(
     val request: String,
     val conversationId: String? = null,
     val codexThreadId: String? = null,
+    val reasoningEffort: String = ReasoningEffort.default.codexValue,
 )
 
 /** A user instruction waiting to be appended to the active Codex turn. */
@@ -104,11 +108,17 @@ class SessionCoordinator(
     val state: StateFlow<SessionState> = _state.asStateFlow()
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
 
-    fun start(request: String, conversationId: String? = null): Boolean = synchronized(lock) {
+    fun start(
+        request: String,
+        conversationId: String? = null,
+        reasoningEffort: String = ReasoningEffort.default.codexValue,
+    ): Boolean = synchronized(lock) {
         if (request.isBlank() || _state.value.isActive) return false
 
         val sessionId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
+        val normalizedReasoningEffort = ReasoningEffort.fromCodexValue(reasoningEffort)?.codexValue
+            ?: ReasoningEffort.default.codexValue
         val startedRun = conversationStore?.startRun(sessionId, request, conversationId)
         claimedRequestSessionId = null
         _state.value = SessionState.Running(
@@ -117,6 +127,7 @@ class SessionCoordinator(
             currentPurpose = "Preparing request",
             startedAtEpochMs = now,
             conversationId = startedRun?.conversationId ?: conversationId,
+            reasoningEffort = normalizedReasoningEffort,
         )
         sessionJob?.cancel()
         sessionJob = SupervisorJob()
@@ -255,6 +266,7 @@ class SessionCoordinator(
             currentPurpose = running.currentPurpose,
             startedAtEpochMs = running.startedAtEpochMs,
             conversationId = running.conversationId,
+            reasoningEffort = running.reasoningEffort,
         )
         conversationStore?.setRunStatus(running.sessionId, RunStatus.PAUSED)
         appendEvent(ActivityEventKind.SESSION_PAUSED, "Session paused.", running.sessionId)
@@ -269,6 +281,7 @@ class SessionCoordinator(
             currentPurpose = paused.currentPurpose,
             startedAtEpochMs = paused.startedAtEpochMs,
             conversationId = paused.conversationId,
+            reasoningEffort = paused.reasoningEffort,
         )
         conversationStore?.setRunStatus(paused.sessionId, RunStatus.RUNNING)
         appendEvent(ActivityEventKind.SESSION_RESUMED, "Session resumed.", paused.sessionId)
@@ -509,6 +522,7 @@ class SessionCoordinator(
         request = running.request,
         conversationId = running.conversationId,
         codexThreadId = conversationStore?.codexThreadId(running.conversationId),
+        reasoningEffort = running.reasoningEffort,
     )
 
     private fun appendEvent(

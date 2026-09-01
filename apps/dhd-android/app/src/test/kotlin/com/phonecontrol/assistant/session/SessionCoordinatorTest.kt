@@ -2,6 +2,7 @@ package com.phonecontrol.assistant.session
 
 import com.phonecontrol.assistant.domain.ActionMetadata
 import com.phonecontrol.assistant.domain.ObservationSnapshot
+import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.policy.PolicyEngine
 import com.phonecontrol.assistant.shizuku.PhoneActionTransport
@@ -74,6 +75,15 @@ class SessionCoordinatorTest {
 
         assertTrue(coordinator.releaseRequest(pending.sessionId))
         assertEquals(pending, coordinator.pendingRequest())
+    }
+
+    @Test
+    fun `pending desktop request carries the selected reasoning effort`() {
+        val coordinator = coordinator()
+        coordinator.start("Find a restaurant", reasoningEffort = ReasoningEffort.EXTRA_HIGH.codexValue)
+
+        assertEquals("xhigh", coordinator.pendingRequest()?.reasoningEffort)
+        assertEquals("xhigh", (coordinator.state.value as SessionState.Running).reasoningEffort)
     }
 
     @Test

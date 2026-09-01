@@ -1,5 +1,6 @@
 package com.phonecontrol.assistant.ui
 
+import android.app.Activity
 import android.content.Context
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -14,6 +15,8 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,12 +27,15 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.phonecontrol.assistant.PhoneControlApplication
 import com.phonecontrol.assistant.apps.InstalledAppsRepository
 import com.phonecontrol.assistant.data.DHD_CONVERSATION_ID
+import com.phonecontrol.assistant.domain.ReasoningEffort
 
 private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
@@ -105,6 +111,8 @@ val LocalAssistantColors = staticCompositionLocalOf { DarkAssistantColors }
 
 private const val PREFS_NAME = "dhd_ui_preferences"
 private const val KEY_THEME_MODE = "pref_theme_mode"
+private const val KEY_REASONING_EFFORT = "pref_reasoning_effort"
+private const val KEY_VISIBLE_REASONING_EFFORTS = "pref_visible_reasoning_efforts"
 
 enum class ThemeMode(val storageValue: String, val label: String) {
     SYSTEM("system", "System (Default)"),
@@ -117,6 +125,17 @@ enum class ThemeMode(val storageValue: String, val label: String) {
     }
 }
 
+private fun visibleReasoningEffortsFromStorage(value: String?): List<ReasoningEffort> {
+    val storedValues = value
+        ?.split(",")
+        ?.map(String::trim)
+        ?.filter(String::isNotEmpty)
+        ?.toSet()
+        .orEmpty()
+    val configured = ReasoningEffort.entries.filter { it.storageValue in storedValues }
+    return configured.ifEmpty { ReasoningEffort.entries }
+}
+
 object AppRoutes {
     const val MAIN = "main"
     const val SETTINGS = "settings"
@@ -127,7 +146,7 @@ object AppRoutes {
 @Composable
 fun PhoneControlApp(
     initialConversationId: String? = null,
-    onRunRequest: (String, String?) -> Unit,
+    onRunRequest: (String, String?, String?) -> Unit,
     onStopSession: () -> Unit,
     onSteerRequest: (String) -> Boolean,
 ) {
@@ -136,6 +155,20 @@ fun PhoneControlApp(
     val isSystemDark = isSystemInDarkTheme()
     var themeMode by rememberSaveable {
         mutableStateOf(ThemeMode.fromStorage(prefs.getString(KEY_THEME_MODE, "dark")))
+    }
+    var reasoningEffortValue by rememberSaveable {
+        mutableStateOf(
+            ReasoningEffort.fromStorage(
+                prefs.getString(KEY_REASONING_EFFORT, ReasoningEffort.default.storageValue),
+            ).storageValue,
+        )
+    }
+    var visibleReasoningEffortValues by rememberSaveable {
+        mutableStateOf(
+            visibleReasoningEffortsFromStorage(
+                prefs.getString(KEY_VISIBLE_REASONING_EFFORTS, null),
+            ).map(ReasoningEffort::storageValue),
+        )
     }
 
     val isDarkMode = when (themeMode) {
@@ -147,6 +180,40 @@ fun PhoneControlApp(
     val setThemeMode: (ThemeMode) -> Unit = { mode ->
         themeMode = mode
         prefs.edit().putString(KEY_THEME_MODE, mode.storageValue).apply()
+    }
+    val visibleReasoningEfforts = visibleReasoningEffortsFromStorage(
+        visibleReasoningEffortValues.joinToString(","),
+    )
+    val storedReasoningEffort = ReasoningEffort.fromStorage(reasoningEffortValue)
+    val reasoningEffort = storedReasoningEffort.takeIf { it in visibleReasoningEfforts }
+        ?: visibleReasoningEfforts.first()
+    LaunchedEffect(visibleReasoningEfforts, reasoningEffortValue) {
+        if (reasoningEffortValue != reasoningEffort.storageValue) {
+            reasoningEffortValue = reasoningEffort.storageValue
+            prefs.edit().putString(KEY_REASONING_EFFORT, reasoningEffort.storageValue).apply()
+        }
+    }
+    val setReasoningEffort: (ReasoningEffort) -> Unit = { effort ->
+        if (effort in visibleReasoningEfforts) {
+            reasoningEffortValue = effort.storageValue
+            prefs.edit().putString(KEY_REASONING_EFFORT, effort.storageValue).apply()
+        }
+    }
+    val setReasoningEffortVisibility: (ReasoningEffort, Boolean) -> Unit = { effort, visible ->
+        val current = visibleReasoningEfforts.toSet()
+        val next = if (visible) current + effort else current - effort
+        if (next.isNotEmpty()) {
+            val ordered = ReasoningEffort.entries.filter { it in next }
+            visibleReasoningEffortValues = ordered.map(ReasoningEffort::storageValue)
+            prefs.edit()
+                .putString(KEY_VISIBLE_REASONING_EFFORTS, ordered.joinToString(",") { it.storageValue })
+                .apply()
+            if (reasoningEffort !in ordered) {
+                val fallback = ordered.first()
+                reasoningEffortValue = fallback.storageValue
+                prefs.edit().putString(KEY_REASONING_EFFORT, fallback.storageValue).apply()
+            }
+        }
     }
 
     val application = context.applicationContext as PhoneControlApplication
@@ -183,6 +250,16 @@ fun PhoneControlApp(
         )
     }
 
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
+            val insetsController = WindowCompat.getInsetsController(window, view)
+            insetsController.isAppearanceLightStatusBars = !isDarkMode
+            insetsController.isAppearanceLightNavigationBars = !isDarkMode
+        }
+    }
+
     CompositionLocalProvider(LocalAssistantColors provides assistantColors) {
         MaterialTheme(colorScheme = materialColors) {
             Surface(
@@ -211,6 +288,9 @@ fun PhoneControlApp(
                             coordinator = coordinator,
                             initialConversationId = initialConversationId,
                             onRunRequest = onRunRequest,
+                            reasoningEffort = reasoningEffort,
+                            visibleReasoningEfforts = visibleReasoningEfforts,
+                            onSelectReasoningEffort = setReasoningEffort,
                             onStopSession = onStopSession,
                             onSteerRequest = onSteerRequest,
                             onOpenSettings = { navController.navigate(AppRoutes.SETTINGS) },
@@ -228,6 +308,7 @@ fun PhoneControlApp(
                                     navController.navigate(AppRoutes.SETTINGS)
                                 }
                             },
+                            onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
                         )
                     }
 
@@ -239,6 +320,8 @@ fun PhoneControlApp(
                             bridgeServer = application.devBridgeServer,
                             themeMode = themeMode,
                             onSelectThemeMode = setThemeMode,
+                            visibleReasoningEfforts = visibleReasoningEfforts,
+                            onSetReasoningEffortVisibility = setReasoningEffortVisibility,
                             onRequestShizukuPermission = { shizukuController.requestPermission() },
                             onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
                             onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },

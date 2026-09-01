@@ -58,6 +58,7 @@ const PREWARM_RETRY_DELAY_MS = 500;
 // do not depend on the user's interactive Codex chat or global config.
 const DEFAULT_CODEX_MODEL = "gpt-5.6-luna";
 const DEFAULT_CODEX_EFFORT = "max";
+const CODEX_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 type JsonRpcId = number | string;
 
 interface JsonRpcMessage {
@@ -225,7 +226,8 @@ export class CodexAppServerClient {
     phoneRequest: string,
     existingThreadId?: string,
     threadTitle?: string,
-    timing?: PhaseTimer
+    timing?: PhaseTimer,
+    reasoningEffort: string = resolveCodexEffort()
   ): Promise<TurnResult> {
     const logger = timing ?? new PhaseTimer("codex-turn");
     this.activeTiming = logger;
@@ -296,7 +298,7 @@ export class CodexAppServerClient {
         const turnStartResponse = await this.request("turn/start", {
           threadId,
           model: resolveCodexModel(),
-          effort: resolveCodexEffort(),
+          effort: normalizeCodexEffort(reasoningEffort),
           cwd: this.runtimeCwd,
           input: [{ type: "text", text: phoneRequest }]
         });
@@ -1183,7 +1185,8 @@ async function processPendingRequest(
     const conversationId = typeof claimed.conversationId === "string" ? claimed.conversationId : undefined;
     const existingThreadId = typeof claimed.codexThreadId === "string" ? claimed.codexThreadId : undefined;
     const threadTitle = typeof claimed.title === "string" ? claimed.title : request;
-    const result = await codexClient.runTurn(request, existingThreadId, threadTitle, timing);
+    const reasoningEffort = typeof claimed.reasoningEffort === "string" ? claimed.reasoningEffort : undefined;
+    const result = await codexClient.runTurn(request, existingThreadId, threadTitle, timing, reasoningEffort);
     const phoneToolFailure = result.phoneToolFailures.at(-1);
     if (phoneToolFailure) {
       const reason = formatPhoneToolFailure(phoneToolFailure);
@@ -1573,7 +1576,14 @@ function resolveCodexModel(): string {
 }
 
 function resolveCodexEffort(): string {
-  return process.env.PHONE_ASSISTANT_CODEX_REASONING_EFFORT?.trim() || DEFAULT_CODEX_EFFORT;
+  return normalizeCodexEffort(process.env.PHONE_ASSISTANT_CODEX_REASONING_EFFORT);
+}
+
+function normalizeCodexEffort(value: string | undefined): string {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && CODEX_REASONING_EFFORTS.has(normalized)
+    ? normalized
+    : DEFAULT_CODEX_EFFORT;
 }
 
 function parseTurnTimeout(value: string | undefined): number {

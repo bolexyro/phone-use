@@ -28,7 +28,7 @@ describe("DHD App Server thread contract", () => {
       throw new Error(`Unexpected App Server request in test: ${method}`);
     };
 
-    await expect(client.runTurn("use the phone", "legacy-thread")).resolves.toMatchObject({
+    await expect(client.runTurn("use the phone", "legacy-thread", undefined, undefined, "xhigh")).resolves.toMatchObject({
       threadId: "fresh-thread"
     });
 
@@ -45,5 +45,6 @@ describe("DHD App Server thread contract", () => {
       "dhd_execute",
       "dhd_request_attention"
     ]);
+    expect(requests.find(({ method }) => method === "turn/start")?.params?.effort).toBe("xhigh");
   });
 });
