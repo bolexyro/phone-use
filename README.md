@@ -53,18 +53,19 @@ authority. The companion registers direct `dhd_*` tools with each Codex App
 Server turn (and the reusable DHD MCP adapter remains available for manual MCP
 clients); setup and the typed action contract are in
 [`docs/codex-app-server-phone-assistant.md`](docs/codex-app-server-phone-assistant.md).
-Run `pnpm companion:worker` to let requests typed in the phone app start
-Codex turns automatically. The normal development path is now wireless: DHD
-shows its Wi-Fi address and pairing token in Settings, and the companion dials
-the phone over the local network. `adb forward` remains available as a
-loopback-only fallback.
+The normal development path is now wireless: open DHD Settings → Companion
+connection, copy the short pairing code, and enter it in the companion
+dashboard. The companion broadcasts that code locally, the phone bridge
+answers with its current route, and the worker connects without manual IP,
+port, or token copying. `adb forward` remains available as a loopback-only
+fallback.
 
 The desktop companion dashboard is available with `pnpm companion:dashboard`.
-It uses the already-installed Electron dependency, lets you save the phone
-host/port/token, checks the phone link, starts or stops the existing companion
-worker, and shows local activity. The token is kept in Electron's OS-backed
-secure storage when the platform provides it; no Docker build or dependency
-install is part of this command.
+It pairs with the phone by short code, checks the phone link, starts or stops
+the existing companion worker, and shows local activity. The discovered
+connection is saved locally so the companion can rediscover the phone when its
+local network address changes. No Docker build or dependency install is part
+of this command.
 
 ### DHD Codex home and authentication
 

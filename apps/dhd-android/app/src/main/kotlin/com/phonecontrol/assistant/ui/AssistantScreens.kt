@@ -1628,6 +1628,7 @@ fun SettingsScreen(
     val colors = LocalAssistantColors.current
     val enabledCount = remember(permissions.enabledPackages()) { permissions.enabledPackages().size }
     var lanAddresses by remember { mutableStateOf(bridgeServer.lanIpv4Addresses()) }
+    var pairingCode by remember { mutableStateOf(bridgeServer.pairingCode) }
 
     Scaffold(
         containerColor = colors.background,
@@ -1827,49 +1828,35 @@ fun SettingsScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = "Phone address",
+                            text = "Pairing code",
                             fontSize = 12.sp,
                             color = colors.textSecondary,
                         )
-                        SelectionContainer {
-                            Text(
-                                text = if (lanAddresses.isEmpty()) {
-                                    "No Wi-Fi IPv4 address found"
-                                } else {
-                                    lanAddresses.joinToString("\n") { address -> "$address:${bridgeServer.listeningPort}" }
-                                },
-                                fontSize = 13.sp,
-                                color = colors.textPrimary,
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "Pairing token",
-                            fontSize = 12.sp,
-                            color = colors.textSecondary,
+                            text = pairingCode.chunked(4).joinToString("-"),
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 2.sp,
+                            color = colors.textPrimary,
+                            modifier = Modifier.padding(top = 5.dp),
                         )
-                        SelectionContainer {
-                            Text(
-                                text = bridgeServer.authenticationToken,
-                                fontSize = 13.sp,
-                                color = colors.textPrimary,
-                            )
-                        }
                         Text(
-                            text = "On the companion laptop, set PHONE_ASSISTANT_BRIDGE_HOST to the phone address and PHONE_ASSISTANT_BRIDGE_TOKEN to this token before starting pnpm companion:worker.",
+                            text = "Enter this code in the companion. It stays valid until you refresh it, which revokes the old code.",
                             fontSize = 12.sp,
                             color = colors.textSecondary,
-                            modifier = Modifier.padding(top = 8.dp),
+                            modifier = Modifier.padding(top = 5.dp),
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.End,
                         ) {
-                            TextButton(onClick = { lanAddresses = bridgeServer.lanIpv4Addresses() }) {
-                                Text("Refresh address", color = colors.accentBlue)
+                            TextButton(onClick = {
+                                pairingCode = bridgeServer.refreshPairingCode()
+                                lanAddresses = bridgeServer.lanIpv4Addresses()
+                            }) {
+                                Text("Refresh pairing code", color = colors.accentBlue)
                             }
                         }
                     }

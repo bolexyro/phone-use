@@ -29,12 +29,16 @@ import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
@@ -74,10 +78,19 @@ class DevBridgeServer(
         ?: UUID.randomUUID().toString().replace("-", "").also { token ->
             preferences.edit().putString(KEY_AUTH_TOKEN, token).apply()
         }
+    val deviceId: String = preferences.getString(KEY_DEVICE_ID, null)
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: UUID.randomUUID().toString().also { id ->
+            preferences.edit().putString(KEY_DEVICE_ID, id).apply()
+        }
     val listeningPort: Int = port
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var serverSocket: ServerSocket? = null
+    @Volatile private var pairingSocket: DatagramSocket? = null
     @Volatile private var started = false
+    private val pairingCodeLock = Any()
+    @Volatile private var pairingCodeValue: String = loadOrCreatePairingCode()
     private val codexWarmupRequested = AtomicBoolean(false)
     private val observations = Collections.synchronizedMap(
         object : LinkedHashMap<String, ObservationSnapshot>(MAX_OBSERVATIONS + 1, 0.75f, true) {
@@ -85,6 +98,44 @@ class DevBridgeServer(
                 size > MAX_OBSERVATIONS
         },
     )
+
+    val pairingCode: String
+        get() = pairingCodeValue
+
+    fun refreshPairingCode(): String = synchronized(pairingCodeLock) {
+        rotatePairingCodeLocked()
+    }
+
+    private fun loadOrCreatePairingCode(): String {
+        val stored = preferences.getString(KEY_PAIRING_CODE, null)?.trim()?.uppercase()
+        return if (stored != null && isValidPairingCode(stored)) {
+            stored
+        } else {
+            val next = generatePairingCode()
+            preferences.edit()
+                .putString(KEY_PAIRING_CODE, next)
+                .apply()
+            next
+        }
+    }
+
+    private fun rotatePairingCodeLocked(): String {
+        val next = generatePairingCode()
+        pairingCodeValue = next
+        preferences.edit()
+            .putString(KEY_PAIRING_CODE, next)
+            .apply()
+        return next
+    }
+
+    private fun generatePairingCode(): String = buildString(PAIRING_CODE_LENGTH) {
+        repeat(PAIRING_CODE_LENGTH) {
+            append(PAIRING_CODE_ALPHABET[secureRandom.nextInt(PAIRING_CODE_ALPHABET.length)])
+        }
+    }
+
+    private fun isValidPairingCode(value: String): Boolean = value.length == PAIRING_CODE_LENGTH &&
+        value.all { character -> character in PAIRING_CODE_ALPHABET }
 
     fun start() {
         if (started) return
@@ -107,13 +158,67 @@ class DevBridgeServer(
                 android.util.Log.e(TAG, "Development bridge stopped", error)
             }
         }
+        scope.launch { runPairingDiscovery() }
     }
 
     fun stop() {
         started = false
         serverSocket?.close()
         serverSocket = null
+        pairingSocket?.close()
+        pairingSocket = null
         scope.coroutineContext[Job]?.cancel()
+    }
+
+    private fun runPairingDiscovery() {
+        try {
+            val socket = DatagramSocket(PAIRING_DISCOVERY_PORT, InetAddress.getByName(LAN_BIND_HOST))
+            pairingSocket = socket
+            val buffer = ByteArray(MAX_REQUEST_CHARS)
+            while (!socket.isClosed) {
+                val packet = DatagramPacket(buffer, buffer.size)
+                socket.receive(packet)
+                handlePairingRequest(socket, packet)
+            }
+        } catch (_: SocketException) {
+            // Closing the pairing socket is the normal shutdown path.
+        } catch (error: Throwable) {
+            android.util.Log.w(TAG, "Pairing discovery stopped", error)
+        } finally {
+            pairingSocket = null
+        }
+    }
+
+    private fun handlePairingRequest(socket: DatagramSocket, packet: DatagramPacket) {
+        val request = try {
+            JSONObject(
+                String(packet.data, packet.offset, packet.length, Charsets.UTF_8),
+            )
+        } catch (_: Throwable) {
+            return
+        }
+        if (request.optString("type") != "dhd_pair_request" ||
+            request.optInt("version", -1) != PAIRING_PROTOCOL_VERSION
+        ) {
+            return
+        }
+        val requestId = request.optString("requestId").trim()
+        val candidateCode = request.optString("code").trim().uppercase()
+        if (requestId.isBlank() || candidateCode != pairingCode) return
+
+        val response = JSONObject()
+            .put("type", "dhd_pair_offer")
+            .put("version", PAIRING_PROTOCOL_VERSION)
+            .put("requestId", requestId)
+            .put("deviceId", deviceId)
+            .put("port", listeningPort)
+            .put("token", authenticationToken)
+        val addresses = JSONArray()
+        lanIpv4Addresses().forEach(addresses::put)
+        response.put("addresses", addresses)
+
+        val bytes = response.toString().toByteArray(Charsets.UTF_8)
+        socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port))
     }
 
     /**
@@ -1064,8 +1169,14 @@ class DevBridgeServer(
         const val TAG = "PhoneControlBridge"
         const val LAN_BIND_HOST = "0.0.0.0"
         const val DEFAULT_PORT = 8765
+        const val PAIRING_DISCOVERY_PORT = 8766
+        const val PAIRING_PROTOCOL_VERSION = 1
         const val PREFERENCES_NAME = "dhd_companion_link"
         const val KEY_AUTH_TOKEN = "bridge_auth_token"
+        const val KEY_DEVICE_ID = "device_id"
+        const val KEY_PAIRING_CODE = "pairing_code"
+        const val PAIRING_CODE_LENGTH = 8
+        const val PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         const val MAX_REQUEST_CHARS = 16_384
         const val MAX_TEXT_CHARS = 240
         const val MAX_AGENT_FEEDBACK_CHARS = 4_000
@@ -1076,6 +1187,7 @@ class DevBridgeServer(
         const val CAPTURE_ATTEMPTS = 5
         const val CAPTURE_RETRY_DELAY_MS = 250L
         val PACKAGE_PATTERN = Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+")
+        val secureRandom = SecureRandom()
     }
 }
 

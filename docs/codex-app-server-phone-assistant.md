@@ -16,7 +16,8 @@ fails, so a temporary disconnect does not silently lose the user's request.
 ```text
 Android app (typed request)
         |
-        | Wi-Fi TCP/NDJSON + pairing token
+        | Local UDP pairing-code discovery
+        | then authenticated Wi-Fi TCP/NDJSON
         v
 pnpm companion:worker
         |
@@ -57,17 +58,21 @@ If `pnpm.cmd` is not at that location, use the absolute path returned by
 `Get-Command pnpm`. Keeping the command and working directory explicit avoids
 depending on the PATH inherited by the Codex process.
 
-For the wireless path, open DHD Settings → Companion connection and copy one
-of the shown phone addresses and the pairing token. Put them in the companion
-shell before starting it. The phone and laptop must be on the same reachable
-Wi-Fi network:
+For the normal wireless path, start the local companion dashboard and pair by
+short code. DHD Settings → Companion connection shows the code. The dashboard
+broadcasts the code on the local network; the phone bridge matches it and
+returns the current phone route and bridge credential to the dashboard. No
+phone IP, port, or token needs to be copied:
 
 ```powershell
-$env:PHONE_ASSISTANT_BRIDGE_HOST = "192.168.1.42"
-$env:PHONE_ASSISTANT_BRIDGE_PORT = "8765"
-$env:PHONE_ASSISTANT_BRIDGE_TOKEN = "copy-the-token-from-dhd-settings"
-pnpm companion:worker
+pnpm companion:dashboard
 ```
+
+Open the dashboard at `http://127.0.0.1:8766`, open the Connection tab, enter
+the DHD pairing code, and choose **Pair phone**. The phone and laptop must be
+on the same reachable local network. The phone bridge listens for pairing
+discovery on UDP port `8766` and continues to serve the authenticated bridge
+on TCP port `8765`.
 
 For a desktop dashboard around the same worker, run this from the repository
 root:
@@ -76,15 +81,18 @@ root:
 pnpm companion:dashboard
 ```
 
-The Electron companion lets you save the bridge host, port, and token, check
-the phone link, start or stop the existing Codex companion worker, and inspect
-its local activity timeline. It does not replace the phone-owned policy or
-action layer. The command uses the repository's installed Electron dependency
-and does not require Docker or a new dependency download.
+The companion dashboard stores the discovered phone route, device identity,
+pairing code, and bridge credential locally. If the phone receives a new local
+IP, **Check link** can rediscover it using the saved code and restart the
+worker with the new route. The dashboard does not replace the phone-owned
+policy or action layer and does not require Docker or a new dependency
+download.
 
-The token is required for non-loopback connections. It is a bearer token for
-this development bridge, so use it only on a trusted local network and do not
-forward port `8765` from the router to the internet.
+The pairing code is a local discovery secret and the bridge credential is
+returned over the local network after the code matches. This is still a
+development protocol without TLS, so use it only on a trusted network and do
+not forward ports `8765` or `8766` from the router to the internet. Refreshing
+the code in DHD revokes the old code.
 
 If a local USB/ADB fallback is useful, start the phone-side app and forward
 its loopback port instead:

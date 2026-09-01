@@ -1,11 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 import {
   DEFAULT_BRIDGE_HOST,
@@ -13,6 +14,8 @@ import {
   parsePort,
   requestBridge
 } from "../phone-assistant-bridge.js";
+import { discoverPhone } from "../pairing.js";
+import { normalizePairingCode } from "./pairing-code.js";
 import type {
   BridgeCheckResult,
   BridgeStatus,
@@ -28,12 +31,16 @@ interface ConnectionConfig {
   host: string;
   port: number;
   token: string;
+  pairingCode?: string;
+  deviceId?: string;
 }
 
 interface StoredConnectionSettings {
   host?: string;
   port?: number;
   token?: string;
+  pairingCode?: string;
+  deviceId?: string;
 }
 
 const WEB_DIRECTORY = fileURLToPath(new URL(".", import.meta.url));
@@ -89,7 +96,9 @@ async function loadConnection(): Promise<ConnectionConfig> {
   return {
     host: process.env.PHONE_ASSISTANT_BRIDGE_HOST?.trim() || stored.host?.trim() || defaults.host,
     port: process.env.PHONE_ASSISTANT_BRIDGE_PORT ? defaults.port : port,
-    token: process.env.PHONE_ASSISTANT_BRIDGE_TOKEN?.trim() || stored.token?.trim() || ""
+    token: process.env.PHONE_ASSISTANT_BRIDGE_TOKEN?.trim() || stored.token?.trim() || "",
+    ...(stored.pairingCode ? { pairingCode: stored.pairingCode.trim().toUpperCase() } : {}),
+    ...(stored.deviceId ? { deviceId: stored.deviceId.trim() } : {})
   };
 }
 
@@ -97,7 +106,9 @@ async function saveConnection(): Promise<void> {
   const stored: StoredConnectionSettings = {
     host: connection.host,
     port: connection.port,
-    token: connection.token
+    token: connection.token,
+    ...(connection.pairingCode ? { pairingCode: connection.pairingCode } : {}),
+    ...(connection.deviceId ? { deviceId: connection.deviceId } : {})
   };
   await mkdir(dirname(settingsPath()), { recursive: true });
   await writeFile(settingsPath(), `${JSON.stringify(stored, null, 2)}\n`, {
@@ -110,7 +121,8 @@ function settingsSnapshot(): CompanionSettingsSnapshot {
   return {
     host: connection.host,
     port: connection.port,
-    tokenConfigured: connection.token.length > 0
+    tokenConfigured: connection.token.length > 0,
+    pairingConfigured: Boolean(connection.pairingCode)
   };
 }
 
@@ -179,6 +191,7 @@ function workerEnvironment(): NodeJS.ProcessEnv {
     PHONE_ASSISTANT_BRIDGE_HOST: connection.host,
     PHONE_ASSISTANT_BRIDGE_PORT: String(connection.port),
     PHONE_ASSISTANT_BRIDGE_TOKEN: connection.token,
+    ...(connection.pairingCode ? { PHONE_ASSISTANT_PAIRING_CODE: connection.pairingCode } : {}),
     ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {})
   };
 }
@@ -243,6 +256,9 @@ function startWorker(): CompanionState {
   });
   processStatus = "running";
   appendLog("Companion worker is running.", { level: "system", source: "system" });
+  if (connection.token || connection.pairingCode) {
+    void checkConnection({ silent: true }).catch(() => {});
+  }
   return snapshot();
 }
 
@@ -281,11 +297,11 @@ function clearLogs(): CompanionState {
   return snapshot();
 }
 
-function bridgeOptions(timeoutMs: number) {
+function bridgeOptions(timeoutMs: number, target: ConnectionConfig = connection) {
   return {
-    host: connection.host,
-    port: connection.port,
-    token: connection.token || undefined,
+    host: target.host,
+    port: target.port,
+    token: target.token || undefined,
     timeoutMs
   };
 }
@@ -301,25 +317,54 @@ function phoneSnapshot(value: Record<string, unknown>): PhoneSnapshot {
   };
 }
 
-async function checkConnection(): Promise<BridgeCheckResult> {
-  bridgeStatus = "checking";
-  lastError = undefined;
-  publishState();
+async function checkConnection(options: { silent?: boolean } = {}): Promise<BridgeCheckResult> {
+  const previousBridgeStatus = bridgeStatus;
+  const previousPhoneState = phone?.state;
+  if (!options.silent) {
+    bridgeStatus = "checking";
+    lastError = undefined;
+    publishState();
+  }
   try {
     const result = await requestBridge(
       { type: "status", requestId: randomUUID() },
-      bridgeOptions(5_000)
+      bridgeOptions(4_000)
     );
     if (result.ok !== true) throw new Error(typeof result.message === "string" ? result.message : "The phone bridge rejected the status check.");
     const nextPhone = phoneSnapshot(result);
+    const phoneChanged = JSON.stringify(nextPhone) !== JSON.stringify(phone);
     phone = nextPhone;
     bridgeStatus = "connected";
-    appendLog(`Phone bridge connected; state: ${nextPhone.state}.`, { level: "system", source: "bridge" });
+    lastError = undefined;
+    if (!options.silent || previousBridgeStatus !== "connected") {
+      appendLog(`Phone bridge connected; state: ${nextPhone.state}.`, { level: "system", source: "bridge" });
+    } else if (phoneChanged) {
+      publishState();
+    }
     return { ok: true, message: "Phone bridge connected.", phone: nextPhone };
   } catch (error) {
+    const directMessage = error instanceof Error ? error.message : String(error);
+    if (connection.pairingCode && !options.silent) {
+      try {
+        const nextState = await pairWithCode(connection.pairingCode, "reconnected");
+        return {
+          ok: nextState.bridgeStatus === "connected",
+          message: "Phone bridge rediscovered from the saved pairing code.",
+          phone: nextState.phone
+        };
+      } catch (rediscoveryError) {
+        const rediscoveryMessage = rediscoveryError instanceof Error ? rediscoveryError.message : String(rediscoveryError);
+        lastError = `${directMessage} Pairing rediscovery failed: ${rediscoveryMessage}`;
+      }
+    } else {
+      lastError = directMessage;
+    }
     bridgeStatus = "offline";
-    lastError = error instanceof Error ? error.message : String(error);
-    appendLog(lastError, { level: "error", source: "bridge" });
+    if (!options.silent || previousBridgeStatus !== "offline") {
+      appendLog(lastError, { level: "error", source: "bridge" });
+    } else {
+      publishState();
+    }
     return { ok: false, message: lastError };
   }
 }
@@ -350,6 +395,43 @@ async function saveSettings(value: unknown): Promise<CompanionState> {
   lastError = undefined;
   appendLog(`Saved connection settings for ${connection.host}:${connection.port}.`, { level: "system", source: "system" });
   if (wasRunning && changed) startWorker();
+  return snapshot();
+}
+
+async function pairWithCode(value: unknown, logVerb = "paired"): Promise<CompanionState> {
+  const rawCode = typeof value === "string"
+    ? value
+    : value && typeof value === "object" && typeof (value as { code?: unknown }).code === "string"
+      ? (value as { code: string }).code
+      : null;
+  if (!rawCode) throw new Error("A DHD pairing code is required.");
+  const pairingCode = normalizePairingCode(rawCode);
+  const offer = await discoverPhone(pairingCode);
+  const candidate: ConnectionConfig = {
+    host: offer.host,
+    port: offer.port,
+    token: offer.token,
+    pairingCode,
+    deviceId: offer.deviceId
+  };
+
+  const result = await requestBridge(
+    { type: "status", requestId: randomUUID() },
+    bridgeOptions(5_000, candidate)
+  );
+  if (result.ok !== true) {
+    throw new Error(typeof result.message === "string" ? result.message : "The discovered phone rejected the connection check.");
+  }
+
+  const wasRunning = Boolean(worker && !worker.killed);
+  if (wasRunning) await stopWorker();
+  connection = candidate;
+  await saveConnection();
+  phone = phoneSnapshot(result);
+  bridgeStatus = "connected";
+  lastError = undefined;
+  appendLog(`Phone pairing ${logVerb}; the companion discovered the phone automatically.`, { level: "system", source: "bridge" });
+  if (wasRunning) startWorker();
   return snapshot();
 }
 
@@ -456,6 +538,19 @@ export function createCompanionWebServer(): http.Server {
       return;
     }
 
+    if (pathname === "/api/pair" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req);
+        const nextState = await pairWithCode(body);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(nextState));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: err instanceof Error ? err.message : String(err) }));
+      }
+      return;
+    }
+
     if (pathname === "/api/check" && req.method === "POST") {
       try {
         const result = await checkConnection();
@@ -516,14 +611,88 @@ export function createCompanionWebServer(): http.Server {
     if (pathname === "/api.js" || pathname === "/api.ts") {
       return serveStaticFile(res, "api.js");
     }
+    if (pathname === "/pairing-code.js" || pathname === "/pairing-code.ts") {
+      return serveStaticFile(res, "pairing-code.js");
+    }
 
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
   });
 }
 
+let heartbeatTimer: NodeJS.Timeout | undefined;
+let fileWatcher: ReturnType<typeof watch> | undefined;
+let reloadDebounceTimer: NodeJS.Timeout | undefined;
+
+function notifyClientsReload(type: "css" | "full", file?: string): void {
+  const payload = `event: reload\ndata: ${JSON.stringify({ type, file, timestamp: Date.now() })}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+function startFileWatcher(): void {
+  if (fileWatcher) return;
+  const srcWebDir = resolve(PROJECT_ROOT, "src/companion-web");
+  if (!existsSync(srcWebDir)) return;
+
+  try {
+    fileWatcher = watch(srcWebDir, { recursive: true }, (_eventType, filename) => {
+      if (!filename) return;
+      if (filename.includes("tsconfig") || filename.endsWith(".tmp")) return;
+
+      if (reloadDebounceTimer) clearTimeout(reloadDebounceTimer);
+      reloadDebounceTimer = setTimeout(async () => {
+        const isCss = filename.endsWith(".css");
+        const isHtml = filename.endsWith(".html");
+
+        // Sync static assets to dist if dist exists
+        const distWebDir = resolve(PROJECT_ROOT, "dist/companion-web");
+        if (existsSync(distWebDir)) {
+          try {
+            const srcFile = resolve(srcWebDir, filename);
+            if (existsSync(srcFile) && (isCss || isHtml || filename.endsWith(".png"))) {
+              await writeFile(resolve(distWebDir, filename), await readFile(srcFile));
+            }
+          } catch {
+            // best effort copy
+          }
+        }
+
+        notifyClientsReload(isCss ? "css" : "full", filename);
+      }, 80);
+    });
+  } catch (err) {
+    console.error("Failed to start file watcher:", err);
+  }
+}
+
+function startHeartbeat(): void {
+  if (heartbeatTimer) return;
+  heartbeatTimer = setInterval(async () => {
+    // Only poll when web UI clients are connected or worker is running
+    if (sseClients.size === 0 && processStatus !== "running") return;
+    if (bridgeStatus === "checking") return;
+    if (!connection.token && !connection.pairingCode) return;
+    try {
+      await checkConnection({ silent: true });
+    } catch {
+      // Ignored in periodic heartbeat
+    }
+  }, 4_000);
+}
+
 export async function startCompanionWebServer(port = DEFAULT_WEB_PORT, host = DEFAULT_WEB_HOST): Promise<http.Server> {
   connection = await loadConnection();
+  startHeartbeat();
+  startFileWatcher();
+  if (connection.token || connection.pairingCode) {
+    void checkConnection({ silent: true }).catch(() => {});
+  }
   const server = createCompanionWebServer();
 
   return new Promise((resolveReady, rejectReady) => {

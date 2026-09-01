@@ -3,6 +3,11 @@ import type {
   CompanionLogEntry,
   CompanionState
 } from "./api.js";
+import {
+  displayPairingCode,
+  formatPairingCodeDraft,
+  normalizePairingCode
+} from "./pairing-code.js";
 
 function createWebApi(): CompanionClientApi {
   return {
@@ -13,6 +18,18 @@ function createWebApi(): CompanionClientApi {
     },
     async saveSettings(input): Promise<CompanionState> {
       const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input)
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.message || `Server returned ${res.status}`);
+      }
+      return res.json();
+    },
+    async pairWithPhone(input): Promise<CompanionState> {
+      const res = await fetch("/api/pair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input)
@@ -65,6 +82,26 @@ function createWebApi(): CompanionClientApi {
           console.error("Failed to parse SSE state:", err);
         }
       };
+
+      // Hot reload listener for live development
+      source.addEventListener("reload", (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data) as { type?: string; file?: string };
+          if (data.type === "css") {
+            const links = document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]');
+            links.forEach((link) => {
+              const url = new URL(link.href, window.location.origin);
+              url.searchParams.set("_reload", String(Date.now()));
+              link.href = url.toString();
+            });
+          } else {
+            window.location.reload();
+          }
+        } catch {
+          window.location.reload();
+        }
+      });
+
       return () => source.close();
     }
   };
@@ -91,6 +128,8 @@ const elements = {
   host: byId<HTMLInputElement>("host-input"),
   port: byId<HTMLInputElement>("port-input"),
   token: byId<HTMLInputElement>("token-input"),
+  pairingCode: byId<HTMLInputElement>("pairing-code-input"),
+  pair: byId<HTMLButtonElement>("pair-phone"),
   toggleTokenVisibility: byId<HTMLButtonElement>("toggle-token-visibility"),
   save: byId<HTMLButtonElement>("save-settings"),
   check: byId<HTMLButtonElement>("check-connection"),
@@ -98,10 +137,40 @@ const elements = {
   stop: byId<HTMLButtonElement>("stop-companion"),
   logList: byId<HTMLDivElement>("log-list"),
   logScrollContainer: byId<HTMLDivElement>("log-scroll-container"),
-  toast: byId<HTMLDivElement>("toast")
+  toast: byId<HTMLDivElement>("toast"),
+  toastIcon: document.getElementById("toast-icon") as HTMLDivElement | null,
+  toastMessage: document.getElementById("toast-message") as HTMLSpanElement | null,
+  toastClose: document.getElementById("toast-close") as HTMLButtonElement | null,
+  connectionStatusPill: document.getElementById("connection-status-pill") as HTMLSpanElement | null,
+  pairingStatusHint: document.getElementById("pairing-status-hint") as HTMLSpanElement | null
 };
 
 let toastTimer: number | undefined;
+
+const TOAST_ICONS = {
+  success: `<svg class="toast-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6L9 17l-5-5"/></svg>`,
+  error: `<svg class="toast-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+  info: `<svg class="toast-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`
+};
+
+const SPINNER_SVG = `<svg class="btn-svg spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25" stroke="currentColor" fill="none"/><path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-linecap="round"/></svg>`;
+
+async function withButtonLoading<T>(
+  button: HTMLButtonElement,
+  loadingText: string,
+  action: () => Promise<T>
+): Promise<T> {
+  const originalHtml = button.innerHTML;
+  const originalDisabled = button.disabled;
+  button.disabled = true;
+  button.innerHTML = `${SPINNER_SVG}<span>${loadingText}</span>`;
+  try {
+    return await action();
+  } finally {
+    button.innerHTML = originalHtml;
+    button.disabled = originalDisabled;
+  }
+}
 
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -189,7 +258,27 @@ function render(next: CompanionState): void {
   setText(elements.processState, next.processStatus.toUpperCase());
   elements.processState.className = `state-badge font-mono ${next.processStatus}`;
 
-  setText(elements.tokenState, next.settings.tokenConfigured ? "CONFIGURED" : "NOT_CONFIGURED");
+  const isPaired = next.settings.pairingConfigured;
+  const isManual = next.settings.tokenConfigured;
+
+  setText(elements.tokenState, isPaired ? "PAIRED" : isManual ? "MANUAL" : "NOT_CONFIGURED");
+
+  if (elements.connectionStatusPill) {
+    if (isPaired) {
+      elements.connectionStatusPill.textContent = "PAIRED";
+      elements.connectionStatusPill.className = "state-badge font-mono connected";
+    } else if (isManual) {
+      elements.connectionStatusPill.textContent = "MANUAL TOKEN";
+      elements.connectionStatusPill.className = "state-badge font-mono connected";
+    } else {
+      elements.connectionStatusPill.textContent = "NOT PAIRED";
+      elements.connectionStatusPill.className = "state-badge font-mono stopped";
+    }
+  }
+
+  if (elements.pairingStatusHint) {
+    elements.pairingStatusHint.textContent = isPaired ? "✓ Saved (enter code to re-pair)" : "";
+  }
 
   const phoneState = next.phone;
   const isPhoneActive = phoneState?.active === true;
@@ -206,21 +295,47 @@ function render(next: CompanionState): void {
 
   if (document.activeElement !== elements.host) elements.host.value = next.settings.host;
   if (document.activeElement !== elements.port) elements.port.value = String(next.settings.port);
-  elements.token.placeholder = next.settings.tokenConfigured ? "Token configured (enter new token to replace)" : "Paste pairing token from DHD Settings";
+  elements.token.placeholder = isManual ? "Token configured (enter new token to replace)" : "Paste manual bridge token";
+  elements.pairingCode.placeholder = "ABCD-2345";
   renderLogs(next.logs);
 }
 
-function showToast(message: string, isError = false): void {
-  elements.toast.textContent = message;
-  elements.toast.className = `toast-box font-mono visible${isError ? " error" : ""}`;
+function hideToast(): void {
+  elements.toast.classList.remove("visible");
+  if (toastTimer !== undefined) {
+    window.clearTimeout(toastTimer);
+    toastTimer = undefined;
+  }
+}
+
+function showToast(message: string, variant: "success" | "error" | "info" = "info"): void {
+  if (elements.toastMessage) {
+    elements.toastMessage.textContent = message;
+  } else {
+    elements.toast.textContent = message;
+  }
+
+  if (elements.toastIcon) {
+    elements.toastIcon.innerHTML = TOAST_ICONS[variant];
+  }
+
+  elements.toast.className = `toast-box visible ${variant}`;
+
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => {
-    elements.toast.className = "toast-box font-mono";
-  }, 3_500);
+  toastTimer = window.setTimeout(hideToast, 4_000);
+}
+
+if (elements.toastClose) {
+  elements.toastClose.addEventListener("click", hideToast);
 }
 
 async function refreshState(): Promise<void> {
-  render(await api.getState());
+  const state = await api.getState();
+  render(state);
+  // If state is unknown and token/pairing is configured, verify bridge link
+  if (state.bridgeStatus === "unknown" && (state.settings.tokenConfigured || state.settings.pairingConfigured)) {
+    void api.checkConnection().then(() => api.getState().then(render)).catch(() => {});
+  }
 }
 
 // Tab Switching
@@ -253,7 +368,7 @@ if (elements.clearLogs) {
       const nextState = await api.clearLogs();
       render(nextState);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : String(err), true);
+      showToast(err instanceof Error ? err.message : String(err), "error");
     }
   });
 }
@@ -288,51 +403,114 @@ if (themeToggle) {
   });
 }
 
+// Pairing Code Auto-Hyphenation & Formatting
+elements.pairingCode.addEventListener("keydown", (event) => {
+  if (event.key === "Backspace") {
+    const input = elements.pairingCode;
+    const start = input.selectionStart ?? 0;
+    const end = input.selectionEnd ?? 0;
+    // When deleting right after the auto-inserted hyphen (e.g. "ABCD-"), remove both hyphen and preceding char
+    if (start === end && start === 5 && input.value.charAt(4) === "-") {
+      event.preventDefault();
+      input.value = input.value.slice(0, 3);
+      input.setSelectionRange(3, 3);
+      return;
+    }
+  }
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    elements.pair.click();
+  }
+});
+
+elements.pairingCode.addEventListener("input", () => {
+  const input = elements.pairingCode;
+  const currentVal = input.value;
+  const formatted = formatPairingCodeDraft(currentVal);
+  if (formatted !== currentVal) {
+    input.value = formatted;
+  }
+});
+
 // Actions
 elements.save.addEventListener("click", async () => {
   try {
-    const token = elements.token.value.trim();
-    render(await api.saveSettings({
-      host: elements.host.value,
-      port: Number(elements.port.value),
-      ...(token ? { token } : {})
-    }));
-    elements.token.value = "";
-    showToast("Connection settings saved.");
+    await withButtonLoading(elements.save, "Saving...", async () => {
+      const token = elements.token.value.trim();
+      render(await api.saveSettings({
+        host: elements.host.value,
+        port: Number(elements.port.value),
+        ...(token ? { token } : {})
+      }));
+      elements.token.value = "";
+    });
+    showToast("Connection settings saved.", "success");
   } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), true);
+    showToast(error instanceof Error ? error.message : String(error), "error");
+  }
+});
+
+async function pairWithPhone(value: string): Promise<void> {
+  const code = normalizePairingCode(value);
+  elements.pairingCode.disabled = true;
+  try {
+    await withButtonLoading(elements.pair, "Pairing...", async () => {
+      render(await api.pairWithPhone({ code }));
+      elements.pairingCode.value = "";
+    });
+    showToast(`Paired with DHD using ${displayPairingCode(code)}.`, "success");
+  } finally {
+    elements.pairingCode.disabled = false;
+  }
+}
+
+elements.pair.addEventListener("click", async () => {
+  try {
+    await pairWithPhone(elements.pairingCode.value);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), "error");
   }
 });
 
 elements.check.addEventListener("click", async () => {
   try {
-    const result = await api.checkConnection();
-    await refreshState();
-    showToast(result.message, !result.ok);
+    let checkResult: { ok: boolean; message: string } | undefined;
+    await withButtonLoading(elements.check, "Checking...", async () => {
+      checkResult = await api.checkConnection();
+      await refreshState();
+    });
+    if (checkResult) {
+      showToast(checkResult.message, checkResult.ok ? "success" : "error");
+    }
   } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), true);
+    showToast(error instanceof Error ? error.message : String(error), "error");
   }
 });
 
 elements.start.addEventListener("click", async () => {
   try {
-    render(await api.startCompanion());
-    showToast("Companion worker started.");
+    await withButtonLoading(elements.start, "Starting...", async () => {
+      render(await api.startCompanion());
+    });
+    showToast("Companion worker started.", "success");
   } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), true);
+    showToast(error instanceof Error ? error.message : String(error), "error");
   }
 });
 
 elements.stop.addEventListener("click", async () => {
   try {
-    render(await api.stopCompanion());
-    showToast("Companion worker stopped.");
+    await withButtonLoading(elements.stop, "Stopping...", async () => {
+      render(await api.stopCompanion());
+    });
+    showToast("Companion worker stopped.", "info");
   } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), true);
+    showToast(error instanceof Error ? error.message : String(error), "error");
   }
 });
 
 api.onState(render);
 void refreshState().catch((error: unknown) => {
-  showToast(error instanceof Error ? error.message : String(error), true);
+  showToast(error instanceof Error ? error.message : String(error), "error");
 });

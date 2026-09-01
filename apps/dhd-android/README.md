@@ -94,16 +94,21 @@ transport changes.
 
 ## Dummy desktop bridge (open -> observe -> tap)
 
-The Android app starts an authenticated NDJSON listener on port `8765` while
-its process is alive. For the wireless path, keep the phone and development
-machine on the same Wi-Fi, open DHD Settings → Companion connection, and copy
-the displayed phone address and pairing token into the companion environment:
+The Android app starts an authenticated NDJSON listener on TCP port `8765` and
+a short-code discovery listener on UDP port `8766` while its process is alive.
+For the wireless path, keep the phone and development machine on the same
+reachable Wi-Fi, open DHD Settings → Companion connection, and copy the short
+pairing code into the companion dashboard:
 
 ```powershell
-$env:PHONE_ASSISTANT_BRIDGE_HOST = "192.168.1.42"
-$env:PHONE_ASSISTANT_BRIDGE_TOKEN = "copy-the-token-from-dhd-settings"
-pnpm companion:worker
+pnpm companion:dashboard
 ```
+
+Open `http://127.0.0.1:8766`, enter the code, and choose **Pair phone**. The
+companion broadcasts the code locally; this phone bridge answers with its
+current address, port, and credential. The dashboard stores those details so
+you do not have to copy them individually. The code remains valid until you
+refresh it in DHD Settings.
 
 `adb forward` remains a loopback fallback for local development:
 
