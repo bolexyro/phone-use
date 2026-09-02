@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   DHD_TOOL_NAMES,
+  dhdBrowseAppInputSchema,
   dhdExecuteActionSchema,
+  dhdListAllowedAppsInputSchema,
   dhdOpenAppInputSchema
 } from "../src/dhd-tools.js";
 import { buildDhdDynamicTools, toDynamicToolResponse } from "../src/assistant-companion.js";
@@ -19,13 +21,15 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 describe("DHD phone tool contract", () => {
-  it("uses the same five canonical names for the MCP and App Server surfaces", () => {
+  it("uses the same six canonical names for the MCP and App Server surfaces", () => {
     const dynamicNames = buildDhdDynamicTools().map((tool) => String(tool.name));
     const listTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_list_allowed_apps"));
+    const browseTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_browse_app"));
     const openAppTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_open_app"));
 
     expect(DHD_TOOL_NAMES).toEqual([
       "dhd_list_allowed_apps",
+      "dhd_browse_app",
       "dhd_observe",
       "dhd_open_app",
       "dhd_execute",
@@ -34,7 +38,10 @@ describe("DHD phone tool contract", () => {
     expect(dynamicNames).toEqual([...DHD_TOOL_NAMES]);
     expect(dynamicNames.some((name) => name.startsWith("phone_"))).toBe(false);
     expect(String(listTool.description)).toContain("Full Access");
-    expect(String(listTool.description)).toContain("without enumerating installed apps");
+    expect(String(listTool.description)).toContain("includeAll");
+    expect(record(listTool.inputSchema).properties).toHaveProperty("includeAll");
+    expect(String(browseTool.description)).toContain("package names");
+    expect(record(browseTool.inputSchema).properties).toHaveProperty("query");
     expect(String(openAppTool.description)).toContain("Full Access");
   });
 
@@ -70,6 +77,13 @@ describe("DHD phone tool contract", () => {
       y: 20,
       metadata
     }).success).toBe(false);
+  });
+
+  it("validates explicit app discovery inputs", () => {
+    expect(dhdListAllowedAppsInputSchema.parse({})).toEqual({ includeAll: false });
+    expect(dhdListAllowedAppsInputSchema.parse({ includeAll: true })).toEqual({ includeAll: true });
+    expect(dhdBrowseAppInputSchema.parse({ query: "  Spotify  " })).toEqual({ query: "Spotify" });
+    expect(dhdBrowseAppInputSchema.safeParse({ query: " " }).success).toBe(false);
   });
 
   it("preserves phone-tool failures as unsuccessful App Server results", () => {

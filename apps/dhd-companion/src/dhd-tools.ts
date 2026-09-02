@@ -32,6 +32,18 @@ export const dhdOpenAppInputSchema = z
   })
   .strict();
 
+export const dhdListAllowedAppsInputSchema = z
+  .object({
+    includeAll: z.boolean().optional().default(false)
+  })
+  .strict();
+
+export const dhdBrowseAppInputSchema = z
+  .object({
+    query: z.string().trim().min(1).max(120)
+  })
+  .strict();
+
 export const dhdExecuteActionSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -99,6 +111,7 @@ export const dhdObserveInputSchema = z
 
 export const DHD_TOOL_NAMES = [
   "dhd_list_allowed_apps",
+  "dhd_browse_app",
   "dhd_observe",
   "dhd_open_app",
   "dhd_execute",
@@ -172,7 +185,23 @@ export async function invokeDhdTool(
 ): Promise<PhoneAssistantToolResult> {
   switch (name) {
     case "dhd_list_allowed_apps":
-      return safely(() => requestBridge({ type: "allowed_apps", requestId: randomUUID() }));
+      return safely(() => {
+        const parsed = parseInput(dhdListAllowedAppsInputSchema, input);
+        return requestBridge({
+          type: "allowed_apps",
+          requestId: randomUUID(),
+          includeAll: parsed.includeAll
+        });
+      });
+    case "dhd_browse_app":
+      return safely(() => {
+        const parsed = parseInput(dhdBrowseAppInputSchema, input);
+        return requestBridge({
+          type: "browse_apps",
+          requestId: randomUUID(),
+          query: parsed.query
+        });
+      });
     case "dhd_observe":
       return safely(() => {
         const parsed = parseInput(dhdObserveInputSchema, input);
@@ -227,16 +256,25 @@ export function createDhdMcpServer(
   server.registerTool(
     "dhd_list_allowed_apps",
     {
-      description: "Check the phone's app-access mode. In restricted mode, return the explicit allowlist; when Full Access is active, return a concise capability message saying you can use any launchable app without enumerating installed apps.",
-      inputSchema: {}
+      description: "Check the phone's app-access mode. By default, keep the result compact: return the explicit allowlist in restricted mode or Full Access capability metadata. Set includeAll to true only when Full Access is active and you need the complete launchable app list.",
+      inputSchema: dhdListAllowedAppsInputSchema.shape
     },
-    async () => invokeDhdTool("dhd_list_allowed_apps", {})
+    async (input) => invokeDhdTool("dhd_list_allowed_apps", input)
+  );
+
+  server.registerTool(
+    "dhd_browse_app",
+    {
+      description: "Search launchable phone apps by label or package name. Return matching app labels and package names without opening an app or changing permissions. In restricted mode, results are limited to the explicit allowlist.",
+      inputSchema: dhdBrowseAppInputSchema.shape
+    },
+    async (input) => invokeDhdTool("dhd_browse_app", input)
   );
 
   server.registerTool(
     "dhd_observe",
     {
-      description: "Capture the current physical phone display as a PNG for visual context. Use it to choose the next typed action; screenshots do not block an action if the screen changes.",
+      description: "Capture the current physical phone display as a PNG for visual context. Use it to choose the next typed action;",
       inputSchema: dhdObserveInputSchema.shape
     },
     async (input) => invokeDhdTool("dhd_observe", input)

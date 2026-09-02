@@ -10,9 +10,13 @@ data class InstalledUserApp(
     val label: String,
 )
 
-/** Lists launchable non-system packages available to the user on this device. */
+/** Lists launchable packages available to the user on this device. */
 class InstalledAppsRepository(private val context: Context) {
-    fun listLaunchableUserApps(): List<InstalledUserApp> {
+    fun listLaunchableUserApps(): List<InstalledUserApp> = listLaunchableApps(includeSystemApps = false)
+
+    fun listLaunchableApps(): List<InstalledUserApp> = listLaunchableApps(includeSystemApps = true)
+
+    private fun listLaunchableApps(includeSystemApps: Boolean): List<InstalledUserApp> {
         val packageManager = context.packageManager
         val launchIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         return packageManager.queryIntentActivities(launchIntent, PackageManager.MATCH_ALL)
@@ -20,7 +24,7 @@ class InstalledAppsRepository(private val context: Context) {
             .mapNotNull { resolveInfo ->
                 val applicationInfo = resolveInfo.activityInfo?.applicationInfo ?: return@mapNotNull null
                 val isSystemApp = (applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                if (isSystemApp) return@mapNotNull null
+                if (!includeSystemApps && isSystemApp) return@mapNotNull null
                 val packageName = applicationInfo.packageName ?: return@mapNotNull null
                 if (packageName == context.packageName) return@mapNotNull null
                 val label = resolveInfo.loadLabel(packageManager).toString().ifBlank { packageName }

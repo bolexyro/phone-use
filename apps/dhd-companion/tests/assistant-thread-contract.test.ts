@@ -40,6 +40,7 @@ describe("DHD App Server thread contract", () => {
     const dynamicTools = requests[1]?.params?.dynamicTools as Array<Record<string, unknown>>;
     expect(dynamicTools.map((tool) => tool.name)).toEqual([
       "dhd_list_allowed_apps",
+      "dhd_browse_app",
       "dhd_observe",
       "dhd_open_app",
       "dhd_execute",

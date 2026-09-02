@@ -745,6 +745,7 @@ export class CodexAppServerClient {
 
 const DHD_DYNAMIC_TOOL_TO_DISPATCH = {
   dhd_list_allowed_apps: "dhd_list_allowed_apps",
+  dhd_browse_app: "dhd_browse_app",
   dhd_observe: "dhd_observe",
   dhd_open_app: "dhd_open_app",
   dhd_execute: "dhd_execute",
@@ -822,8 +823,22 @@ export function buildDhdDynamicTools(): DynamicToolSpec[] {
   return [
     dynamicTool(
       "dhd_list_allowed_apps",
-      "Check the phone's app-access mode. In restricted mode, return the explicit allowlist; when Full Access is active, return a concise capability message saying you can use any launchable app without enumerating installed apps.",
-      emptySchema()
+      "Check the phone's app-access mode. Keep the default result compact. In restricted mode, return the explicit allowlist; when Full Access is active, return capability metadata. Set includeAll to true only when you need the complete launchable app list.",
+      {
+        type: "object",
+        properties: { includeAll: { type: "boolean", default: false } },
+        additionalProperties: false
+      }
+    ),
+    dynamicTool(
+      "dhd_browse_app",
+      "Search launchable phone apps by label or package name. Return matching app labels and package names without opening an app or changing permissions. In restricted mode, results are limited to the explicit allowlist.",
+      {
+        type: "object",
+        properties: { query: { type: "string", minLength: 1, maxLength: 120 } },
+        required: ["query"],
+        additionalProperties: false
+      }
     ),
     dynamicTool(
       "dhd_observe",

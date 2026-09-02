@@ -3,6 +3,8 @@ package com.phonecontrol.assistant.bridge
 import android.util.Base64
 import android.content.Context
 import android.content.Intent
+import com.phonecontrol.assistant.apps.InstalledAppsRepository
+import com.phonecontrol.assistant.apps.InstalledUserApp
 import com.phonecontrol.assistant.domain.ActionMetadata
 import com.phonecontrol.assistant.domain.BackAction
 import com.phonecontrol.assistant.domain.GuardRegion
@@ -78,6 +80,7 @@ class DevBridgeServer(
     private val fullAccessProvider: () -> Boolean = { false },
 ) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+    private val installedAppsRepository = InstalledAppsRepository(context)
     val authenticationToken: String = preferences.getString(KEY_AUTH_TOKEN, null)
         ?.trim()
         ?.takeIf(String::isNotEmpty)
@@ -315,7 +318,8 @@ class DevBridgeServer(
                     "release_request" -> releaseRequest(requestId, json, writer)
                     "complete_session" -> completeSession(requestId, json, writer)
                     "fail_session" -> failSession(requestId, json, writer)
-                    "allowed_apps" -> allowedApps(requestId, writer)
+                    "allowed_apps" -> allowedApps(requestId, json, writer)
+                    "browse_apps" -> browseApps(requestId, json, writer)
                     "observe" -> observe(requestId, json, writer)
                     "execute_action" -> executeAction(requestId, json, writer)
                     "request_attention" -> requestAttention(requestId, json, writer)
@@ -713,15 +717,68 @@ class DevBridgeServer(
 
     private fun allowedApps(
         requestId: String,
+        json: JSONObject,
         writer: BufferedWriter,
     ) {
         val fullAccess = fullAccessProvider()
+        val includeAll = json.optBoolean("includeAll", false)
+        if (includeAll && !fullAccess) {
+            write(
+                writer,
+                errorResponse(requestId, "Full Access is required to enumerate all launchable apps.")
+                    .put("code", "FULL_ACCESS_REQUIRED")
+                    .put("fullAccess", false)
+                    .put("accessMode", "allowlist")
+                    .put("canListAllApps", false),
+            )
+            return
+        }
         write(
             writer,
             buildAllowedAppsResponse(
                 requestId = requestId,
                 fullAccess = fullAccess,
+                includeAll = includeAll,
                 allowedPackages = if (fullAccess) emptySet() else allowedPackagesProvider(),
+                apps = if (includeAll) installedAppsRepository.listLaunchableApps() else emptyList(),
+            ),
+        )
+    }
+
+    private fun browseApps(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val query = json.optString("query").trim()
+        if (query.isEmpty() || query.length > MAX_APP_QUERY_CHARS) {
+            write(
+                writer,
+                errorResponse(requestId, "App search requires a query between 1 and $MAX_APP_QUERY_CHARS characters.")
+                    .put("code", "INVALID_APP_QUERY"),
+            )
+            return
+        }
+
+        val fullAccess = fullAccessProvider()
+        val allowedPackages = if (fullAccess) emptySet() else allowedPackagesProvider()
+        val candidates = installedAppsRepository.listLaunchableApps()
+            .asSequence()
+            .filter { fullAccess || it.packageName in allowedPackages }
+            .filter {
+                it.label.contains(query, ignoreCase = true) ||
+                    it.packageName.contains(query, ignoreCase = true)
+            }
+            .toList()
+        val returnedApps = candidates.take(MAX_APP_BROWSE_RESULTS)
+        write(
+            writer,
+            buildBrowseAppsResponse(
+                requestId = requestId,
+                query = query,
+                fullAccess = fullAccess,
+                apps = returnedApps,
+                truncated = candidates.size > returnedApps.size,
             ),
         )
     }
@@ -1242,6 +1299,8 @@ class DevBridgeServer(
         const val MAX_REQUEST_CHARS = 16_384
         const val MAX_TEXT_CHARS = 240
         const val MAX_AGENT_FEEDBACK_CHARS = 4_000
+        const val MAX_APP_QUERY_CHARS = 120
+        const val MAX_APP_BROWSE_RESULTS = 25
         const val MAX_GUARD_REGIONS = 8
         const val MAX_OBSERVATIONS = 64
         const val OPEN_SETTLE_DELAY_MS = 750L
@@ -1257,6 +1316,8 @@ internal fun buildAllowedAppsResponse(
     requestId: String,
     fullAccess: Boolean,
     allowedPackages: Set<String>,
+    includeAll: Boolean = false,
+    apps: List<InstalledUserApp> = emptyList(),
 ): JSONObject {
     val response = JSONObject()
         .put("type", "allowed_apps")
@@ -1264,8 +1325,14 @@ internal fun buildAllowedAppsResponse(
         .put("ok", true)
         .put("fullAccess", fullAccess)
         .put("accessMode", if (fullAccess) "full_access" else "allowlist")
+        .put("canListAllApps", fullAccess)
 
-    if (fullAccess) {
+    if (fullAccess && includeAll) {
+        response
+            .put("apps", JSONArray(apps.map(::buildAppResponse)))
+            .put("count", apps.size)
+            .put("message", "Full Access is enabled. Returned all launchable apps on the phone.")
+    } else if (fullAccess) {
         response.put("message", "Full Access is enabled. You can use any launchable app on the phone.")
     } else {
         val packages = allowedPackages.toList().sorted()
@@ -1276,6 +1343,27 @@ internal fun buildAllowedAppsResponse(
 
     return response
 }
+
+internal fun buildBrowseAppsResponse(
+    requestId: String,
+    query: String,
+    fullAccess: Boolean,
+    apps: List<InstalledUserApp>,
+    truncated: Boolean,
+): JSONObject = JSONObject()
+    .put("type", "browse_apps")
+    .put("requestId", requestId)
+    .put("ok", true)
+    .put("query", query)
+    .put("fullAccess", fullAccess)
+    .put("accessMode", if (fullAccess) "full_access" else "allowlist")
+    .put("apps", JSONArray(apps.map(::buildAppResponse)))
+    .put("count", apps.size)
+    .put("truncated", truncated)
+
+private fun buildAppResponse(app: InstalledUserApp): JSONObject = JSONObject()
+    .put("appLabel", app.label)
+    .put("packageName", app.packageName)
 
 private fun ActionExecutionResult.isSuccessful(): Boolean = this is ActionExecutionResult.TransportFinished &&
     this.result is TransportResult.Succeeded
