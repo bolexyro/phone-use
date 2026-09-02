@@ -5,6 +5,7 @@ import { CodexAppServerClient } from "../src/assistant-companion.js";
 describe("Codex App Server agent-message extraction", () => {
   it("uses the final answer instead of concatenating commentary from the same turn", async () => {
     const client = new CodexAppServerClient();
+    const streamed: Array<{ itemId: string; text: string }> = [];
     const resultPromise = new Promise<{ text: string; threadId: string }>((resolve, reject) => {
       const testClient = client as any;
       testClient.activeThreadId = "thread-test";
@@ -12,7 +13,9 @@ describe("Codex App Server agent-message extraction", () => {
         resolve,
         reject,
         agentMessages: new Map(),
-        nextAgentMessageOrder: 0
+        nextAgentMessageOrder: 0,
+        phoneToolFailures: [],
+        onAgentMessageDelta: (update: { itemId: string; text: string }) => streamed.push(update),
       };
     });
     const send = (message: unknown) => (client as any).handleLine(JSON.stringify(message));
@@ -62,6 +65,10 @@ describe("Codex App Server agent-message extraction", () => {
       threadId: "thread-test",
       phoneToolFailures: []
     });
+    expect(streamed).toEqual([
+      { itemId: "final-1", text: "The run failed on round 4; I requested your attention." },
+      { itemId: "final-1", text: "The run failed on round 4; I requested your attention." },
+    ]);
   });
 
   it("retains a failed dynamic phone tool when the App Server turn completes", async () => {

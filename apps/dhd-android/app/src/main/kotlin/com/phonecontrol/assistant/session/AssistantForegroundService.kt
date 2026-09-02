@@ -65,6 +65,7 @@ class AssistantForegroundService : Service() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
@@ -76,6 +77,7 @@ class AssistantForegroundService : Service() {
     }
 
     private fun buildNotification(state: SessionState): Notification {
+        val isActive = state is SessionState.Running || state is SessionState.Paused
         val isPaused = state is SessionState.Paused
         val status = when (state) {
             SessionState.Idle -> "Ready"
@@ -104,21 +106,24 @@ class AssistantForegroundService : Service() {
             Intent(this, AssistantForegroundService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentImmutableFlag(),
         )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(status)
             .setStyle(NotificationCompat.BigTextStyle().bigText(status))
             .setContentIntent(contentIntent)
-            .setOngoing(state is SessionState.Running || state is SessionState.Paused)
+            .setOngoing(isActive)
             .setOnlyAlertOnce(true)
-            .addAction(
-                if (isPaused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
-                if (isPaused) "Resume" else "Pause",
-                pauseIntent,
-            )
-            .addAction(android.R.drawable.ic_delete, "Stop", stopIntent)
-            .build()
+        if (isActive) {
+            builder
+                .addAction(
+                    if (isPaused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
+                    if (isPaused) "Resume" else "Pause",
+                    pauseIntent,
+                )
+                .addAction(android.R.drawable.ic_delete, "Stop", stopIntent)
+        }
+        return builder.build()
     }
 
     private fun notificationPurpose(purpose: String): String = when {
@@ -166,6 +171,12 @@ class AssistantForegroundService : Service() {
         private const val COMPLETION_NOTIFICATION_ID = 4205
         private const val ATTENTION_NOTIFICATION_ID = 4206
         private const val MAX_NOTIFICATION_TEXT_CHARS = 240
+
+        /** Remove the in-progress notification when a bridge-owned run ends. */
+        fun removeSessionNotification(context: Context) {
+            context.getSystemService(NotificationManager::class.java)
+                .cancel(NOTIFICATION_ID)
+        }
 
         /** Post a result notification without bringing the assistant to the foreground. */
         fun showCompletionNotification(context: Context, message: String, conversationId: String? = null) {

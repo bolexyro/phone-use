@@ -320,6 +320,7 @@ class DevBridgeServer(
                     "complete_steer" -> completeSteer(requestId, json, writer)
                     "bind_codex_thread" -> bindCodexThread(requestId, json, writer)
                     "release_request" -> releaseRequest(requestId, json, writer)
+                    "stream_agent_message" -> streamAgentMessage(requestId, json, writer)
                     "complete_session" -> completeSession(requestId, json, writer)
                     "fail_session" -> failSession(requestId, json, writer)
                     "allowed_apps" -> allowedApps(requestId, json, writer)
@@ -640,6 +641,7 @@ class DevBridgeServer(
             )
         }
         context.stopService(Intent(context, AssistantForegroundService::class.java))
+        AssistantForegroundService.removeSessionNotification(context)
         write(
             writer,
             JSONObject()
@@ -647,6 +649,42 @@ class DevBridgeServer(
                 .put("requestId", requestId)
                 .put("ok", failed)
                 .put("message", reason),
+        )
+    }
+
+    private fun streamAgentMessage(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        markCompanionSeen()
+        val sessionId = json.optString("sessionId").trim()
+        val messageId = json.optString("messageId").trim()
+        val text = json.optString("text")
+        require(sessionId.isNotEmpty()) { "sessionId is required." }
+        require(messageId.isNotEmpty() && messageId.length <= MAX_TEXT_CHARS) {
+            "messageId must be 1-$MAX_TEXT_CHARS characters."
+        }
+        require(text.length <= MAX_AGENT_FEEDBACK_CHARS) {
+            "text must be at most $MAX_AGENT_FEEDBACK_CHARS characters."
+        }
+        if (coordinator.state.value.sessionIdOrNullForBridge() != sessionId) {
+            write(
+                writer,
+                errorResponse(requestId, "The phone session is no longer active.")
+                    .put("code", "SESSION_NOT_RUNNING"),
+            )
+            return
+        }
+        val streamed = coordinator.streamAgentMessage(sessionId, messageId, text)
+        write(
+            writer,
+            JSONObject()
+                .put("type", "agent_message_streamed")
+                .put("requestId", requestId)
+                .put("ok", streamed)
+                .put("sessionId", sessionId)
+                .put("messageId", messageId),
         )
     }
 
@@ -665,6 +703,10 @@ class DevBridgeServer(
             .trim()
             .ifBlank { null }
             ?.take(MAX_AGENT_FEEDBACK_CHARS)
+        val agentMessageId = json.optString("agentMessageId")
+            .trim()
+            .ifBlank { null }
+            ?.take(MAX_TEXT_CHARS)
         val activeSessionId = coordinator.state.value.sessionIdOrNullForBridge()
         if (activeSessionId != sessionId) {
             write(
@@ -675,11 +717,16 @@ class DevBridgeServer(
             return
         }
         val completionMessage = feedback ?: message
-        val completed = coordinator.complete(completionMessage, agentFeedback = feedback)
+        val completed = coordinator.complete(
+            completionMessage,
+            agentFeedback = feedback,
+            agentMessageId = agentMessageId,
+        )
         if (completed) {
             AssistantForegroundService.showCompletionNotification(context, completionMessage, coordinator.state.value.conversationIdOrNullForBridge())
         }
         context.stopService(Intent(context, AssistantForegroundService::class.java))
+        AssistantForegroundService.removeSessionNotification(context)
         write(
             writer,
             JSONObject()

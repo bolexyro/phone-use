@@ -234,18 +234,21 @@ The bridge preserves the pre-pivot MCP primitives in phone-owned form:
 Each action includes `metadata.purpose`, for example `Searching for jollof
 rice` or `Selecting the delivery address`. That purpose is safe to show in the
 foreground notification and the in-app conversation timeline. The companion
-also forwards the final user-facing Codex message as `feedback` on
-`complete_session`; the phone renders it as an assistant message and sends a
-separate completion notification. That notification shows the first useful
-sentence of the final answer as its preview, while tapping it opens the full
-conversation. If no final message payload is available, it shows `Your DHD
-task is ready to review.` Sensitive action payloads and private
+streams cumulative text from the final user-facing Codex message through
+`stream_agent_message`; the phone updates one in-flight assistant message as
+deltas arrive. `item/completed` remains authoritative, and the final text is
+sent as `feedback` on `complete_session` to finalize that same message before
+the separate completion notification is posted. That notification shows the
+first useful sentence of the final answer as its preview, while tapping it
+opens the full conversation. If no final message payload is available, it
+shows `Your DHD task is ready to review.` Sensitive action payloads and private
 reasoning are not written to the timeline.
 
-Agent messages are kept separate by their App Server `itemId`. Commentary
-items remain progress output; only the latest completed `agentMessage` with
-`phase: "final_answer"` is forwarded as phone feedback, so an opening note is
-not accidentally prefixed to the final result.
+The companion keeps App Server agent-message state separate by `itemId`, while
+the phone shows one in-flight final-answer row for the active turn. Commentary
+items remain progress output; only `agentMessage` items with
+`phase: "final_answer"` are streamed to the phone, so an opening note is not
+accidentally shown as the final result.
 
 The companion treats `turn/completed` as the App Server transport reaching its
 terminal state, not as independent proof that the user's phone task succeeded.

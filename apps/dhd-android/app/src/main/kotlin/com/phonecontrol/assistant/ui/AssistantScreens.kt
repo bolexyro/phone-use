@@ -25,6 +25,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -133,6 +134,7 @@ import com.phonecontrol.assistant.session.SessionCoordinator
 import com.phonecontrol.assistant.session.SessionState
 import com.phonecontrol.assistant.shizuku.ShizukuStatus
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.cos
@@ -595,12 +597,35 @@ private fun ConversationTimeline(
 ) {
     val listState = rememberLazyListState()
     val groups = remember(timeline) { groupTimeline(timeline) }
+
+    // Keep following the live answer until the user starts a real list drag.
+    // Content growth can temporarily make the list report that it is no longer
+    // at the end, so only a user drag disables following; reaching the end
+    // enables it again.
+    var followLatest by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start && listState.canScrollBackward) {
+                followLatest = false
+            }
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.canScrollForward }.collect { canScrollForward ->
+            if (!canScrollForward) followLatest = true
+        }
+    }
     LaunchedEffect(
         groups.lastOrNull()?.id,
         groups.lastOrNull()?.activities?.size,
         groups.lastOrNull()?.steerMessages?.size,
+        groups.lastOrNull()?.assistantMessages?.lastOrNull()?.text?.length,
     ) {
-        if (groups.isNotEmpty()) listState.animateScrollToItem(groups.lastIndex)
+        if (groups.isNotEmpty() && followLatest && !listState.isScrollInProgress) {
+            // A very large offset positions the last item at the bottom of the
+            // viewport instead of repeatedly snapping to the card's start.
+            listState.scrollToItem(groups.lastIndex, scrollOffset = Int.MAX_VALUE)
+        }
     }
     SelectionContainer {
         LazyColumn(
@@ -625,6 +650,7 @@ private fun ConversationTimeline(
         }
     }
 }
+
 
 @Composable
 private fun TaskGroupCard(

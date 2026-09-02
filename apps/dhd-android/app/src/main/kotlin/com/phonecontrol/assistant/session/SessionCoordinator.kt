@@ -340,11 +340,16 @@ class SessionCoordinator(
     fun complete(
         message: String = "Session completed.",
         agentFeedback: String? = null,
+        agentMessageId: String? = null,
     ): Boolean = synchronized(lock) {
         val sessionId = _state.value.sessionIdOrNull ?: return false
         val feedback = agentFeedback
             ?.trim()
             ?.take(MAX_AGENT_FEEDBACK_CHARS)
+            ?.ifBlank { null }
+        val safeAgentMessageId = agentMessageId
+            ?.trim()
+            ?.take(MAX_TEXT_CHARS)
             ?.ifBlank { null }
         val displayMessage = feedback ?: message.trim().take(MAX_TEXT_CHARS).ifBlank { "Session completed." }
         sessionJob = null
@@ -361,7 +366,12 @@ class SessionCoordinator(
             assistantText = if (feedback == null) displayMessage else null,
         )
         if (feedback != null) {
-            appendEvent(ActivityEventKind.AGENT_MESSAGE, feedback, sessionId)
+            appendEvent(
+                ActivityEventKind.AGENT_MESSAGE,
+                feedback,
+                sessionId,
+                eventId = safeAgentMessageId,
+            )
         }
         appendEvent(
             ActivityEventKind.SESSION_COMPLETED,
@@ -369,6 +379,16 @@ class SessionCoordinator(
             sessionId,
         )
         true
+    }
+
+    /** Update the assistant message that is visible while Codex emits deltas. */
+    fun streamAgentMessage(sessionId: String, messageId: String, text: String): Boolean = synchronized(lock) {
+        val current = _state.value
+        if (current.sessionIdOrNull != sessionId || !current.isActive) return@synchronized false
+        val safeMessageId = messageId.trim().take(MAX_TEXT_CHARS).ifBlank { return@synchronized false }
+        val safeText = text.replace(Regex("\\r\\n?"), "\n").take(MAX_AGENT_FEEDBACK_CHARS)
+        if (safeText.isBlank()) return@synchronized false
+        conversationStore?.upsertAgentMessage(sessionId, safeMessageId, safeText) ?: true
     }
 
     /** Mark that the user should review the phone without launching an Activity. */
@@ -533,9 +553,10 @@ class SessionCoordinator(
         purpose: String? = null,
         observationId: String? = null,
         targetDescription: String? = null,
+        eventId: String? = null,
     ) {
         val event = ActivityEvent(
-            id = UUID.randomUUID().toString(),
+            id = eventId ?: UUID.randomUUID().toString(),
             sessionId = sessionId,
             timestampEpochMs = System.currentTimeMillis(),
             kind = kind,

@@ -40,6 +40,7 @@ const TERMINAL_MESSAGE_TYPES = new Set([
   "steer_released",
   "steer_completed",
   "codex_thread_bound",
+  "agent_message_streamed",
   "attention_requested",
   "session_completed",
   "session_failed",

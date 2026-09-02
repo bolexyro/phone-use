@@ -108,6 +108,9 @@ interface ConversationDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insertMessage(message: MessageEntity)
 
+    @Update
+    fun updateMessage(message: MessageEntity)
+
     @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
     fun findMessage(id: String): MessageEntity?
 
@@ -335,6 +338,39 @@ class ConversationStore(context: Context) {
         refresh(run.conversationId)
     }
 
+    /** Insert or update the single assistant message shown while a run streams. */
+    fun upsertAgentMessage(runId: String, messageId: String, text: String): Boolean = synchronized(lock) {
+        val run = dao.findRun(runId) ?: return@synchronized false
+        val safeId = messageId.trim().take(MAX_MESSAGE_ID_CHARS).ifBlank { return@synchronized false }
+        val safeText = text.replace(Regex("\\r\\n?"), "\n").take(MAX_AGENT_MESSAGE_CHARS)
+        if (safeText.isBlank()) return@synchronized false
+
+        val existing = dao.findMessage(safeId)
+        if (existing == null) {
+            dao.insertMessage(
+                MessageEntity(
+                    id = safeId,
+                    conversationId = run.conversationId,
+                    runId = runId,
+                    role = ROLE_ASSISTANT,
+                    text = safeText,
+                    createdAtEpochMs = System.currentTimeMillis(),
+                ),
+            )
+        } else {
+            if (existing.conversationId != run.conversationId ||
+                existing.runId != runId ||
+                existing.role != ROLE_ASSISTANT
+            ) {
+                return@synchronized false
+            }
+            dao.updateMessage(existing.copy(text = safeText))
+        }
+        touchConversation(run.conversationId)
+        refresh(run.conversationId)
+        true
+    }
+
     /** Persist a user steering instruction alongside the run it modifies. */
     fun recordSteer(steerId: String, runId: String, text: String) = synchronized(lock) {
         val run = dao.findRun(runId) ?: return@synchronized
@@ -426,7 +462,8 @@ class ConversationStore(context: Context) {
             }
         }
         if (event.kind == ActivityEventKind.AGENT_MESSAGE) {
-            if (dao.findMessage(event.id) == null) {
+            val existingMessage = dao.findMessage(event.id)
+            if (existingMessage == null) {
                 dao.insertMessage(
                     MessageEntity(
                         id = event.id,
@@ -435,6 +472,16 @@ class ConversationStore(context: Context) {
                         role = ROLE_ASSISTANT,
                         text = event.message.trim().take(MAX_AGENT_MESSAGE_CHARS),
                         createdAtEpochMs = event.timestampEpochMs,
+                    ),
+                )
+            } else if (
+                existingMessage.conversationId == run.conversationId &&
+                existingMessage.runId == runId &&
+                existingMessage.role == ROLE_ASSISTANT
+            ) {
+                dao.updateMessage(
+                    existingMessage.copy(
+                        text = event.message.trim().take(MAX_AGENT_MESSAGE_CHARS),
                     ),
                 )
             }
@@ -546,6 +593,7 @@ class ConversationStore(context: Context) {
         const val ROLE_STEER = "steer"
         const val ROLE_ASSISTANT = "assistant"
         const val MAX_TITLE_CHARS = 48
+        const val MAX_MESSAGE_ID_CHARS = 240
         const val MAX_PURPOSE_CHARS = 240
         const val MAX_MESSAGE_CHARS = 4_000
         const val MAX_AGENT_MESSAGE_CHARS = 4_000

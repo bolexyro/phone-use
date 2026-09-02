@@ -37,6 +37,7 @@ import {
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const BRIDGE_POLL_TIMEOUT_MS = 5_000;
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
+const STREAM_BRIDGE_TIMEOUT_MS = 5_000;
 const MAX_AGENT_FEEDBACK_CHARS = 4_000;
 const MAX_STEER_CHARS = 4_000;
 const DEFAULT_COMPLETION_MESSAGE = "Your DHD task is ready to review.";
@@ -154,6 +155,11 @@ interface AgentMessageState {
   lastEventOrder: number;
 }
 
+interface AgentMessageStreamUpdate {
+  itemId: string;
+  text: string;
+}
+
 /**
  * Persistent Codex App Server client. Authentication stays in the Codex
  * CLI/App Server; this process never handles ChatGPT cookies or API keys.
@@ -176,6 +182,7 @@ export class CodexAppServerClient {
     agentMessages: Map<string, AgentMessageState>;
     nextAgentMessageOrder: number;
     phoneToolFailures: PhoneToolFailure[];
+    onAgentMessageDelta?: (update: AgentMessageStreamUpdate) => void;
   } | null = null;
   private activeThreadId: string | null = null;
   private activeDhdThreadId: string | null = null;
@@ -251,6 +258,7 @@ export class CodexAppServerClient {
     threadTitle?: string,
     timing?: PhaseTimer,
     reasoningEffort: string = resolveCodexEffort(),
+    onAgentMessageDelta?: (update: AgentMessageStreamUpdate) => void,
   ): Promise<TurnResult> {
     const logger = timing ?? new PhaseTimer("codex-turn");
     this.activeTiming = logger;
@@ -328,6 +336,7 @@ export class CodexAppServerClient {
           agentMessages: new Map(),
           nextAgentMessageOrder: 0,
           phoneToolFailures: [],
+          onAgentMessageDelta,
         };
       });
       try {
@@ -571,16 +580,25 @@ export class CodexAppServerClient {
     }
     if (message.method === "item/started") {
       this.logUserMessagePhase(message);
-      recordAgentMessageStarted(completion, message.params);
+      this.reportAgentMessageStream(
+        completion,
+        recordAgentMessageStarted(completion, message.params),
+      );
       return;
     }
     if (message.method === "item/agentMessage/delta") {
-      recordAgentMessageDelta(completion, message.params);
+      this.reportAgentMessageStream(
+        completion,
+        recordAgentMessageDelta(completion, message.params),
+      );
       return;
     }
     if (message.method === "item/completed") {
       this.logUserMessagePhase(message);
-      recordAgentMessageCompleted(completion, message.params);
+      this.reportAgentMessageStream(
+        completion,
+        recordAgentMessageCompleted(completion, message.params),
+      );
       return;
     }
     if (message.method === "turn/completed") {
@@ -624,6 +642,23 @@ export class CodexAppServerClient {
       );
       this.turnCompletion = null;
     }
+  }
+
+  private reportAgentMessageStream(
+    completion: {
+      onAgentMessageDelta?: (update: AgentMessageStreamUpdate) => void;
+    },
+    state: AgentMessageState | null,
+  ): void {
+    if (
+      !state ||
+      state.phase !== "final_answer" ||
+      !state.text.trim() ||
+      !completion.onAgentMessageDelta
+    ) {
+      return;
+    }
+    completion.onAgentMessageDelta({ itemId: state.id, text: state.text });
   }
 
   private logUserMessagePhase(message: JsonRpcMessage): void {
@@ -1235,6 +1270,83 @@ function logServerNotification(message: JsonRpcMessage): void {
   );
 }
 
+/**
+ * Forward the latest cumulative final-answer text to the phone while keeping
+ * bridge writes ordered. If Codex emits faster than the phone can refresh its
+ * Room-backed timeline, intermediate snapshots are coalesced; the phone still
+ * receives the newest text in order. Completion does not wait for these
+ * presentation updates because `complete_session` is the authoritative
+ * terminal update for the same message id.
+ */
+class AgentMessageStreamer {
+  private latest: AgentMessageStreamUpdate | null = null;
+  private drainPromise: Promise<void> | null = null;
+  private lastSentText: string | null = null;
+  private _hasUpdates = false;
+
+  constructor(
+    private readonly sessionId: string,
+    readonly messageId: string,
+  ) {}
+
+  get hasUpdates(): boolean {
+    return this._hasUpdates;
+  }
+
+  push(update: AgentMessageStreamUpdate): void {
+    if (!update.text.trim()) return;
+    this.latest = update;
+    this._hasUpdates = true;
+    this.startDrain();
+  }
+
+  private startDrain(): void {
+    if (this.drainPromise) return;
+    this.drainPromise = this.drain();
+  }
+
+  private async drain(): Promise<void> {
+    while (this.latest) {
+      const update = this.latest;
+      this.latest = null;
+      const text = update.text.slice(0, MAX_AGENT_FEEDBACK_CHARS);
+      if (text === this.lastSentText) continue;
+      try {
+        const response = await requestBridge(
+          {
+            type: "stream_agent_message",
+            requestId: randomUUID(),
+            sessionId: this.sessionId,
+            messageId: this.messageId,
+            text,
+          },
+          { timeoutMs: STREAM_BRIDGE_TIMEOUT_MS },
+        );
+        if (response.ok !== true) {
+          console.error(
+            `[phone-assistant-companion] phone rejected streamed agent message: ${String(response.message ?? "unknown error")}`,
+          );
+        } else {
+          this.lastSentText = text;
+        }
+      } catch (error) {
+        // Streaming is presentation feedback. A dropped update should not
+        // turn a healthy Codex turn into a failed phone session; the final
+        // complete_session call remains authoritative.
+        console.error(
+          `[phone-assistant-companion] could not stream agent message: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    this.drainPromise = null;
+    if (this.latest) this.startDrain();
+  }
+}
+
+function streamedAgentMessageId(sessionId: string): string {
+  return `dhd-agent-${sessionId}`;
+}
+
 interface ActiveCodexTurn {
   sessionId: string;
   client: CodexAppServerClient;
@@ -1421,6 +1533,10 @@ async function processPendingRequest(
 
   console.error(`[phone-assistant-companion] claimed ${sessionId}: ${request}`);
   activeCodexTurn = { sessionId, client: codexClient };
+  const agentMessageStreamer = new AgentMessageStreamer(
+    sessionId,
+    streamedAgentMessageId(sessionId),
+  );
   try {
     const conversationId =
       typeof claimed.conversationId === "string"
@@ -1442,6 +1558,7 @@ async function processPendingRequest(
       threadTitle,
       timing,
       reasoningEffort,
+      (update) => agentMessageStreamer.push(update),
     );
     const phoneToolFailure = result.phoneToolFailures.at(-1);
     if (phoneToolFailure) {
@@ -1491,6 +1608,9 @@ async function processPendingRequest(
       sessionId,
       message: feedback || DEFAULT_COMPLETION_MESSAGE,
       ...(feedback ? { feedback } : {}),
+      ...(agentMessageStreamer.hasUpdates
+        ? { agentMessageId: agentMessageStreamer.messageId }
+        : {}),
     });
     if (completed.ok !== true) {
       console.error(
@@ -1694,9 +1814,9 @@ function recordAgentMessageStarted(
     nextAgentMessageOrder: number;
   },
   value: unknown,
-): void {
+): AgentMessageState | null {
   const item = extractAgentMessageItem(value);
-  if (!item) return;
+  if (!item) return null;
   const state = getAgentMessageState(
     completion,
     extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID,
@@ -1705,6 +1825,7 @@ function recordAgentMessageStarted(
   state.phase = extractAgentMessagePhase(value) || state.phase;
   state.completed = false;
   touchAgentMessage(completion, state);
+  return state;
 }
 
 function recordAgentMessageDelta(
@@ -1713,9 +1834,9 @@ function recordAgentMessageDelta(
     nextAgentMessageOrder: number;
   },
   value: unknown,
-): void {
+): AgentMessageState | null {
   const delta = extractText(value);
-  if (!delta) return;
+  if (!delta) return null;
   const state = getAgentMessageState(
     completion,
     extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID,
@@ -1723,6 +1844,7 @@ function recordAgentMessageDelta(
   state.text += delta;
   state.phase = extractAgentMessagePhase(value) || state.phase;
   touchAgentMessage(completion, state);
+  return state;
 }
 
 function recordAgentMessageCompleted(
@@ -1731,9 +1853,9 @@ function recordAgentMessageCompleted(
     nextAgentMessageOrder: number;
   },
   value: unknown,
-): void {
+): AgentMessageState | null {
   const item = extractAgentMessageItem(value);
-  if (!item) return;
+  if (!item) return null;
   const state = getAgentMessageState(
     completion,
     extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID,
@@ -1744,6 +1866,7 @@ function recordAgentMessageCompleted(
   state.phase = extractAgentMessagePhase(value) || state.phase;
   state.completed = true;
   touchAgentMessage(completion, state);
+  return state;
 }
 
 function selectFinalAgentMessageText(
