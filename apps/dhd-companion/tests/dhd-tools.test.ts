@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   GUARD_REGIONS_FEATURE_FLAG,
+  DHD_MAX_SEQUENCE_ACTIONS,
   DHD_TOOL_NAMES,
   createDhdToolSchemas,
   dhdBrowseAppInputSchema,
   dhdExecuteActionSchema,
+  dhdExecuteSequenceInputSchema,
   dhdListAllowedAppsInputSchema,
   dhdObserveInputSchema,
   dhdOpenAppInputSchema,
@@ -26,7 +28,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 describe("DHD phone tool contract", () => {
-  it("uses the same six canonical names for the MCP and App Server surfaces", () => {
+  it("uses the same canonical names for the MCP and App Server surfaces", () => {
     const dynamicNames = buildDhdDynamicTools().map((tool) => String(tool.name));
     const listTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_list_allowed_apps"));
     const browseTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_browse_app"));
@@ -39,6 +41,7 @@ describe("DHD phone tool contract", () => {
       "dhd_observe",
       "dhd_open_app",
       "dhd_execute",
+      "dhd_execute_sequence",
       "dhd_request_attention"
     ]);
     expect(dynamicNames).toEqual([...DHD_TOOL_NAMES]);
@@ -56,6 +59,7 @@ describe("DHD phone tool contract", () => {
     const tools = buildDhdDynamicTools();
     const openApp = record(tools.find((tool) => tool.name === "dhd_open_app"));
     const execute = record(tools.find((tool) => tool.name === "dhd_execute"));
+    const sequence = record(tools.find((tool) => tool.name === "dhd_execute_sequence"));
     const executeSchema = record(execute.inputSchema);
     const actionSchema = record(record(executeSchema.properties).action);
     const variants = Array.isArray(actionSchema.oneOf) ? actionSchema.oneOf : [];
@@ -73,6 +77,17 @@ describe("DHD phone tool contract", () => {
     expect(actionMetadata.properties).toHaveProperty("observationId");
     expect(actionMetadata.properties).not.toHaveProperty("guardRegions");
     expect(actionMetadata.required).toContain("observationId");
+
+    const sequenceSchema = record(sequence.inputSchema);
+    const sequenceProperties = record(sequenceSchema.properties);
+    const sequenceActions = record(sequenceProperties.actions);
+    const sequenceItems = record(sequenceActions.items);
+    const sequenceVariants = Array.isArray(sequenceItems.oneOf) ? sequenceItems.oneOf : [];
+    const sequenceMetadata = record(record(record(sequenceVariants[0]).properties).metadata);
+    expect(sequenceSchema.required).toEqual(["observationId", "actions"]);
+    expect(sequenceActions.maxItems).toBe(DHD_MAX_SEQUENCE_ACTIONS);
+    expect(sequenceMetadata.properties).not.toHaveProperty("observationId");
+    expect(sequenceMetadata.required).toEqual(["purpose", "targetDescription"]);
   });
 
   it("rejects removed action variants at the typed-action boundary", () => {
@@ -111,15 +126,20 @@ describe("DHD phone tool contract", () => {
     const enabledObserve = record(enabledTools.find((tool) => tool.name === "dhd_observe"));
     const enabledOpenApp = record(enabledTools.find((tool) => tool.name === "dhd_open_app"));
     const enabledExecute = record(enabledTools.find((tool) => tool.name === "dhd_execute"));
+    const enabledSequence = record(enabledTools.find((tool) => tool.name === "dhd_execute_sequence"));
     const enabledActionSchema = record(record(enabledExecute.inputSchema).properties).action;
     const enabledVariant = record(record(enabledActionSchema).oneOf?.[0]);
     const enabledMetadata = record(record(enabledVariant.properties).metadata);
     const enabledOpenAppMetadata = record(record(enabledOpenApp.inputSchema).properties).metadata;
+    const enabledSequenceActions = record(record(enabledSequence.inputSchema).properties).actions;
+    const enabledSequenceVariant = record(record(enabledSequenceActions.items).oneOf?.[0]);
+    const enabledSequenceMetadata = record(record(enabledSequenceVariant.properties).metadata);
 
     expect(record(disabledObserve.inputSchema).properties).not.toHaveProperty("guardRegions");
     expect(record(enabledObserve.inputSchema).properties).toHaveProperty("guardRegions");
     expect(enabledMetadata.properties).toHaveProperty("guardRegions");
     expect(record(enabledOpenAppMetadata).properties).not.toHaveProperty("guardRegions");
+    expect(enabledSequenceMetadata.properties).toHaveProperty("guardRegions");
     expect(String(enabledObserve.description)).toContain("guardRegions");
 
     const region = { left: 0, top: 0, right: 100, bottom: 100 };
@@ -131,11 +151,37 @@ describe("DHD phone tool contract", () => {
       y: 20,
       metadata: { ...metadata, guardRegions: [region] }
     }).success).toBe(true);
+    expect(enabledSchemas.dhdExecuteSequenceInputSchema.safeParse({
+      observationId: "obs-1",
+      actions: [{
+        type: "tap",
+        x: 10,
+        y: 20,
+        metadata: {
+          purpose: "Tap the button",
+          targetDescription: "Button",
+          guardRegions: [region]
+        }
+      }]
+    }).success).toBe(true);
     expect(enabledSchemas.dhdOpenAppInputSchema.safeParse({
       packageName: "com.example.store",
       metadata: { ...metadata, guardRegions: [region] }
     }).success).toBe(false);
     expect(createDhdToolSchemas(false).dhdObserveInputSchema.safeParse({ guardRegions: [region] }).success).toBe(false);
+    expect(createDhdToolSchemas(false).dhdExecuteSequenceInputSchema.safeParse({
+      observationId: "obs-1",
+      actions: [{
+        type: "tap",
+        x: 10,
+        y: 20,
+        metadata: {
+          purpose: "Tap the button",
+          targetDescription: "Button",
+          guardRegions: [region]
+        }
+      }]
+    }).success).toBe(false);
   });
 
   it("requires an observation baseline for actions", () => {
@@ -157,6 +203,45 @@ describe("DHD phone tool contract", () => {
         purpose: "Tap the button",
         targetDescription: "Button"
       }
+    }).success).toBe(false);
+  });
+
+  it("requires one initial observation for a fixed typed sequence", () => {
+    const action = {
+      type: "tap" as const,
+      x: 10,
+      y: 20,
+      metadata: {
+        purpose: "Tap the first button",
+        targetDescription: "First button"
+      }
+    };
+
+    expect(dhdExecuteSequenceInputSchema.safeParse({
+      observationId: "obs-1",
+      actions: [action]
+    }).success).toBe(true);
+    expect(dhdExecuteSequenceInputSchema.safeParse({
+      actions: [action]
+    }).success).toBe(false);
+    expect(dhdExecuteSequenceInputSchema.safeParse({
+      observationId: "obs-1",
+      actions: [{
+        ...action,
+        metadata: { ...action.metadata, observationId: "obs-1" }
+      }]
+    }).success).toBe(false);
+    expect(dhdExecuteSequenceInputSchema.safeParse({
+      observationId: "obs-1",
+      actions: [{
+        type: "open_app",
+        packageName: "com.example.store",
+        metadata: action.metadata
+      }]
+    }).success).toBe(false);
+    expect(dhdExecuteSequenceInputSchema.safeParse({
+      observationId: "obs-1",
+      actions: Array.from({ length: DHD_MAX_SEQUENCE_ACTIONS + 1 }, () => action)
     }).success).toBe(false);
   });
 

@@ -57,6 +57,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -103,6 +105,7 @@ class DevBridgeServer(
     private val pairingCodeLock = Any()
     @Volatile private var pairingCodeValue: String = loadOrCreatePairingCode()
     private val codexWarmupRequested = AtomicBoolean(false)
+    private val phoneActionMutex = Mutex()
     private val observations = Collections.synchronizedMap(
         object : LinkedHashMap<String, ObservationSnapshot>(MAX_OBSERVATIONS + 1, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ObservationSnapshot>?): Boolean =
@@ -305,7 +308,7 @@ class DevBridgeServer(
             )
             try {
                 when (json.optString("type")) {
-                    "demo_run" -> runDemo(parseRequest(json), writer)
+                    "demo_run" -> phoneActionMutex.withLock { runDemo(parseRequest(json), writer) }
                     "start_session" -> startSession(requestId, json, writer)
                     "status" -> status(requestId, writer)
                     "pending_request" -> pendingRequest(requestId, writer)
@@ -321,7 +324,8 @@ class DevBridgeServer(
                     "allowed_apps" -> allowedApps(requestId, json, writer)
                     "browse_apps" -> browseApps(requestId, json, writer)
                     "observe" -> observe(requestId, json, writer)
-                    "execute_action" -> executeAction(requestId, json, writer)
+                    "execute_action" -> phoneActionMutex.withLock { executeAction(requestId, json, writer) }
+                    "execute_sequence" -> phoneActionMutex.withLock { executeSequence(requestId, json, writer) }
                     "request_attention" -> requestAttention(requestId, json, writer)
                     "stop_session" -> stopSession(requestId, json, writer)
                     else -> write(writer, errorResponse(requestId, "Unsupported bridge request type."))
@@ -819,26 +823,24 @@ class DevBridgeServer(
         val actionJson = json.optJSONObject("action")
             ?: throw IllegalArgumentException("action must be an object.")
         val action = parsePhoneAction(actionJson)
+        val observationId = action.metadata.observationId.trim()
         val observation = synchronized(observations) {
-            action.metadata.observationId
-                .takeIf { it.isNotBlank() }
-                ?.let { observations[it] }
-                ?: observations.values.lastOrNull()
-        } ?: when (val captured = captureWithRetry(null, emptyList())) {
-            is ObservationCaptureResult.Failed -> {
-                val message = "The action could not get a current phone screenshot: ${captured.message}"
-                write(
-                    writer,
-                    errorResponse(requestId, message)
-                        .put("action", wireActionName(action))
-                        .put("code", observationFailureCode(captured.message))
-                        .put("outcome", "failed")
-                        .put("executed", false),
-                )
-                return
-            }
-
-            is ObservationCaptureResult.Succeeded -> captured.snapshot.also(::remember)
+            observationId.takeIf(String::isNotBlank)?.let { observations[it] }
+        }
+        if (observation == null) {
+            write(
+                writer,
+                JSONObject()
+                    .put("type", "completed")
+                    .put("requestId", requestId)
+                    .put("ok", false)
+                    .put("action", wireActionName(action))
+                    .put("outcome", "failed")
+                    .put("executed", false)
+                    .put("code", "OBSERVATION_MISSING")
+                    .put("message", "The supplied observationId is missing or expired; observe the phone before retrying."),
+            )
+            return
         }
         val result = coordinator.executeAction(action, observation)
         writeActionResult(writer, requestId, wireActionName(action), result)
@@ -854,11 +856,7 @@ class DevBridgeServer(
             return
         }
 
-        if (action is OpenAppAction) {
-            delay(OPEN_SETTLE_DELAY_MS)
-        } else if (action !is WaitAction) {
-            delay(POST_ACTION_SETTLE_DELAY_MS)
-        }
+        settleAfterAction(action)
         // A successful action may intentionally navigate to another activity,
         // system surface, or package. Capture what is actually on screen and
         // let the model decide what the new observation means.
@@ -896,6 +894,60 @@ class DevBridgeServer(
         }
     }
 
+    private suspend fun executeSequence(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val request = try {
+            parseSequenceRequest(json)
+        } catch (error: InvalidSequencePayloadException) {
+            writeInvalidSequenceResult(writer, requestId, json, error)
+            return
+        }
+        val observation = synchronized(observations) {
+            observations[request.observationId]
+        }
+        if (observation == null) {
+            val firstAction = request.actions.first()
+            val failure = SequenceStepResult(
+                index = 0,
+                action = wireActionName(firstAction),
+                status = SequenceStepResult.Status.FAILED,
+                message = "The supplied observationId is missing or expired; observe the phone before retrying.",
+                code = "OBSERVATION_MISSING",
+                outcome = "failed",
+                executed = false,
+            )
+            writeSequenceResult(
+                writer,
+                requestId,
+                SequenceExecutionResult(
+                    requestedSteps = request.actions.size,
+                    steps = listOf(failure),
+                    failure = failure,
+                ),
+            )
+            return
+        }
+
+        val result = SequenceExecutor(
+            executeAction = { action, baseline -> coordinator.executeAction(action, baseline) },
+            captureAfterAction = { guardRegions -> captureWithRetry(null, guardRegions) },
+            rememberObservation = ::remember,
+            settleAfterAction = ::settleAfterAction,
+        ).execute(observation, request.actions)
+        writeSequenceResult(writer, requestId, result)
+    }
+
+    private suspend fun settleAfterAction(action: PhoneAction) {
+        if (action is OpenAppAction) {
+            delay(OPEN_SETTLE_DELAY_MS)
+        } else if (action !is WaitAction) {
+            delay(POST_ACTION_SETTLE_DELAY_MS)
+        }
+    }
+
     private fun stopSession(
         requestId: String,
         json: JSONObject,
@@ -916,6 +968,98 @@ class DevBridgeServer(
                 .put("wasActive", stopped)
                 .put("message", reason),
         )
+    }
+
+    private fun parseSequenceRequest(json: JSONObject): SequenceRequest {
+        val observationId = json.optString("observationId").trim()
+        if (observationId.isEmpty() || observationId.length > MAX_TEXT_CHARS) {
+            throw InvalidSequencePayloadException(
+                index = null,
+                message = "observationId must be 1-$MAX_TEXT_CHARS characters.",
+            )
+        }
+        val actionsJson = json.optJSONArray("actions")
+            ?: throw InvalidSequencePayloadException(null, "actions must be an array.")
+        if (actionsJson.length() !in 1..MAX_SEQUENCE_ACTIONS) {
+            throw InvalidSequencePayloadException(
+                index = null,
+                message = "A sequence must contain between 1 and $MAX_SEQUENCE_ACTIONS actions.",
+            )
+        }
+        val actions = buildList(actionsJson.length()) {
+            for (index in 0 until actionsJson.length()) {
+                val actionJson = actionsJson.optJSONObject(index)
+                    ?: throw InvalidSequencePayloadException(index, "Sequence action $index must be an object.")
+                val metadata = actionJson.optJSONObject("metadata")
+                if (metadata == null) {
+                    throw InvalidSequencePayloadException(index, "Sequence action $index must include metadata.")
+                }
+                if (metadata.has("observationId")) {
+                    throw InvalidSequencePayloadException(
+                        index,
+                        "Sequence action $index receives observationId from the phone and must not provide one.",
+                    )
+                }
+                val action = try {
+                    parsePhoneAction(actionJson)
+                } catch (error: Exception) {
+                    throw InvalidSequencePayloadException(
+                        index,
+                        "Sequence action $index is invalid: ${error.message ?: "invalid action payload"}",
+                    )
+                }
+                if (action is OpenAppAction) {
+                    throw InvalidSequencePayloadException(
+                        index,
+                        "dhd_execute_sequence does not support open_app; use dhd_open_app first.",
+                    )
+                }
+                add(action)
+            }
+        }
+        return SequenceRequest(observationId = observationId, actions = actions)
+    }
+
+    private fun writeInvalidSequenceResult(
+        writer: BufferedWriter,
+        requestId: String,
+        json: JSONObject,
+        error: InvalidSequencePayloadException,
+    ) {
+        val actions = json.optJSONArray("actions")
+        val response = JSONObject()
+            .put("type", "completed")
+            .put("requestId", requestId)
+            .put("ok", false)
+            .put("action", "sequence")
+            .put("requestedSteps", actions?.length() ?: 0)
+            .put("completedSteps", 0)
+            .put("message", error.message ?: "The sequence payload is invalid.")
+            .put("code", "INVALID_PAYLOAD")
+            .put("outcome", "failed")
+            .put("executed", false)
+        val steps = JSONArray()
+        error.index?.let { index ->
+            val action = actions
+                ?.optJSONObject(index)
+                ?.optString("type")
+                ?.trim()
+                ?.ifBlank { null }
+                ?: "unknown"
+            steps.put(
+                JSONObject()
+                    .put("index", index)
+                    .put("action", action)
+                    .put("status", "failed")
+                    .put("message", error.message ?: "The sequence action is invalid.")
+                    .put("code", "INVALID_PAYLOAD")
+                    .put("outcome", "failed")
+                    .put("executed", false),
+            )
+            response.put("failedStep", index)
+        }
+        response.put("steps", steps)
+        write(writer, response)
     }
 
     private fun parsePhoneAction(json: JSONObject): PhoneAction {
@@ -970,10 +1114,13 @@ class DevBridgeServer(
         val purpose = json.optString("purpose").trim()
         // The companion supplies observationId for the pre-action structural
         // comparison and may supply guardRegions for strict visual checking.
-        val observationId = json.optString("observationId").trim().take(MAX_TEXT_CHARS)
+        val observationId = json.optString("observationId").trim()
         val targetDescription = json.optString("targetDescription").trim()
         require(purpose.isNotEmpty() && purpose.length <= MAX_TEXT_CHARS) {
             "metadata.purpose must be 1-$MAX_TEXT_CHARS characters."
+        }
+        require(observationId.length <= MAX_TEXT_CHARS) {
+            "metadata.observationId must be at most $MAX_TEXT_CHARS characters."
         }
         require(targetDescription.isNotEmpty() && targetDescription.length <= MAX_TEXT_CHARS) {
             "metadata.targetDescription must be 1-$MAX_TEXT_CHARS characters."
@@ -1023,6 +1170,56 @@ class DevBridgeServer(
                 .put("screenshotBase64", Base64.encodeToString(screenshot, Base64.NO_WRAP))
                 .put("screenshotMimeType", "image/png"),
         )
+    }
+
+    private fun writeSequenceResult(
+        writer: BufferedWriter,
+        requestId: String,
+        result: SequenceExecutionResult,
+    ) {
+        val response = JSONObject()
+            .put("type", "completed")
+            .put("requestId", requestId)
+            .put("ok", result.ok)
+            .put("action", "sequence")
+            .put("requestedSteps", result.requestedSteps)
+            .put("completedSteps", result.completedSteps)
+            .put(
+                "message",
+                if (result.ok) {
+                    "Executed ${result.requestedSteps} typed phone actions and returned a fresh observation."
+                } else {
+                    result.failure?.message ?: "The phone sequence failed."
+                },
+            )
+        val steps = JSONArray()
+        result.steps.forEach { step ->
+            val stepJson = JSONObject()
+                .put("index", step.index)
+                .put("action", step.action)
+                .put("status", step.status.name.lowercase())
+                .put("message", step.message)
+            step.observationId?.let { stepJson.put("observationId", it) }
+            step.code?.let { stepJson.put("code", it) }
+            step.outcome?.let { stepJson.put("outcome", it) }
+            step.executed?.let { stepJson.put("executed", it) }
+            steps.put(stepJson)
+        }
+        response.put("steps", steps)
+        result.failure?.let { failure ->
+            response
+                .put("failedStep", failure.index)
+                .put("code", failure.code ?: "SEQUENCE_FAILED")
+                .put("outcome", failure.outcome ?: "failed")
+                .put("executed", failure.executed ?: "unknown")
+        }
+        result.finalObservation?.let { captured ->
+            response
+                .put("observation", snapshotJson(captured.snapshot))
+                .put("screenshotBase64", Base64.encodeToString(captured.screenshot, Base64.NO_WRAP))
+                .put("screenshotMimeType", "image/png")
+        }
+        write(writer, response)
     }
 
     private fun snapshotJson(snapshot: ObservationSnapshot): JSONObject = JSONObject()
@@ -1279,6 +1476,16 @@ class DevBridgeServer(
         val guardRegions: List<GuardRegion>,
     )
 
+    private data class SequenceRequest(
+        val observationId: String,
+        val actions: List<PhoneAction>,
+    )
+
+    private class InvalidSequencePayloadException(
+        val index: Int?,
+        message: String,
+    ) : IllegalArgumentException(message)
+
     private companion object {
         const val TAG = "PhoneControlBridge"
         const val LAN_BIND_HOST = "0.0.0.0"
@@ -1299,6 +1506,7 @@ class DevBridgeServer(
         const val MAX_APP_QUERY_CHARS = 120
         const val MAX_APP_BROWSE_RESULTS = 25
         const val MAX_GUARD_REGIONS = 8
+        const val MAX_SEQUENCE_ACTIONS = 16
         const val MAX_OBSERVATIONS = 64
         const val OPEN_SETTLE_DELAY_MS = 750L
         const val POST_ACTION_SETTLE_DELAY_MS = 350L

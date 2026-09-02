@@ -26,6 +26,9 @@ notifications, request handoff, and observation/action execution.
 - Typed action models for `open_app`, `tap`, `type`, `swipe`, `scroll`,
   `keypress`, `back` and `wait`.
   Each action carries a purpose, target description, and observation ID.
+  The DHD companion can also submit up to 16 non-`open_app` typed actions as
+  one observation-safe sequence; the phone advances only through verified
+  post-action observations.
 - Phone-authoritative `PolicyEngine` for app allowlisting and confirmation
   categories: send, purchase, transfer, delete and submit.
 - Official Shizuku API lifecycle and capability detection, plus a typed
@@ -38,9 +41,9 @@ notifications, request handoff, and observation/action execution.
 Run now creates a phone-owned request that the desktop Codex companion can
 claim. An authenticated LAN development bridge carries that handoff and the
 typed execution path: the companion starts a Codex App Server turn, while the
-configured MCP adapter sends allowlist, observation, and action requests back
-to this app over NDJSON. The legacy `demo_run` request remains available for
-the open -> observe -> tap smoke test.
+configured MCP adapter sends allowlist, observation, single-action, and
+sequence requests back to this app over NDJSON. The legacy `demo_run` request
+remains available for the open -> observe -> tap smoke test.
 
 DHD keeps one local assistant conversation. The stored Codex thread is reused
 when a new request arrives within three hours of the last activity. After three

@@ -64,8 +64,8 @@ depending on the PATH inherited by the Codex process.
 
 Guard-region visual checks are an opt-in companion feature. They are hidden
 from the model by default. To expose the additional `guardRegions` fields on
-both the MCP and App Server tool surfaces, set this before starting the
-companion:
+`dhd_observe`, `dhd_execute`, and `dhd_execute_sequence` across both the MCP
+and App Server tool surfaces, set this before starting the companion:
 
 ```powershell
 $env:PHONE_ASSISTANT_ENABLE_GUARD_REGIONS = "true"
@@ -118,7 +118,7 @@ its loopback port instead:
 adb forward tcp:8765 tcp:8765
 ```
 
-Codex App Server can then discover this five-tool DHD surface from the `dhd`
+Codex App Server can then discover this seven-tool DHD surface from the `dhd`
 MCP server:
 
 - `dhd_list_allowed_apps` — show the phone-side packages currently enabled in
@@ -131,6 +131,12 @@ MCP server:
   post-action observation. It handles tap, type, swipe, scroll, back, keypress,
   and wait. If the post-action capture fails, the result is unknown and the
   model must observe before retrying.
+- `dhd_execute_sequence` — execute up to 16 typed non-`open_app` interactions
+  serially from one initial observation ID. The phone captures and verifies a
+  post-action observation after every step, uses that observation as the next
+  step's baseline, and stops at the first failure. Use it only when later
+  targets are predictable without inspecting intermediate screenshots; use
+  `dhd_execute` for adaptive or branching work.
 - `dhd_request_attention` — post an attention notification without opening the
   assistant Activity.
 
@@ -213,6 +219,7 @@ The bridge preserves the pre-pivot MCP primitives in phone-owned form:
 | --- | --- | --- |
 | Open app | `dhd_open_app` / `open_app` internally | Launch component is resolved by Android; allowlist is enforced on the phone. |
 | Coordinate tap | `tap` | Coordinates use the agent's observation ID; structural state is checked before input. |
+| Fixed typed sequence | `dhd_execute_sequence` | Up to 16 typed actions run serially; each step uses the prior verified post-action observation. |
 | Directional scroll | `scroll` | Android derives a bounded swipe from direction + amount. |
 | Explicit gesture | `swipe` | Start/end coordinates and duration are bounds checked. |
 | Type text | `type` | Uses Android `input text`; text is never copied into the activity log. |

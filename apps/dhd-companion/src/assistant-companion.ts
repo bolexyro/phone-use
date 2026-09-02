@@ -750,6 +750,7 @@ const DHD_DYNAMIC_TOOL_TO_DISPATCH = {
   dhd_observe: "dhd_observe",
   dhd_open_app: "dhd_open_app",
   dhd_execute: "dhd_execute",
+  dhd_execute_sequence: "dhd_execute_sequence",
   dhd_request_attention: "dhd_request_attention"
 } as const;
 
@@ -795,6 +796,18 @@ export function buildDhdDynamicTools(
     required: ["purpose", "targetDescription", "observationId"],
     additionalProperties: false
   };
+  const sequenceMetadata = {
+    type: "object",
+    properties: {
+      purpose: { type: "string", minLength: 1, maxLength: 240 },
+      targetDescription: { type: "string", minLength: 1, maxLength: 240 },
+      ...(enableGuardRegions
+        ? { guardRegions: { type: "array", maxItems: 8, items: guardRegion } }
+        : {})
+    },
+    required: ["purpose", "targetDescription"],
+    additionalProperties: false
+  };
   const openAppMetadata = {
     type: "object",
     properties: baseMetadataProperties,
@@ -803,53 +816,61 @@ export function buildDhdDynamicTools(
   };
   const actionObject = (
     properties: Record<string, unknown>,
-    required: string[]
+    required: string[],
+    actionMetadata: Record<string, unknown> = metadata
   ) => ({
     type: "object",
-    properties: { ...properties, metadata },
+    properties: { ...properties, metadata: actionMetadata },
     required: [...required, "metadata"],
     additionalProperties: false
   });
-  const action = {
-    oneOf: [
-      actionObject(
-        { type: { const: "tap" }, x: { type: "integer", minimum: 0 }, y: { type: "integer", minimum: 0 } },
-        ["type", "x", "y"]
-      ),
-      actionObject(
-        { type: { const: "type" }, text: { type: "string", minLength: 1, maxLength: 4096 } },
-        ["type", "text"]
-      ),
-      actionObject(
-        {
-          type: { const: "swipe" },
-          startX: { type: "integer", minimum: 0 },
-          startY: { type: "integer", minimum: 0 },
-          endX: { type: "integer", minimum: 0 },
-          endY: { type: "integer", minimum: 0 },
-          durationMs: { type: "integer", minimum: 1, maximum: 10_000 }
-        },
-        ["type", "startX", "startY", "endX", "endY"]
-      ),
-      actionObject(
-        {
-          type: { const: "scroll" },
-          direction: { type: "string", enum: ["up", "down", "left", "right"] },
-          amount: { type: "string", enum: ["small", "medium", "large"] }
-        },
-        ["type", "direction", "amount"]
-      ),
-      actionObject({ type: { const: "back" } }, ["type"]),
-      actionObject(
-        { type: { const: "keypress" }, key: { type: "string", enum: ["BACK", "HOME", "ENTER", "DELETE"] } },
-        ["type", "key"]
-      ),
-      actionObject(
-        { type: { const: "wait" }, durationMs: { type: "integer", minimum: 1, maximum: 30_000 } },
-        ["type", "durationMs"]
-      )
-    ]
-  };
+  const actionVariants = [
+    {
+      properties: { type: { const: "tap" }, x: { type: "integer", minimum: 0 }, y: { type: "integer", minimum: 0 } },
+      required: ["type", "x", "y"]
+    },
+    {
+      properties: { type: { const: "type" }, text: { type: "string", minLength: 1, maxLength: 4096 } },
+      required: ["type", "text"]
+    },
+    {
+      properties: {
+        type: { const: "swipe" },
+        startX: { type: "integer", minimum: 0 },
+        startY: { type: "integer", minimum: 0 },
+        endX: { type: "integer", minimum: 0 },
+        endY: { type: "integer", minimum: 0 },
+        durationMs: { type: "integer", minimum: 1, maximum: 10_000 }
+      },
+      required: ["type", "startX", "startY", "endX", "endY"]
+    },
+    {
+      properties: {
+        type: { const: "scroll" },
+        direction: { type: "string", enum: ["up", "down", "left", "right"] },
+        amount: { type: "string", enum: ["small", "medium", "large"] }
+      },
+      required: ["type", "direction", "amount"]
+    },
+    { properties: { type: { const: "back" } }, required: ["type"] },
+    {
+      properties: { type: { const: "keypress" }, key: { type: "string", enum: ["BACK", "HOME", "ENTER", "DELETE"] } },
+      required: ["type", "key"]
+    },
+    {
+      properties: { type: { const: "wait" }, durationMs: { type: "integer", minimum: 1, maximum: 30_000 } },
+      required: ["type", "durationMs"]
+    }
+  ];
+  const createActionSchema = (actionMetadata: Record<string, unknown>) => ({
+    oneOf: actionVariants.map((variant) => actionObject(
+      variant.properties,
+      variant.required,
+      actionMetadata
+    ))
+  });
+  const action = createActionSchema(metadata);
+  const sequenceAction = createActionSchema(sequenceMetadata);
   const observeProperties: Record<string, unknown> = {
     expectedPackageName: { type: "string", minLength: 1 },
     purpose: { type: "string", minLength: 1, maxLength: 240 },
@@ -859,7 +880,7 @@ export function buildDhdDynamicTools(
     observeProperties.guardRegions = { type: "array", maxItems: 8, items: guardRegion };
   }
   const guardRegionGuidance = enableGuardRegions
-    ? " When enabled, provide the same guardRegions to dhd_observe and the following action only when the target must remain unchanged."
+    ? " When enabled, provide the same guardRegions to dhd_observe and the corresponding action or first sequence step only when the target must remain unchanged."
     : "";
 
   return [
@@ -911,6 +932,19 @@ export function buildDhdDynamicTools(
         type: "object",
         properties: { action },
         required: ["action"],
+        additionalProperties: false
+      }
+    ),
+    dynamicTool(
+      "dhd_execute_sequence",
+      `Execute up to 16 typed phone actions in order from one observation baseline. Use this only when every later target is predictable without inspecting intermediate screenshots; use dhd_execute for adaptive or branching work. The phone captures and verifies a post-action observation after every step and returns the final observation only after the full sequence is verified. Observe first and pass its observation.id as the top-level observationId. Do not include open_app, shell commands, semantic targets, or execution modes.${enableGuardRegions ? " When enabled, provide guardRegions on the first dhd_observe and the corresponding sequence steps when the guarded target must remain unchanged." : ""} If any step fails, the sequence stops; if post-action observation fails, treat the outcome as unknown and observe before retrying.`,
+      {
+        type: "object",
+        properties: {
+          observationId: { type: "string", minLength: 1, maxLength: 240 },
+          actions: { type: "array", minItems: 1, maxItems: 16, items: sequenceAction }
+        },
+        required: ["observationId", "actions"],
         additionalProperties: false
       }
     ),

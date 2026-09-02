@@ -44,6 +44,7 @@ describe("DHD App Server thread contract", () => {
       "dhd_observe",
       "dhd_open_app",
       "dhd_execute",
+      "dhd_execute_sequence",
       "dhd_request_attention"
     ]);
     expect(requests.find(({ method }) => method === "turn/start")?.params?.effort).toBe("xhigh");

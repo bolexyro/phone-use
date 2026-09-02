@@ -15,6 +15,8 @@ const packageNameSchema = z
 
 export const GUARD_REGIONS_FEATURE_FLAG = "PHONE_ASSISTANT_ENABLE_GUARD_REGIONS";
 
+export const DHD_MAX_SEQUENCE_ACTIONS = 16;
+
 const ENABLED_FEATURE_VALUES = new Set(["1", "true", "yes", "on"]);
 
 export function isGuardRegionsEnabled(
@@ -34,12 +36,17 @@ const guardRegionSchema = z
   })
   .strict();
 
-function createActionMetadataSchema(enableGuardRegions: boolean) {
+function createActionMetadataSchema(
+  enableGuardRegions: boolean,
+  requireObservationId = true
+) {
   return z
     .object({
       purpose: z.string().min(1).max(240),
       targetDescription: z.string().min(1).max(240),
-      observationId: z.string().min(1).max(240),
+      ...(requireObservationId
+        ? { observationId: z.string().min(1).max(240) }
+        : {}),
       ...(enableGuardRegions
         ? { guardRegions: z.array(guardRegionSchema).max(8).optional().default([]) }
         : {})
@@ -50,6 +57,10 @@ function createActionMetadataSchema(enableGuardRegions: boolean) {
 export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegionsEnabled()) {
   const actionMetadataSchema = createActionMetadataSchema(enableGuardRegions);
   const openAppMetadataSchema = createActionMetadataSchema(false);
+  const sequenceActionMetadataSchema = createActionMetadataSchema(
+    enableGuardRegions,
+    false
+  );
 
   const dhdOpenAppInputSchema = z
     .object({
@@ -127,6 +138,70 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
       .strict()
   ]);
 
+  const dhdExecuteSequenceInputSchema = z
+    .object({
+      observationId: z.string().min(1).max(240),
+      actions: z.array(
+        z.discriminatedUnion("type", [
+          z
+            .object({
+              type: z.literal("tap"),
+              x: z.number().int().min(0),
+              y: z.number().int().min(0),
+              metadata: sequenceActionMetadataSchema
+            })
+            .strict(),
+          z
+            .object({
+              type: z.literal("type"),
+              text: z.string().min(1).max(4096),
+              metadata: sequenceActionMetadataSchema
+            })
+            .strict(),
+          z
+            .object({
+              type: z.literal("swipe"),
+              startX: z.number().int().min(0),
+              startY: z.number().int().min(0),
+              endX: z.number().int().min(0),
+              endY: z.number().int().min(0),
+              durationMs: z.number().int().min(1).max(10_000).optional(),
+              metadata: sequenceActionMetadataSchema
+            })
+            .strict(),
+          z
+            .object({
+              type: z.literal("scroll"),
+              direction: z.enum(["up", "down", "left", "right"]),
+              amount: z.enum(["small", "medium", "large"]),
+              metadata: sequenceActionMetadataSchema
+            })
+            .strict(),
+          z
+            .object({
+              type: z.literal("back"),
+              metadata: sequenceActionMetadataSchema
+            })
+            .strict(),
+          z
+            .object({
+              type: z.literal("keypress"),
+              key: z.enum(["BACK", "HOME", "ENTER", "DELETE"]),
+              metadata: sequenceActionMetadataSchema
+            })
+            .strict(),
+          z
+            .object({
+              type: z.literal("wait"),
+              durationMs: z.number().int().min(1).max(30_000),
+              metadata: sequenceActionMetadataSchema
+            })
+            .strict()
+        ])
+      ).min(1).max(DHD_MAX_SEQUENCE_ACTIONS)
+    })
+    .strict();
+
   const dhdObserveInputSchema = z
     .object({
       expectedPackageName: packageNameSchema.optional(),
@@ -143,7 +218,8 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
     dhdListAllowedAppsInputSchema,
     dhdBrowseAppInputSchema,
     dhdExecuteActionSchema,
-    dhdObserveInputSchema
+    dhdObserveInputSchema,
+    dhdExecuteSequenceInputSchema
   };
 }
 
@@ -159,6 +235,7 @@ export const dhdListAllowedAppsInputSchema = defaultDhdToolSchemas.dhdListAllowe
 export const dhdBrowseAppInputSchema = defaultDhdToolSchemas.dhdBrowseAppInputSchema;
 export const dhdExecuteActionSchema = defaultDhdToolSchemas.dhdExecuteActionSchema;
 export const dhdObserveInputSchema = defaultDhdToolSchemas.dhdObserveInputSchema;
+export const dhdExecuteSequenceInputSchema = defaultDhdToolSchemas.dhdExecuteSequenceInputSchema;
 
 export const DHD_TOOL_NAMES = [
   "dhd_list_allowed_apps",
@@ -166,6 +243,7 @@ export const DHD_TOOL_NAMES = [
   "dhd_observe",
   "dhd_open_app",
   "dhd_execute",
+  "dhd_execute_sequence",
   "dhd_request_attention"
 ] as const;
 
@@ -288,6 +366,16 @@ export async function invokeDhdTool(
         const action = parseInput(schemas.dhdExecuteActionSchema, readRecord(input).action);
         return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
       });
+    case "dhd_execute_sequence":
+      return safely(() => {
+        const parsed = parseInput(schemas.dhdExecuteSequenceInputSchema, input);
+        return requestBridge({
+          type: "execute_sequence",
+          requestId: randomUUID(),
+          observationId: parsed.observationId,
+          actions: parsed.actions
+        });
+      });
     case "dhd_request_attention":
       return safely(() => {
         const reason = parseInput(z.string().min(1).max(240), readRecord(input).reason);
@@ -311,7 +399,7 @@ export function createDhdMcpServer(
   const enableGuardRegions = isGuardRegionsEnabled();
   const schemas = createDhdToolSchemas(enableGuardRegions);
   const guardRegionGuidance = enableGuardRegions
-    ? " When enabled, provide the same guardRegions to dhd_observe and the following action only when the target must remain unchanged."
+    ? " When enabled, provide the same guardRegions to dhd_observe and the corresponding action or first sequence step only when the target must remain unchanged."
     : "";
   const server = new McpServer({ name: serverName, version });
 
@@ -358,6 +446,15 @@ export function createDhdMcpServer(
       inputSchema: { action: schemas.dhdExecuteActionSchema }
     },
     async (input) => invokeDhdTool("dhd_execute", input)
+  );
+
+  server.registerTool(
+    "dhd_execute_sequence",
+    {
+      description: `Execute up to ${DHD_MAX_SEQUENCE_ACTIONS} typed phone interactions in order from one observation baseline. Use this only when every later target is predictable without inspecting intermediate screenshots; use dhd_execute for adaptive or branching work. The phone captures and verifies a post-action observation after every step, and returns the final observation only after the full sequence is verified. Observe first and pass its observation.id as the top-level observationId. Do not include open_app, shell commands, semantic targets, or execution modes.${enableGuardRegions ? " When enabled, provide guardRegions on the first dhd_observe and the corresponding sequence steps when the guarded target must remain unchanged." : ""} If any step fails, the sequence stops; if post-action observation fails, treat the outcome as unknown and observe before retrying.`,
+      inputSchema: schemas.dhdExecuteSequenceInputSchema.shape
+    },
+    async (input) => invokeDhdTool("dhd_execute_sequence", input)
   );
 
   server.registerTool(
