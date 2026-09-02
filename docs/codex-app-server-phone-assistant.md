@@ -62,6 +62,19 @@ If `pnpm.cmd` is not at that location, use the absolute path returned by
 `Get-Command pnpm`. Keeping the command and working directory explicit avoids
 depending on the PATH inherited by the Codex process.
 
+Guard-region visual checks are an opt-in companion feature. They are hidden
+from the model by default. To expose the additional `guardRegions` fields on
+both the MCP and App Server tool surfaces, set this before starting the
+companion:
+
+```powershell
+$env:PHONE_ASSISTANT_ENABLE_GUARD_REGIONS = "true"
+pnpm companion:dashboard
+```
+
+Restart the companion after changing the flag. Leave it unset or set it to
+`false` for the normal structural-only observation contract.
+
 For the normal wireless path, start the local companion dashboard and pair by
 short code. DHD Settings → Companion connection shows the code. The dashboard
 broadcasts the code on the local network; the phone bridge matches it and
@@ -111,11 +124,13 @@ MCP server:
 - `dhd_list_allowed_apps` — show the phone-side packages currently enabled in
   the per-app allowlist (all apps start disabled).
 - `dhd_observe` — return the current screenshot and foreground context for the
-  next action.
-- `dhd_open_app` — open one allowlisted app and return a post-action PNG
-  screenshot.
-- `dhd_execute` — execute one typed interaction and return a post-action PNG
-  screenshot. It handles tap, type, swipe, scroll, back, keypress, and wait.
+  next action. The returned observation ID is the action's preflight baseline.
+- `dhd_open_app` — open one allowlisted app and return the actual post-action
+  observation.
+- `dhd_execute` — execute one typed interaction and return the actual
+  post-action observation. It handles tap, type, swipe, scroll, back, keypress,
+  and wait. If the post-action capture fails, the result is unknown and the
+  model must observe before retrying.
 - `dhd_request_attention` — post an attention notification without opening the
   assistant Activity.
 
@@ -197,7 +212,7 @@ The bridge preserves the pre-pivot MCP primitives in phone-owned form:
 | MCP-stage interaction | Phone action | Notes |
 | --- | --- | --- |
 | Open app | `dhd_open_app` / `open_app` internally | Launch component is resolved by Android; allowlist is enforced on the phone. |
-| Coordinate tap | `tap` | Coordinates are checked against the current screenshot bounds; screenshot freshness checks are deferred. |
+| Coordinate tap | `tap` | Coordinates use the agent's observation ID; structural state is checked before input. |
 | Directional scroll | `scroll` | Android derives a bounded swipe from direction + amount. |
 | Explicit gesture | `swipe` | Start/end coordinates and duration are bounds checked. |
 | Type text | `type` | Uses Android `input text`; text is never copied into the activity log. |

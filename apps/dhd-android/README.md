@@ -25,9 +25,7 @@ notifications, request handoff, and observation/action execution.
   the DHD assistant timeline.
 - Typed action models for `open_app`, `tap`, `type`, `swipe`, `scroll`,
   `keypress`, `back` and `wait`.
-  Each action carries a purpose and target description. Observation IDs and
-  screenshot guard regions remain in the internal model for a future safety
-  pass, but are not required by the current assistant bridge.
+  Each action carries a purpose, target description, and observation ID.
 - Phone-authoritative `PolicyEngine` for app allowlisting and confirmation
   categories: send, purchase, transfer, delete and submit.
 - Official Shizuku API lifecycle and capability detection, plus a typed
@@ -35,8 +33,7 @@ notifications, request handoff, and observation/action execution.
   `input keyevent`. The app builds those argv arrays itself; no raw
   provider/model shell command is accepted. Before an input action, the phone
   captures a current shell screenshot for foreground binding and coordinate
-  bounds. Screenshot fingerprint/guard freshness rejection is deferred while
-  the first assistant prototype is tuned.
+  bounds. Structural observation fields are compared before input.
 
 Run now creates a phone-owned request that the desktop Codex companion can
 claim. An authenticated LAN development bridge carries that handoff and the

@@ -27,6 +27,7 @@ enum class RejectionCode {
     SHIZUKU_UNAVAILABLE,
     SHIZUKU_PERMISSION_REQUIRED,
     OBSERVATION_MISSING,
+    OBSERVATION_FAILED,
     STALE_OBSERVATION,
     FOREGROUND_CHANGED,
     INVALID_COORDINATE,
@@ -45,11 +46,10 @@ class ShizukuActionTransport(
     private val observationProvider: ShizukuObservationProvider,
     private val processRunner: ShizukuProcessRunner,
     /**
-     * Screenshot/observation freshness is deferred for the first prototype.
-     * Keep this switch so the guard layer can be re-enabled after it has been
-     * tuned against real phone UI transitions.
+     * Structural observation freshness is always enabled in production. An
+     * action's guard regions opt into the stricter visual comparison.
      */
-    private val enforceObservationFreshness: Boolean = false,
+    private val enforceObservationFreshness: Boolean = true,
 ) : PhoneActionTransport {
     override suspend fun execute(
         action: PhoneAction,
@@ -277,7 +277,10 @@ class ShizukuActionTransport(
         observation: ObservationSnapshot,
     ): FreshCheck {
         val fresh = observationProvider.capture(
-            expectedPackageName = observation.packageName,
+            // Capture the actual current screen. The structural comparison
+            // below decides whether it is still the screen the agent observed;
+            // the observer must not discard it just because the package changed.
+            expectedPackageName = null,
             guardRegions = if (enforceObservationFreshness) {
                 action.metadata.guardRegions
             } else {
@@ -287,13 +290,16 @@ class ShizukuActionTransport(
         val current = when (fresh) {
             is ObservationCaptureResult.Failed -> {
                 return FreshCheck.Rejected(
-                    TransportResult.Rejected(RejectionCode.FOREGROUND_CHANGED, fresh.message),
+                    TransportResult.Rejected(
+                        RejectionCode.OBSERVATION_FAILED,
+                        "Could not capture a fresh pre-action observation; the action was not executed: ${fresh.message}",
+                    ),
                 )
             }
 
             is ObservationCaptureResult.Succeeded -> fresh.snapshot
         }
-        if (enforceObservationFreshness && isStale(observation, current, action.metadata.guardRegions)) {
+        if (enforceObservationFreshness && isObservationStale(observation, current, action.metadata.guardRegions)) {
             return FreshCheck.Rejected(
                 TransportResult.Rejected(
                     RejectionCode.STALE_OBSERVATION,
@@ -302,31 +308,6 @@ class ShizukuActionTransport(
             )
         }
         return FreshCheck.Ready(current)
-    }
-
-    private fun isStale(
-        previous: ObservationSnapshot,
-        current: ObservationSnapshot,
-        guardRegions: List<GuardRegion>,
-    ): Boolean {
-        if (
-            previous.packageName != current.packageName ||
-            previous.activityName != current.activityName ||
-            previous.displayId != current.displayId ||
-            previous.rotation != current.rotation ||
-            previous.width != current.width ||
-            previous.height != current.height
-        ) {
-            return true
-        }
-        if (guardRegions.isEmpty()) {
-            return previous.screenshotFingerprint != current.screenshotFingerprint
-        }
-        return guardRegions.any { region ->
-            val before = previous.guardFingerprints[region]
-            val after = current.guardFingerprints[region]
-            before == null || after == null || before != after
-        }
     }
 
     private fun commandResult(
@@ -418,5 +399,36 @@ class ShizukuActionTransport(
 
     private companion object {
         const val SCROLL_DURATION_MS = 400L
+    }
+}
+
+/**
+ * Returns whether a fresh observation is no longer safe to use for an action.
+ * Structural fields are always compared; guard-region fingerprints opt into
+ * the stricter visual comparison without requiring the entire screenshot to
+ * remain identical.
+ */
+internal fun isObservationStale(
+    previous: ObservationSnapshot,
+    current: ObservationSnapshot,
+    guardRegions: List<GuardRegion>,
+): Boolean {
+    if (
+        previous.packageName != current.packageName ||
+        previous.activityName != current.activityName ||
+        previous.displayId != current.displayId ||
+        previous.rotation != current.rotation ||
+        previous.width != current.width ||
+        previous.height != current.height
+    ) {
+        return true
+    }
+    if (guardRegions.isEmpty()) {
+        return false
+    }
+    return guardRegions.any { region ->
+        val before = previous.guardFingerprints[region]
+        val after = current.guardFingerprints[region]
+        before == null || after == null || before != after
     }
 }

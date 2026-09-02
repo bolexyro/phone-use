@@ -8,6 +8,7 @@ import * as readline from "node:readline";
 
 import {
   invokeDhdTool,
+  isGuardRegionsEnabled,
   type PhoneAssistantToolResult
 } from "./dhd-tools.js";
 import {
@@ -754,20 +755,50 @@ const DHD_DYNAMIC_TOOL_TO_DISPATCH = {
 
 type DynamicToolSpec = Record<string, unknown>;
 
+export interface DhdDynamicToolOptions {
+  enableGuardRegions?: boolean;
+}
+
 /**
  * Register a small direct tool surface on the App Server thread. These are
  * intentionally separate names from the configured MCP tools. The App Server
  * delivers their calls to this companion; current builds normally reach that
  * request path through the bundled Code Mode host.
  */
-export function buildDhdDynamicTools(): DynamicToolSpec[] {
-  const metadata = {
+export function buildDhdDynamicTools(
+  options: DhdDynamicToolOptions = {}
+): DynamicToolSpec[] {
+  const enableGuardRegions = options.enableGuardRegions ?? isGuardRegionsEnabled();
+  const guardRegion = {
     type: "object",
     properties: {
-      purpose: { type: "string", minLength: 1, maxLength: 240 },
-      targetDescription: { type: "string", minLength: 1, maxLength: 240 }
+      left: { type: "integer", minimum: 0 },
+      top: { type: "integer", minimum: 0 },
+      right: { type: "integer", minimum: 0 },
+      bottom: { type: "integer", minimum: 0 }
     },
-    required: ["purpose", "targetDescription"],
+    required: ["left", "top", "right", "bottom"],
+    additionalProperties: false
+  };
+  const baseMetadataProperties: Record<string, unknown> = {
+    purpose: { type: "string", minLength: 1, maxLength: 240 },
+    targetDescription: { type: "string", minLength: 1, maxLength: 240 },
+    observationId: { type: "string", minLength: 1, maxLength: 240 }
+  };
+  const metadataProperties: Record<string, unknown> = { ...baseMetadataProperties };
+  if (enableGuardRegions) {
+    metadataProperties.guardRegions = { type: "array", maxItems: 8, items: guardRegion };
+  }
+  const metadata = {
+    type: "object",
+    properties: metadataProperties,
+    required: ["purpose", "targetDescription", "observationId"],
+    additionalProperties: false
+  };
+  const openAppMetadata = {
+    type: "object",
+    properties: baseMetadataProperties,
+    required: ["purpose", "targetDescription", "observationId"],
     additionalProperties: false
   };
   const actionObject = (
@@ -819,6 +850,17 @@ export function buildDhdDynamicTools(): DynamicToolSpec[] {
       )
     ]
   };
+  const observeProperties: Record<string, unknown> = {
+    expectedPackageName: { type: "string", minLength: 1 },
+    purpose: { type: "string", minLength: 1, maxLength: 240 },
+    targetDescription: { type: "string", minLength: 1, maxLength: 240 }
+  };
+  if (enableGuardRegions) {
+    observeProperties.guardRegions = { type: "array", maxItems: 8, items: guardRegion };
+  }
+  const guardRegionGuidance = enableGuardRegions
+    ? " When enabled, provide the same guardRegions to dhd_observe and the following action only when the target must remain unchanged."
+    : "";
 
   return [
     dynamicTool(
@@ -842,25 +884,21 @@ export function buildDhdDynamicTools(): DynamicToolSpec[] {
     ),
     dynamicTool(
       "dhd_observe",
-      "Capture the current physical Android display and return a screenshot for visual context. Include a concise purpose when this observation should appear in the user's activity timeline. Screen changes do not block a subsequent typed action.",
+      `Capture the current physical Android display and return a screenshot for visual context. Use this before every phone action and copy the returned observation.id into the action metadata.observationId.${guardRegionGuidance}`,
       {
         type: "object",
-        properties: {
-          expectedPackageName: { type: "string", minLength: 1 },
-          purpose: { type: "string", minLength: 1, maxLength: 240 },
-          targetDescription: { type: "string", minLength: 1, maxLength: 240 }
-        },
+        properties: observeProperties,
         additionalProperties: false
       }
     ),
     dynamicTool(
       "dhd_open_app",
-      "Open one launchable Android app and return a post-action screenshot. In restricted mode the app must be on the explicit allowlist; Full Access lets you use any launchable app. Include a meaningful user-facing purpose and concrete target description.",
+      "Open one launchable Android app and return the actual post-action observation. Observe first and copy its observation.id into metadata.observationId. In restricted mode the app must be on the explicit allowlist; Full Access lets you use any launchable app. Include a meaningful user-facing purpose and concrete target description.",
       {
         type: "object",
         properties: {
           packageName: { type: "string", minLength: 1 },
-          metadata
+          metadata: openAppMetadata
         },
         required: ["packageName", "metadata"],
         additionalProperties: false
@@ -868,7 +906,7 @@ export function buildDhdDynamicTools(): DynamicToolSpec[] {
     ),
     dynamicTool(
       "dhd_execute",
-      "Execute one typed phone action with metadata.purpose, then return a post-action screenshot. Never use shell commands. Actions are not rejected because the screenshot changed.",
+      `Execute one typed phone action using the observation identified by metadata.observationId, then return the actual post-action observation.${guardRegionGuidance} If post-action observation fails, treat the action as unknown and observe before retrying. Never use shell commands.`,
       {
         type: "object",
         properties: { action },

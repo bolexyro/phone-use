@@ -801,10 +801,8 @@ class DevBridgeServer(
                 targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { expectedPackage },
             )
         }
-        // Screenshots are still returned for the model's visual context, but
-        // the assistant path no longer fingerprints guard regions or rejects
-        // actions because the screen changed between calls.
-        when (val captured = captureWithRetry(expectedPackage, emptyList())) {
+        val guardRegions = parseGuardRegions(json.optJSONArray("guardRegions"))
+        when (val captured = captureWithRetry(expectedPackage, guardRegions)) {
             is ObservationCaptureResult.Failed -> write(writer, errorResponse(requestId, captured.message))
             is ObservationCaptureResult.Succeeded -> {
                 remember(captured.snapshot)
@@ -861,13 +859,11 @@ class DevBridgeServer(
         } else if (action !is WaitAction) {
             delay(POST_ACTION_SETTLE_DELAY_MS)
         }
-        val expectedPackage = when (action) {
-            is OpenAppAction -> action.packageName
-            else -> observation.packageName
-        }
-        when (val captured = captureWithRetry(expectedPackage, emptyList())) {
+        // A successful action may intentionally navigate to another activity,
+        // system surface, or package. Capture what is actually on screen and
+        // let the model decide what the new observation means.
+        when (val captured = captureWithRetry(null, emptyList())) {
             is ObservationCaptureResult.Failed -> {
-                coordinator.stop("Post-action observation failed: ${captured.message}")
                 write(
                     writer,
                     JSONObject()
@@ -876,8 +872,9 @@ class DevBridgeServer(
                         .put("ok", false)
                         .put("action", wireActionName(action))
                         .put("outcome", "unknown")
+                        .put("executed", "unknown")
                         .put("code", "POST_OBSERVATION_FAILED")
-                        .put("message", "The action may have run, but the phone could not produce a post-action screenshot: ${captured.message}"),
+                        .put("message", "The action may have run, but the phone could not produce a post-action observation: ${captured.message}"),
                 )
             }
 
@@ -971,8 +968,8 @@ class DevBridgeServer(
     private fun parseMetadata(json: JSONObject?): ActionMetadata {
         require(json != null) { "action.metadata is required." }
         val purpose = json.optString("purpose").trim()
-        // observationId and guardRegions remain accepted for compatibility with
-        // older callers, but are optional while freshness enforcement is off.
+        // The companion supplies observationId for the pre-action structural
+        // comparison and may supply guardRegions for strict visual checking.
         val observationId = json.optString("observationId").trim().take(MAX_TEXT_CHARS)
         val targetDescription = json.optString("targetDescription").trim()
         require(purpose.isNotEmpty() && purpose.length <= MAX_TEXT_CHARS) {
@@ -1105,7 +1102,7 @@ class DevBridgeServer(
         }
 
         delay(POST_ACTION_SETTLE_DELAY_MS)
-        val afterTap = observationProvider.capture(expectedPackageName = request.packageName)
+        val afterTap = captureWithRetry(null, emptyList())
         when (afterTap) {
             is ObservationCaptureResult.Failed -> {
                 failSession(writer, request, "Tap completed, but the post-action observation failed: ${afterTap.message}")

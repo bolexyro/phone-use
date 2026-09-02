@@ -37,12 +37,11 @@ enum class DenialCode {
  */
 class PolicyEngine(
     /**
-     * Screenshot/observation freshness is intentionally off for the first
-     * phone-assistant prototype. Keep the switch so the guard layer can be
-     * re-enabled without changing the policy API when its false-positive
-     * behavior is ready.
+     * Structural observation freshness is the default safety check. Optional
+     * guard-region fingerprints provide the stricter visual check for actions
+     * that need a particular part of the screen to remain unchanged.
      */
-    private val enforceObservationFreshness: Boolean = false,
+    private val enforceObservationFreshness: Boolean = true,
 ) {
     fun evaluate(action: PhoneAction, context: PolicyContext): PolicyDecision {
         val metadataError = validateMetadata(action.metadata)

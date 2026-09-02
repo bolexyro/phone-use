@@ -13,101 +13,152 @@ const packageNameSchema = z
   .max(255)
   .regex(/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/);
 
-const actionMetadataSchema = z
+export const GUARD_REGIONS_FEATURE_FLAG = "PHONE_ASSISTANT_ENABLE_GUARD_REGIONS";
+
+const ENABLED_FEATURE_VALUES = new Set(["1", "true", "yes", "on"]);
+
+export function isGuardRegionsEnabled(
+  environment: NodeJS.ProcessEnv = process.env
+): boolean {
+  return ENABLED_FEATURE_VALUES.has(
+    (environment[GUARD_REGIONS_FEATURE_FLAG] ?? "").trim().toLowerCase()
+  );
+}
+
+const guardRegionSchema = z
   .object({
-    purpose: z.string().min(1).max(240),
-    targetDescription: z.string().min(1).max(240)
+    left: z.number().int().min(0),
+    top: z.number().int().min(0),
+    right: z.number().int().min(0),
+    bottom: z.number().int().min(0)
   })
   .strict();
+
+function createActionMetadataSchema(enableGuardRegions: boolean) {
+  return z
+    .object({
+      purpose: z.string().min(1).max(240),
+      targetDescription: z.string().min(1).max(240),
+      observationId: z.string().min(1).max(240),
+      ...(enableGuardRegions
+        ? { guardRegions: z.array(guardRegionSchema).max(8).optional().default([]) }
+        : {})
+    })
+    .strict();
+}
+
+export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegionsEnabled()) {
+  const actionMetadataSchema = createActionMetadataSchema(enableGuardRegions);
+  const openAppMetadataSchema = createActionMetadataSchema(false);
+
+  const dhdOpenAppInputSchema = z
+    .object({
+      packageName: packageNameSchema,
+      metadata: openAppMetadataSchema
+    })
+    .strict();
+
+  const dhdListAllowedAppsInputSchema = z
+    .object({
+      includeAll: z.boolean().optional().default(false)
+    })
+    .strict();
+
+  const dhdBrowseAppInputSchema = z
+    .object({
+      query: z.string().trim().min(1).max(120)
+    })
+    .strict();
+
+  const dhdExecuteActionSchema = z.discriminatedUnion("type", [
+    z
+      .object({
+        type: z.literal("tap"),
+        x: z.number().int().min(0),
+        y: z.number().int().min(0),
+        metadata: actionMetadataSchema
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("type"),
+        text: z.string().min(1).max(4096),
+        metadata: actionMetadataSchema
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("swipe"),
+        startX: z.number().int().min(0),
+        startY: z.number().int().min(0),
+        endX: z.number().int().min(0),
+        endY: z.number().int().min(0),
+        durationMs: z.number().int().min(1).max(10_000).optional(),
+        metadata: actionMetadataSchema
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("scroll"),
+        direction: z.enum(["up", "down", "left", "right"]),
+        amount: z.enum(["small", "medium", "large"]),
+        metadata: actionMetadataSchema
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("back"),
+        metadata: actionMetadataSchema
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("keypress"),
+        key: z.enum(["BACK", "HOME", "ENTER", "DELETE"]),
+        metadata: actionMetadataSchema
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("wait"),
+        durationMs: z.number().int().min(1).max(30_000),
+        metadata: actionMetadataSchema
+      })
+      .strict()
+  ]);
+
+  const dhdObserveInputSchema = z
+    .object({
+      expectedPackageName: packageNameSchema.optional(),
+      purpose: z.string().min(1).max(240).optional(),
+      targetDescription: z.string().min(1).max(240).optional(),
+      ...(enableGuardRegions
+        ? { guardRegions: z.array(guardRegionSchema).max(8).optional().default([]) }
+        : {})
+    })
+    .strict();
+
+  return {
+    dhdOpenAppInputSchema,
+    dhdListAllowedAppsInputSchema,
+    dhdBrowseAppInputSchema,
+    dhdExecuteActionSchema,
+    dhdObserveInputSchema
+  };
+}
+
+const defaultDhdToolSchemas = createDhdToolSchemas(isGuardRegionsEnabled());
 
 /**
  * This is deliberately a phone-owned action contract. It does not include a
  * shell command, package-manager operation, or arbitrary code payload.
  * `metadata.purpose` is user-visible in the phone timeline/notification.
  */
-export const dhdOpenAppInputSchema = z
-  .object({
-    packageName: packageNameSchema,
-    metadata: actionMetadataSchema
-  })
-  .strict();
-
-export const dhdListAllowedAppsInputSchema = z
-  .object({
-    includeAll: z.boolean().optional().default(false)
-  })
-  .strict();
-
-export const dhdBrowseAppInputSchema = z
-  .object({
-    query: z.string().trim().min(1).max(120)
-  })
-  .strict();
-
-export const dhdExecuteActionSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("tap"),
-      x: z.number().int().min(0),
-      y: z.number().int().min(0),
-      metadata: actionMetadataSchema
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("type"),
-      text: z.string().min(1).max(4096),
-      metadata: actionMetadataSchema
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("swipe"),
-      startX: z.number().int().min(0),
-      startY: z.number().int().min(0),
-      endX: z.number().int().min(0),
-      endY: z.number().int().min(0),
-      durationMs: z.number().int().min(1).max(10_000).optional(),
-      metadata: actionMetadataSchema
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("scroll"),
-      direction: z.enum(["up", "down", "left", "right"]),
-      amount: z.enum(["small", "medium", "large"]),
-      metadata: actionMetadataSchema
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("back"),
-      metadata: actionMetadataSchema
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("keypress"),
-      key: z.enum(["BACK", "HOME", "ENTER", "DELETE"]),
-      metadata: actionMetadataSchema
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("wait"),
-      durationMs: z.number().int().min(1).max(30_000),
-      metadata: actionMetadataSchema
-    })
-    .strict()
-]);
-
-export const dhdObserveInputSchema = z
-  .object({
-    expectedPackageName: packageNameSchema.optional(),
-    purpose: z.string().min(1).max(240).optional(),
-    targetDescription: z.string().min(1).max(240).optional()
-  })
-  .strict();
+export const dhdOpenAppInputSchema = defaultDhdToolSchemas.dhdOpenAppInputSchema;
+export const dhdListAllowedAppsInputSchema = defaultDhdToolSchemas.dhdListAllowedAppsInputSchema;
+export const dhdBrowseAppInputSchema = defaultDhdToolSchemas.dhdBrowseAppInputSchema;
+export const dhdExecuteActionSchema = defaultDhdToolSchemas.dhdExecuteActionSchema;
+export const dhdObserveInputSchema = defaultDhdToolSchemas.dhdObserveInputSchema;
 
 export const DHD_TOOL_NAMES = [
   "dhd_list_allowed_apps",
@@ -183,10 +234,11 @@ export async function invokeDhdTool(
   name: string,
   input: unknown
 ): Promise<PhoneAssistantToolResult> {
+  const schemas = createDhdToolSchemas();
   switch (name) {
     case "dhd_list_allowed_apps":
       return safely(() => {
-        const parsed = parseInput(dhdListAllowedAppsInputSchema, input);
+        const parsed = parseInput(schemas.dhdListAllowedAppsInputSchema, input);
         return requestBridge({
           type: "allowed_apps",
           requestId: randomUUID(),
@@ -195,7 +247,7 @@ export async function invokeDhdTool(
       });
     case "dhd_browse_app":
       return safely(() => {
-        const parsed = parseInput(dhdBrowseAppInputSchema, input);
+        const parsed = parseInput(schemas.dhdBrowseAppInputSchema, input);
         return requestBridge({
           type: "browse_apps",
           requestId: randomUUID(),
@@ -204,18 +256,23 @@ export async function invokeDhdTool(
       });
     case "dhd_observe":
       return safely(() => {
-        const parsed = parseInput(dhdObserveInputSchema, input);
+        const parsed = parseInput(schemas.dhdObserveInputSchema, input);
+        const parsedGuardRegions = (parsed as Record<string, unknown>).guardRegions;
+        const guardRegions = Array.isArray(parsedGuardRegions) && parsedGuardRegions.length > 0
+          ? parsedGuardRegions
+          : undefined;
         return requestBridge({
           type: "observe",
           requestId: randomUUID(),
           ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {}),
           ...(parsed.purpose ? { purpose: parsed.purpose } : {}),
-          ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {})
+          ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {}),
+          ...(guardRegions ? { guardRegions } : {})
         });
       });
     case "dhd_open_app":
       return safely(() => {
-        const parsed = parseInput(dhdOpenAppInputSchema, input);
+        const parsed = parseInput(schemas.dhdOpenAppInputSchema, input);
         return requestBridge({
           type: "execute_action",
           requestId: randomUUID(),
@@ -228,7 +285,7 @@ export async function invokeDhdTool(
       });
     case "dhd_execute":
       return safely(() => {
-        const action = parseInput(dhdExecuteActionSchema, readRecord(input).action);
+        const action = parseInput(schemas.dhdExecuteActionSchema, readRecord(input).action);
         return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
       });
     case "dhd_request_attention":
@@ -251,13 +308,18 @@ export function createDhdMcpServer(
   serverName = "dhd",
   version = "0.1.0"
 ): McpServer {
+  const enableGuardRegions = isGuardRegionsEnabled();
+  const schemas = createDhdToolSchemas(enableGuardRegions);
+  const guardRegionGuidance = enableGuardRegions
+    ? " When enabled, provide the same guardRegions to dhd_observe and the following action only when the target must remain unchanged."
+    : "";
   const server = new McpServer({ name: serverName, version });
 
   server.registerTool(
     "dhd_list_allowed_apps",
     {
       description: "Check the phone's app-access mode. By default, keep the result compact: return the explicit allowlist in restricted mode or Full Access capability metadata. Set includeAll to true only when Full Access is active and you need the complete launchable app list.",
-      inputSchema: dhdListAllowedAppsInputSchema.shape
+      inputSchema: schemas.dhdListAllowedAppsInputSchema.shape
     },
     async (input) => invokeDhdTool("dhd_list_allowed_apps", input)
   );
@@ -266,7 +328,7 @@ export function createDhdMcpServer(
     "dhd_browse_app",
     {
       description: "Search launchable phone apps by label or package name. Return matching app labels and package names without opening an app or changing permissions. In restricted mode, results are limited to the explicit allowlist.",
-      inputSchema: dhdBrowseAppInputSchema.shape
+      inputSchema: schemas.dhdBrowseAppInputSchema.shape
     },
     async (input) => invokeDhdTool("dhd_browse_app", input)
   );
@@ -274,8 +336,8 @@ export function createDhdMcpServer(
   server.registerTool(
     "dhd_observe",
     {
-      description: "Capture the current physical phone display as a PNG for visual context. Use it to choose the next typed action;",
-      inputSchema: dhdObserveInputSchema.shape
+      description: `Capture the current physical phone display as a PNG for visual context. Use this before every phone action; copy the returned observation.id into the action metadata.observationId.${guardRegionGuidance}`,
+      inputSchema: schemas.dhdObserveInputSchema.shape
     },
     async (input) => invokeDhdTool("dhd_observe", input)
   );
@@ -283,8 +345,8 @@ export function createDhdMcpServer(
   server.registerTool(
     "dhd_open_app",
     {
-      description: "Open one launchable Android app and return a post-action screenshot. In restricted mode the app must be on the explicit allowlist; Full Access lets you use any launchable app. Include a meaningful user-facing purpose and concrete target description.",
-      inputSchema: dhdOpenAppInputSchema.shape
+      description: "Open one launchable Android app and return the actual post-action observation. Observe first and copy its observation.id into metadata.observationId. In restricted mode the app must be on the explicit allowlist; Full Access lets you use any launchable app. Include a meaningful user-facing purpose and concrete target description.",
+      inputSchema: schemas.dhdOpenAppInputSchema.shape
     },
     async (input) => invokeDhdTool("dhd_open_app", input)
   );
@@ -292,8 +354,8 @@ export function createDhdMcpServer(
   server.registerTool(
     "dhd_execute",
     {
-      description: "Execute one typed phone interaction and return a post-action screenshot. Use tap, type, swipe, scroll, back, keypress, or wait. Include a meaningful user-facing purpose and concrete target description. Do not send shell commands.",
-      inputSchema: { action: dhdExecuteActionSchema }
+      description: `Execute one typed phone interaction and return the actual post-action observation. Observe first and copy its observation.id into metadata.observationId. Use tap, type, swipe, scroll, back, keypress, or wait.${guardRegionGuidance} If post-action observation fails, treat the action as unknown and observe before retrying. Do not send shell commands.`,
+      inputSchema: { action: schemas.dhdExecuteActionSchema }
     },
     async (input) => invokeDhdTool("dhd_execute", input)
   );

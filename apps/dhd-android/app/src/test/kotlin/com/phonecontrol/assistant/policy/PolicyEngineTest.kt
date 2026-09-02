@@ -11,7 +11,7 @@ import org.junit.Test
 
 class PolicyEngineTest {
     private val engine = PolicyEngine(enforceObservationFreshness = true)
-    private val relaxedEngine = PolicyEngine()
+    private val relaxedEngine = PolicyEngine(enforceObservationFreshness = false)
     private val observation = ObservationSnapshot(
         id = "obs-1",
         packageName = "com.example.shop",

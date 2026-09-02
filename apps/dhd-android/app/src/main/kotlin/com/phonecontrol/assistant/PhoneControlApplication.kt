@@ -36,15 +36,15 @@ class PhoneControlApplication : Application() {
         conversationStore = ConversationStore(this)
         sessionCoordinator = SessionCoordinator(
             enabledPackagesProvider = { appPermissionRepository.enabledPackages() },
-            // Screenshot freshness/guard checks are deliberately deferred in
-            // the first assistant prototype and can be re-enabled here later.
-            policyEngine = PolicyEngine(enforceObservationFreshness = false),
+            // Structural observation checks are always enabled; guard-region
+            // fingerprints add the optional stricter visual check per action.
+            policyEngine = PolicyEngine(enforceObservationFreshness = true),
             transport = ShizukuActionTransport(
                 controller = shizukuController,
                 context = this,
                 observationProvider = observationProvider,
                 processRunner = shizukuProcessRunner,
-                enforceObservationFreshness = false,
+                enforceObservationFreshness = true,
             ),
             conversationStore = conversationStore,
             phoneActionsReadyProvider = { shizukuController.status.value.privilegedApiReady },

@@ -26,7 +26,8 @@ sealed interface ObservationCaptureResult {
  *
  * This is intentionally a small v0 observer. It does not claim that every
  * Samsung build exposes shell screencap or a parseable focused window; either
- * failure is returned to the caller and the action is not dispatched.
+ * failure is returned to the caller, which decides whether an action may run or
+ * whether an already-dispatched action has an unknown outcome.
  */
 class ShizukuObservationProvider(
     private val context: Context,
