@@ -36,10 +36,6 @@ import {
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const BRIDGE_POLL_TIMEOUT_MS = 5_000;
-// Phone turns can legitimately contain several observe/action cycles. Keep a
-// bounded default that is long enough for those cycles without allowing a
-// disconnected or wedged App Server process to run forever.
-const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_AGENT_FEEDBACK_CHARS = 4_000;
 const MAX_STEER_CHARS = 4_000;
@@ -188,8 +184,6 @@ export class CodexAppServerClient {
   // thread reuse or resume.
   private hasCurrentDhdThread = false;
   private activeTurnId: string | null = null;
-  private turnStartedAt: number | null = null;
-  private lastServerEvent: string | null = null;
   private activeTiming: PhaseTimer | null = null;
   private userMessageLogged = false;
 
@@ -337,7 +331,6 @@ export class CodexAppServerClient {
         };
       });
       try {
-        this.turnStartedAt = Date.now();
         logger.log("turn/start:start", `threadId=${threadId}`);
         const turnStartResponse = await this.request("turn/start", {
           threadId,
@@ -347,8 +340,8 @@ export class CodexAppServerClient {
           input: [{ type: "text", text: phoneRequest }],
         });
         // `turn/start` returns the initial turn object. The notification is
-        // also tracked below, but capturing this response makes cancellation
-        // reliable even if the notification arrives after a timeout callback.
+        // also tracked below, but capturing this response makes user-driven
+        // cancellation reliable even if the notification arrives later.
         this.activeTurnId =
           extractTurnId(turnStartResponse.result) || this.activeTurnId;
         this.logUserMessagePhaseFromValue(
@@ -363,34 +356,14 @@ export class CodexAppServerClient {
         this.turnCompletion = null;
         throw error;
       }
-      const result = await withTimeout(
-        completion,
-        parseTurnTimeout(process.env.PHONE_ASSISTANT_TURN_TIMEOUT_MS),
-        () => {
-          const elapsedMs = this.turnStartedAt
-            ? Date.now() - this.turnStartedAt
-            : undefined;
-          const lastEvent =
-            this.lastServerEvent || "no App Server event received";
-          logger.log(
-            "turn:timeout",
-            `lastEvent=${lastEvent.replaceAll(" ", "_")}`,
-          );
-          console.error(
-            `[codex-app-server] turn watchdog expired after ${elapsedMs ?? "?"}ms; ` +
-              `last event: ${lastEvent}`,
-          );
-          this.interruptTurn(threadId);
-          return new Error(
-            `Codex App Server turn timed out after ${elapsedMs ?? "?"}ms while waiting for turn/completed ` +
-              `(last event: ${lastEvent}).`,
-          );
-        },
-      );
+      // A phone turn may legitimately run for longer than ten minutes. Leave
+      // completion under App Server/user control; only individual RPC and
+      // bridge requests retain bounded transport timeouts.
+      const result = await completion;
       this.hasCurrentDhdThread = true;
       return result;
     } catch (error) {
-      // A failed/timeout turn may still be active inside App Server. Restart
+      // A failed/interrupted turn may still be active inside App Server. Restart
       // the connection on the next request so a bad turn cannot poison the
       // persistent connection or make later requests fail mysteriously.
       await this.stopProcess();
@@ -398,8 +371,6 @@ export class CodexAppServerClient {
     } finally {
       this.activeThreadId = null;
       this.activeTurnId = null;
-      this.turnStartedAt = null;
-      this.lastServerEvent = null;
       this.activeTiming = null;
       this.userMessageLogged = false;
       if (this.turnCompletion) {
@@ -589,11 +560,9 @@ export class CodexAppServerClient {
 
     const completion = this.turnCompletion;
     if (!completion || !message.method) return;
-    this.lastServerEvent = describeServerEvent(message);
     logServerNotification(message);
     if (message.method === "turn/started") {
       this.activeTurnId = extractTurnId(message.params) || this.activeTurnId;
-      this.turnStartedAt = this.turnStartedAt || Date.now();
       this.activeTiming?.log(
         "turn/started",
         `turnId=${this.activeTurnId ?? "?"}`,
@@ -847,21 +816,6 @@ export class CodexAppServerClient {
     this.pending.clear();
     this.turnCompletion?.reject(error);
     this.turnCompletion = null;
-  }
-
-  private interruptTurn(threadId: string): void {
-    try {
-      const turnId = this.activeTurnId;
-      this.send({
-        method: "turn/interrupt",
-        id: `interrupt-${this.nextId++}`,
-        params: { threadId, ...(turnId ? { turnId } : {}) },
-      });
-    } catch (error) {
-      console.error(
-        `[codex-app-server] could not interrupt timed-out turn: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
   }
 
   private async stopProcess(): Promise<void> {
@@ -1279,31 +1233,6 @@ function logServerNotification(message: JsonRpcMessage): void {
   console.error(
     `[codex-app-server] ${message.method} ${type}${tool}${status}${duration}`,
   );
-}
-
-/**
- * Keep timeout diagnostics useful without logging tool arguments, screenshots,
- * or model text. App Server notifications are intentionally summarized by
- * method plus the small lifecycle fields that identify what was last active.
- */
-function describeServerEvent(message: JsonRpcMessage): string {
-  const method = message.method || "unknown event";
-  const params = extractRecord(message.params);
-  const turn = extractRecord(params?.turn);
-  if (method.startsWith("turn/") && turn) {
-    const status = typeof turn.status === "string" ? ` (${turn.status})` : "";
-    return `${method}${status}`;
-  }
-  const item = extractRecord(params?.item);
-  if (item) {
-    const type = typeof item.type === "string" ? item.type : "item";
-    const tool = typeof item.tool === "string" ? ` ${item.tool}` : "";
-    const status = typeof item.status === "string" ? ` (${item.status})` : "";
-    const duration =
-      typeof item.durationMs === "number" ? ` [${item.durationMs}ms]` : "";
-    return `${method} ${type}${tool}${status}${duration}`;
-  }
-  return method;
 }
 
 interface ActiveCodexTurn {
@@ -1975,22 +1904,6 @@ function normalizeCodexEffort(value: string | undefined): string {
     : DEFAULT_CODEX_EFFORT;
 }
 
-function parseTurnTimeout(value: string | undefined): number {
-  if (!value?.trim()) return DEFAULT_TURN_TIMEOUT_MS;
-  if (!/^\d+$/.test(value.trim())) {
-    throw new Error(
-      "PHONE_ASSISTANT_TURN_TIMEOUT_MS must be a positive integer.",
-    );
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 5_000 || parsed > 3_600_000) {
-    throw new Error(
-      "PHONE_ASSISTANT_TURN_TIMEOUT_MS must be between 5000 and 3600000.",
-    );
-  }
-  return parsed;
-}
-
 function quoteWindowsCommand(command: string): string {
   if (
     /\s|[&|<>^]/.test(command) &&
@@ -2003,26 +1916,6 @@ function quoteWindowsCommand(command: string): string {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function withTimeout<T>(
-  promise: Promise<T>,
-  milliseconds: number,
-  onTimeout: () => Error,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(onTimeout()), milliseconds);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
 }
 
 const isMainModule =

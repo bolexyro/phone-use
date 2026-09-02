@@ -302,11 +302,11 @@ Set `PHONE_ASSISTANT_CODEX_BIN` when the Codex executable is not available
 through the desktop PATH. Set `PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST=false`
 only when intentionally testing a configuration without the bundled host; phone
 turns will not be able to execute dynamic actions in that mode.
-Phone turns have a bounded ten-minute watchdog by default because a request may
-need several observe/action cycles. Override it for a development run with
-`PHONE_ASSISTANT_TURN_TIMEOUT_MS` (5 seconds to 1 hour); when it expires, the
-companion sends `turn/interrupt` with the active thread and turn ids and reports
-the last App Server lifecycle event it saw.
+Phone turns do not have a whole-turn watchdog. A task may run for longer than
+ten minutes and remains active until Codex reaches a terminal state or the user
+stops the phone session. Individual App Server RPCs and phone-bridge polls
+retain bounded transport timeouts so disconnected requests can recover; those
+transport limits do not terminate a healthy turn.
 
 While a turn is running, the Android composer changes to **Steer DHD**. Sending
 text there appends one instruction to the same in-flight App Server turn; it does
