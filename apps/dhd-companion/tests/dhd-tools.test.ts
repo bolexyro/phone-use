@@ -6,6 +6,7 @@ import {
   DHD_TOOL_NAMES,
   createDhdToolSchemas,
   dhdBrowseAppInputSchema,
+  dhdGetForegroundAppInputSchema,
   dhdExecuteActionSchema,
   dhdExecuteSequenceInputSchema,
   dhdListAllowedAppsInputSchema,
@@ -14,6 +15,7 @@ import {
   isGuardRegionsEnabled
 } from "../src/dhd-tools.js";
 import { buildDhdDynamicTools, toDynamicToolResponse } from "../src/assistant-companion.js";
+import { dhdToolDescription } from "../src/dhd-tool-contract.js";
 
 const metadata = {
   purpose: "Searching for iced tea",
@@ -32,12 +34,14 @@ describe("DHD phone tool contract", () => {
     const dynamicNames = buildDhdDynamicTools().map((tool) => String(tool.name));
     const listTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_list_allowed_apps"));
     const browseTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_browse_app"));
+    const foregroundTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_get_foreground_app"));
     const observeTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_observe"));
     const openAppTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_open_app"));
 
     expect(DHD_TOOL_NAMES).toEqual([
       "dhd_list_allowed_apps",
       "dhd_browse_app",
+      "dhd_get_foreground_app",
       "dhd_observe",
       "dhd_open_app",
       "dhd_execute",
@@ -45,12 +49,19 @@ describe("DHD phone tool contract", () => {
       "dhd_request_attention"
     ]);
     expect(dynamicNames).toEqual([...DHD_TOOL_NAMES]);
+    const dynamicTools = buildDhdDynamicTools();
+    for (const name of DHD_TOOL_NAMES) {
+      const tool = record(dynamicTools.find((candidate) => candidate.name === name));
+      expect(tool.description).toBe(dhdToolDescription(name));
+    }
     expect(dynamicNames.some((name) => name.startsWith("phone_"))).toBe(false);
     expect(String(listTool.description)).toContain("Full Access");
     expect(String(listTool.description)).toContain("includeAll");
     expect(record(listTool.inputSchema).properties).toHaveProperty("includeAll");
     expect(String(browseTool.description)).toContain("package names");
     expect(record(browseTool.inputSchema).properties).toHaveProperty("query");
+    expect(String(foregroundTool.description)).toContain("read-only");
+    expect(record(foregroundTool.inputSchema).properties).toEqual({});
     expect(record(observeTool.inputSchema).properties).not.toHaveProperty("guardRegions");
     expect(String(openAppTool.description)).toContain("Full Access");
   });
@@ -111,6 +122,8 @@ describe("DHD phone tool contract", () => {
     expect(dhdListAllowedAppsInputSchema.parse({ includeAll: true })).toEqual({ includeAll: true });
     expect(dhdBrowseAppInputSchema.parse({ query: "  Spotify  " })).toEqual({ query: "Spotify" });
     expect(dhdBrowseAppInputSchema.safeParse({ query: " " }).success).toBe(false);
+    expect(dhdGetForegroundAppInputSchema.parse({})).toEqual({});
+    expect(dhdGetForegroundAppInputSchema.safeParse({ unexpected: true }).success).toBe(false);
     expect(dhdObserveInputSchema.safeParse({
       guardRegions: [{ left: 10, top: 20, right: 100, bottom: 120 }]
     }).success).toBe(false);
@@ -141,6 +154,10 @@ describe("DHD phone tool contract", () => {
     expect(record(enabledOpenAppMetadata).properties).not.toHaveProperty("guardRegions");
     expect(enabledSequenceMetadata.properties).toHaveProperty("guardRegions");
     expect(String(enabledObserve.description)).toContain("guardRegions");
+    for (const name of DHD_TOOL_NAMES) {
+      const tool = record(enabledTools.find((candidate) => candidate.name === name));
+      expect(tool.description).toBe(dhdToolDescription(name, true));
+    }
 
     const region = { left: 0, top: 0, right: 100, bottom: 100 };
     const enabledSchemas = createDhdToolSchemas(true);

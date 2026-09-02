@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -8,15 +8,30 @@ import * as readline from "node:readline";
 
 import {
   invokeDhdTool,
-  isGuardRegionsEnabled,
-  type PhoneAssistantToolResult
+  type PhoneAssistantToolResult,
 } from "./dhd-tools.js";
+import {
+  DHD_ACTION_TYPES,
+  DHD_KEYPRESS_KEYS,
+  DHD_MAX_GUARD_REGIONS,
+  DHD_MAX_SEQUENCE_ACTIONS,
+  DHD_MAX_SWIPE_DURATION_MS,
+  DHD_MAX_TEXT_CHARS,
+  DHD_MAX_TYPE_TEXT_CHARS,
+  DHD_MAX_WAIT_DURATION_MS,
+  DHD_SCROLL_AMOUNTS,
+  DHD_SCROLL_DIRECTIONS,
+  dhdToolDescription,
+  isDhdToolName,
+  isGuardRegionsEnabled,
+  type DhdToolName,
+} from "./dhd-tool-contract.js";
 import {
   bridgeHost,
   bridgePort,
   isLoopbackBridgeHost,
   requestBridge,
-  type BridgeMessage
+  type BridgeMessage,
 } from "./phone-assistant-bridge.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
@@ -51,7 +66,7 @@ const MINIMAL_CODEX_CONFIG_OVERRIDES = [
   "features.tool_suggest=false",
   "features.unified_exec=false",
   "features.view_image=false",
-  "features.workspace_dependencies=false"
+  "features.workspace_dependencies=false",
 ];
 const PREWARM_ATTEMPTS = 2;
 const PREWARM_RETRY_DELAY_MS = 500;
@@ -59,7 +74,13 @@ const PREWARM_RETRY_DELAY_MS = 500;
 // do not depend on the user's interactive Codex chat or global config.
 const DEFAULT_CODEX_MODEL = "gpt-5.6-luna";
 const DEFAULT_CODEX_EFFORT = "max";
-const CODEX_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const CODEX_REASONING_EFFORTS = new Set([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 type JsonRpcId = number | string;
 
 interface JsonRpcMessage {
@@ -90,19 +111,21 @@ class PhaseTimer {
     const elapsedMs = Math.round(performance.now() - this.startedAt);
     const suffix = details ? ` ${details}` : "";
     console.error(
-      `[dhd-timing] scope=${this.scope} phase=${phase} tsMs=${Date.now()} elapsedMs=${elapsedMs}${suffix}`
+      `[dhd-timing] scope=${this.scope} phase=${phase} tsMs=${Date.now()} elapsedMs=${elapsedMs}${suffix}`,
     );
   }
 }
 
 function logCompanionPhase(phase: string, details?: string): void {
   const suffix = details ? ` ${details}` : "";
-  console.error(`[dhd-timing] scope=companion phase=${phase} tsMs=${Date.now()}${suffix}`);
+  console.error(
+    `[dhd-timing] scope=companion phase=${phase} tsMs=${Date.now()}${suffix}`,
+  );
 }
 
 function debugTimingEnabled(): boolean {
   return ["1", "true", "yes", "on"].includes(
-    (process.env.PHONE_ASSISTANT_DEBUG_TIMING ?? "").trim().toLowerCase()
+    (process.env.PHONE_ASSISTANT_DEBUG_TIMING ?? "").trim().toLowerCase(),
   );
 }
 
@@ -177,7 +200,9 @@ export class CodexAppServerClient {
 
   /** True when the active thread and turn ids are available for steering. */
   get canSteer(): boolean {
-    return this.isTurnInFlight && Boolean(this.activeThreadId && this.activeTurnId);
+    return (
+      this.isTurnInFlight && Boolean(this.activeThreadId && this.activeTurnId)
+    );
   }
 
   /**
@@ -194,7 +219,10 @@ export class CodexAppServerClient {
     const logger = timing ?? new PhaseTimer("codex-connection");
     this.startPromise = (async () => {
       if (this.child) await this.stopProcess();
-      logger.log("spawn:start", `cwd=${this.runtimeCwd} codexHome=${this.codexHome}`);
+      logger.log(
+        "spawn:start",
+        `cwd=${this.runtimeCwd} codexHome=${this.codexHome}`,
+      );
       this.startProcess();
       logger.log("spawn:complete", `pid=${this.child?.pid ?? "?"}`);
       logger.log("initialize:start");
@@ -203,9 +231,9 @@ export class CodexAppServerClient {
           clientInfo: {
             name: "dhd-phone-assistant",
             title: "DHD phone assistant",
-            version: "0.1.0"
+            version: "0.1.0",
           },
-          capabilities: { experimentalApi: true }
+          capabilities: { experimentalApi: true },
         });
         this.notify("initialized", {});
         this.initialized = true;
@@ -228,7 +256,7 @@ export class CodexAppServerClient {
     existingThreadId?: string,
     threadTitle?: string,
     timing?: PhaseTimer,
-    reasoningEffort: string = resolveCodexEffort()
+    reasoningEffort: string = resolveCodexEffort(),
   ): Promise<TurnResult> {
     const logger = timing ?? new PhaseTimer("codex-turn");
     this.activeTiming = logger;
@@ -239,35 +267,48 @@ export class CodexAppServerClient {
       const threadParams: Record<string, unknown> = {
         dynamicTools: buildDhdDynamicTools(),
         model: resolveCodexModel(),
-        cwd: this.runtimeCwd
+        cwd: this.runtimeCwd,
       };
 
       let threadId: string | null = null;
-      if (this.activeDhdThreadId && this.activeDhdThreadId !== existingThreadId) {
+      if (
+        this.activeDhdThreadId &&
+        this.activeDhdThreadId !== existingThreadId
+      ) {
         await this.unsubscribeThread(this.activeDhdThreadId, logger);
       }
-      const mayReuseExistingThread = Boolean(existingThreadId && this.hasCurrentDhdThread);
-      if (mayReuseExistingThread && existingThreadId && this.loadedThreadIds.has(existingThreadId)) {
+      const mayReuseExistingThread = Boolean(
+        existingThreadId && this.hasCurrentDhdThread,
+      );
+      if (
+        mayReuseExistingThread &&
+        existingThreadId &&
+        this.loadedThreadIds.has(existingThreadId)
+      ) {
         threadId = existingThreadId;
         logger.log("thread:reuse_loaded", `threadId=${threadId}`);
       } else if (mayReuseExistingThread && existingThreadId) {
         logger.log("resume:start", `threadId=${existingThreadId}`);
         const threadResponse = await this.request("thread/resume", {
           ...threadParams,
-          threadId: existingThreadId
+          threadId: existingThreadId,
         });
         threadId = extractThreadId(threadResponse.result) || existingThreadId;
         logger.log("resume:complete", `threadId=${threadId}`);
       } else {
         if (existingThreadId) {
-          logger.log("thread:fresh_contract", `replacingStoredThread=${existingThreadId}`);
+          logger.log(
+            "thread:fresh_contract",
+            `replacingStoredThread=${existingThreadId}`,
+          );
         }
         logger.log("thread/start:start");
         const threadResponse = await this.request("thread/start", threadParams);
         threadId = extractThreadId(threadResponse.result);
         logger.log("thread/start:complete", `threadId=${threadId ?? "?"}`);
       }
-      if (!threadId) throw new Error("Codex App Server did not return a thread id.");
+      if (!threadId)
+        throw new Error("Codex App Server did not return a thread id.");
       this.activeThreadId = threadId;
       this.activeDhdThreadId = threadId;
       this.loadedThreadIds.add(threadId);
@@ -277,10 +318,12 @@ export class CodexAppServerClient {
         try {
           await this.request("thread/name/set", {
             threadId,
-            name: threadTitle.trim().slice(0, 80)
+            name: threadTitle.trim().slice(0, 80),
           });
         } catch (error) {
-          console.error(`[codex-app-server] could not name thread: ${error instanceof Error ? error.message : String(error)}`);
+          console.error(
+            `[codex-app-server] could not name thread: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       }
 
@@ -290,7 +333,7 @@ export class CodexAppServerClient {
           reject,
           agentMessages: new Map(),
           nextAgentMessageOrder: 0,
-          phoneToolFailures: []
+          phoneToolFailures: [],
         };
       });
       try {
@@ -301,16 +344,22 @@ export class CodexAppServerClient {
           model: resolveCodexModel(),
           effort: normalizeCodexEffort(reasoningEffort),
           cwd: this.runtimeCwd,
-          input: [{ type: "text", text: phoneRequest }]
+          input: [{ type: "text", text: phoneRequest }],
         });
         // `turn/start` returns the initial turn object. The notification is
         // also tracked below, but capturing this response makes cancellation
         // reliable even if the notification arrives after a timeout callback.
-        this.activeTurnId = extractTurnId(turnStartResponse.result) || this.activeTurnId;
-        this.logUserMessagePhaseFromValue(turnStartResponse.result, "turn/start.response");
+        this.activeTurnId =
+          extractTurnId(turnStartResponse.result) || this.activeTurnId;
+        this.logUserMessagePhaseFromValue(
+          turnStartResponse.result,
+          "turn/start.response",
+        );
         logger.log("turn/start:complete", `turnId=${this.activeTurnId ?? "?"}`);
       } catch (error) {
-        this.turnCompletion?.reject(error instanceof Error ? error : new Error(String(error)));
+        this.turnCompletion?.reject(
+          error instanceof Error ? error : new Error(String(error)),
+        );
         this.turnCompletion = null;
         throw error;
       }
@@ -318,19 +367,25 @@ export class CodexAppServerClient {
         completion,
         parseTurnTimeout(process.env.PHONE_ASSISTANT_TURN_TIMEOUT_MS),
         () => {
-          const elapsedMs = this.turnStartedAt ? Date.now() - this.turnStartedAt : undefined;
-          const lastEvent = this.lastServerEvent || "no App Server event received";
-          logger.log("turn:timeout", `lastEvent=${lastEvent.replaceAll(" ", "_")}`);
+          const elapsedMs = this.turnStartedAt
+            ? Date.now() - this.turnStartedAt
+            : undefined;
+          const lastEvent =
+            this.lastServerEvent || "no App Server event received";
+          logger.log(
+            "turn:timeout",
+            `lastEvent=${lastEvent.replaceAll(" ", "_")}`,
+          );
           console.error(
             `[codex-app-server] turn watchdog expired after ${elapsedMs ?? "?"}ms; ` +
-            `last event: ${lastEvent}`
+              `last event: ${lastEvent}`,
           );
           this.interruptTurn(threadId);
           return new Error(
             `Codex App Server turn timed out after ${elapsedMs ?? "?"}ms while waiting for turn/completed ` +
-            `(last event: ${lastEvent}).`
+              `(last event: ${lastEvent}).`,
           );
-        }
+        },
       );
       this.hasCurrentDhdThread = true;
       return result;
@@ -348,7 +403,9 @@ export class CodexAppServerClient {
       this.activeTiming = null;
       this.userMessageLogged = false;
       if (this.turnCompletion) {
-        this.turnCompletion.reject(new Error("Codex App Server turn ended before completion."));
+        this.turnCompletion.reject(
+          new Error("Codex App Server turn ended before completion."),
+        );
         this.turnCompletion = null;
       }
     }
@@ -372,11 +429,13 @@ export class CodexAppServerClient {
     const response = await this.request("turn/steer", {
       threadId,
       input: [{ type: "text", text: safeText }],
-      expectedTurnId: turnId
+      expectedTurnId: turnId,
     });
     const acceptedTurnId = extractRecord(response.result)?.turnId;
     if (typeof acceptedTurnId === "string" && acceptedTurnId !== turnId) {
-      throw new Error(`Codex accepted the steer for unexpected turn ${acceptedTurnId}.`);
+      throw new Error(
+        `Codex accepted the steer for unexpected turn ${acceptedTurnId}.`,
+      );
     }
   }
 
@@ -387,19 +446,20 @@ export class CodexAppServerClient {
     const turnId = this.activeTurnId;
     await this.request("turn/interrupt", {
       threadId,
-      ...(turnId ? { turnId } : {})
+      ...(turnId ? { turnId } : {}),
     });
   }
 
   private startProcess(): void {
-    if (this.child) throw new Error("Codex App Server client is already running.");
+    if (this.child)
+      throw new Error("Codex App Server client is already running.");
     mkdirSync(this.codexHome, { recursive: true });
     mkdirSync(this.runtimeCwd, { recursive: true });
     const command = process.env.PHONE_ASSISTANT_CODEX_BIN?.trim() || "codex";
     const args = ["app-server", "--listen", "stdio://"];
     for (const override of [
       ...MINIMAL_CODEX_CONFIG_OVERRIDES,
-      ...disabledConfiguredMcpOverrides(this.codexHome)
+      ...disabledConfiguredMcpOverrides(this.codexHome),
     ]) {
       args.push("-c", override);
     }
@@ -409,26 +469,34 @@ export class CodexAppServerClient {
     // fail closed with `code-mode host is disabled`. An explicit `false` is
     // still useful for diagnostics or environments that provide their own
     // tool-routing policy.
-    if (process.env.PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST?.trim().toLowerCase() === "false") {
+    if (
+      process.env.PHONE_ASSISTANT_ENABLE_CODE_MODE_HOST?.trim().toLowerCase() ===
+      "false"
+    ) {
       args.push("--disable", "code_mode_host");
     } else {
       args.push("--enable", "code_mode_host");
     }
-    const windowsCommand = process.platform === "win32"
-      ? `${quoteWindowsCommand(command)} ${args.map(quoteWindowsCommand).join(" ")}`
-      : command;
-    const child = spawn(windowsCommand, process.platform === "win32" ? [] : args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: this.runtimeCwd,
-      // On Windows Codex may be exposed as a .ps1/.cmd shim rather than a
-      // native executable. Let cmd.exe resolve that user-installed command.
-      shell: process.platform === "win32",
-      windowsHide: true,
-      env: {
-        ...process.env,
-        CODEX_HOME: this.codexHome
-      }
-    });
+    const windowsCommand =
+      process.platform === "win32"
+        ? `${quoteWindowsCommand(command)} ${args.map(quoteWindowsCommand).join(" ")}`
+        : command;
+    const child = spawn(
+      windowsCommand,
+      process.platform === "win32" ? [] : args,
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        cwd: this.runtimeCwd,
+        // On Windows Codex may be exposed as a .ps1/.cmd shim rather than a
+        // native executable. Let cmd.exe resolve that user-installed command.
+        shell: process.platform === "win32",
+        windowsHide: true,
+        env: {
+          ...process.env,
+          CODEX_HOME: this.codexHome,
+        },
+      },
+    );
     this.child = child;
     this.reader = readline.createInterface({ input: child.stdout });
     this.reader.on("line", (line) => this.handleLine(line));
@@ -436,7 +504,11 @@ export class CodexAppServerClient {
       const text = chunk.toString("utf8").trim();
       if (text) console.error(`[codex-app-server] ${text}`);
     });
-    child.once("error", (error) => this.failPending(new Error(`Could not start Codex App Server: ${error.message}`)));
+    child.once("error", (error) =>
+      this.failPending(
+        new Error(`Could not start Codex App Server: ${error.message}`),
+      ),
+    );
     child.once("close", (code, signal) => {
       if (this.child === child) {
         this.child = null;
@@ -444,7 +516,11 @@ export class CodexAppServerClient {
         this.initialized = false;
         this.loadedThreadIds.clear();
       }
-      this.failPending(new Error(`Codex App Server exited before completing the turn (code=${code ?? "?"}, signal=${signal ?? "?"}).`));
+      this.failPending(
+        new Error(
+          `Codex App Server exited before completing the turn (code=${code ?? "?"}, signal=${signal ?? "?"}).`,
+        ),
+      );
     });
   }
 
@@ -455,7 +531,9 @@ export class CodexAppServerClient {
     try {
       message = JSON.parse(trimmed) as JsonRpcMessage;
     } catch {
-      console.error(`[codex-app-server] ignored non-JSON stdout: ${trimmed.slice(0, 240)}`);
+      console.error(
+        `[codex-app-server] ignored non-JSON stdout: ${trimmed.slice(0, 240)}`,
+      );
       return;
     }
 
@@ -474,7 +552,12 @@ export class CodexAppServerClient {
         this.pending.delete(message.id);
         clearTimeout(waiter.timer);
         if (message.error) {
-          waiter.reject(new Error(message.error.message || `Codex App Server request ${message.id} failed.`));
+          waiter.reject(
+            new Error(
+              message.error.message ||
+                `Codex App Server request ${message.id} failed.`,
+            ),
+          );
         } else {
           waiter.resolve(message);
         }
@@ -498,7 +581,8 @@ export class CodexAppServerClient {
         const threadId = extractThreadId(message.params);
         if (threadId) {
           this.loadedThreadIds.delete(threadId);
-          if (this.activeDhdThreadId === threadId) this.activeDhdThreadId = null;
+          if (this.activeDhdThreadId === threadId)
+            this.activeDhdThreadId = null;
         }
       }
     }
@@ -510,7 +594,10 @@ export class CodexAppServerClient {
     if (message.method === "turn/started") {
       this.activeTurnId = extractTurnId(message.params) || this.activeTurnId;
       this.turnStartedAt = this.turnStartedAt || Date.now();
-      this.activeTiming?.log("turn/started", `turnId=${this.activeTurnId ?? "?"}`);
+      this.activeTiming?.log(
+        "turn/started",
+        `turnId=${this.activeTurnId ?? "?"}`,
+      );
       return;
     }
     if (message.method === "item/started") {
@@ -530,33 +617,51 @@ export class CodexAppServerClient {
     if (message.method === "turn/completed") {
       const turn = extractRecord(message.params)?.turn;
       const status = extractRecord(turn)?.status;
-      this.activeTiming?.log("turn/completed", `status=${String(status ?? "unknown")}`);
+      this.activeTiming?.log(
+        "turn/completed",
+        `status=${String(status ?? "unknown")}`,
+      );
       if (status === "failed") {
-        completion.reject(new Error(extractTurnError(message.params) || "Codex App Server turn failed."));
+        completion.reject(
+          new Error(
+            extractTurnError(message.params) || "Codex App Server turn failed.",
+          ),
+        );
       } else if (status === "interrupted") {
         completion.reject(new Error("Codex App Server turn was interrupted."));
       } else if (status === "completed") {
         completion.resolve({
-          text: selectFinalAgentMessageText(completion.agentMessages) || extractText(message.params),
+          text:
+            selectFinalAgentMessageText(completion.agentMessages) ||
+            extractText(message.params),
           threadId: this.activeThreadId || "",
-          phoneToolFailures: [...(completion.phoneToolFailures ?? [])]
+          phoneToolFailures: [...(completion.phoneToolFailures ?? [])],
         });
       } else {
         completion.reject(
-          new Error(`Codex App Server turn ended with unexpected status: ${String(status ?? "unknown")}.`)
+          new Error(
+            `Codex App Server turn ended with unexpected status: ${String(status ?? "unknown")}.`,
+          ),
         );
       }
       this.turnCompletion = null;
       return;
     }
     if (message.method === "turn/failed" || message.method === "error") {
-      completion.reject(new Error(extractTurnError(message.params) || "Codex App Server turn failed."));
+      completion.reject(
+        new Error(
+          extractTurnError(message.params) || "Codex App Server turn failed.",
+        ),
+      );
       this.turnCompletion = null;
     }
   }
 
   private logUserMessagePhase(message: JsonRpcMessage): void {
-    this.logUserMessagePhaseFromValue(message.params, message.method || "notification");
+    this.logUserMessagePhaseFromValue(
+      message.params,
+      message.method || "notification",
+    );
   }
 
   private logUserMessagePhaseFromValue(value: unknown, event: string): void {
@@ -575,7 +680,10 @@ export class CodexAppServerClient {
     this.activeTiming?.log("userMessage", `event=${event}`);
   }
 
-  private async unsubscribeThread(threadId: string, timing: PhaseTimer): Promise<void> {
+  private async unsubscribeThread(
+    threadId: string,
+    timing: PhaseTimer,
+  ): Promise<void> {
     if (!this.loadedThreadIds.has(threadId)) {
       if (this.activeDhdThreadId === threadId) this.activeDhdThreadId = null;
       return;
@@ -588,7 +696,7 @@ export class CodexAppServerClient {
       timing.log("thread/unsubscribe:error", `threadId=${threadId}`);
       console.error(
         `[codex-app-server] could not unsubscribe superseded thread ${threadId}: ` +
-        `${error instanceof Error ? error.message : String(error)}`
+          `${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       this.loadedThreadIds.delete(threadId);
@@ -610,41 +718,75 @@ export class CodexAppServerClient {
           return;
         }
         case "item/commandExecution/requestApproval":
-          console.error("[codex-app-server] declined a command approval; phone turns may only use typed phone tools");
+          console.error(
+            "[codex-app-server] declined a command approval; phone turns may only use typed phone tools",
+          );
           this.respond(id, { decision: "decline" });
           return;
         case "item/fileChange/requestApproval":
-          console.error("[codex-app-server] declined a file-change approval; the phone companion is not a coding host");
+          console.error(
+            "[codex-app-server] declined a file-change approval; the phone companion is not a coding host",
+          );
           this.respond(id, { decision: "decline" });
           return;
         case "item/tool/requestUserInput":
-          console.error("[codex-app-server] answered tool user-input request with empty answers");
+          console.error(
+            "[codex-app-server] answered tool user-input request with empty answers",
+          );
           this.respond(id, { answers: emptyToolAnswers(message.params) });
           return;
         case "item/permissions/requestApproval":
-          console.error("[codex-app-server] declined an additional permission request");
-          this.respond(id, { permissions: { network: null, fileSystem: null }, scope: "turn" });
+          console.error(
+            "[codex-app-server] declined an additional permission request",
+          );
+          this.respond(id, {
+            permissions: { network: null, fileSystem: null },
+            scope: "turn",
+          });
           return;
         case "mcpServer/elicitation/request":
-          console.error("[codex-app-server] declined an MCP elicitation request");
+          console.error(
+            "[codex-app-server] declined an MCP elicitation request",
+          );
           this.respond(id, { action: "decline", content: null });
           return;
         case "account/chatgptAuthTokens/refresh":
-          this.respondError(id, -32001, "The phone companion does not manage ChatGPT auth token refresh.");
+          this.respondError(
+            id,
+            -32001,
+            "The phone companion does not manage ChatGPT auth token refresh.",
+          );
           return;
         case "attestation/generate":
-          this.respondError(id, -32001, "The phone companion does not provide upstream attestation.");
+          this.respondError(
+            id,
+            -32001,
+            "The phone companion does not provide upstream attestation.",
+          );
           return;
         default:
-          console.error(`[codex-app-server] unsupported server request: ${method}`);
-          this.respondError(id, -32601, `Unsupported App Server request: ${method}`);
+          console.error(
+            `[codex-app-server] unsupported server request: ${method}`,
+          );
+          this.respondError(
+            id,
+            -32601,
+            `Unsupported App Server request: ${method}`,
+          );
       }
     } catch (error) {
-      this.respondError(id, -32000, error instanceof Error ? error.message : String(error));
+      this.respondError(
+        id,
+        -32000,
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
-  private recordDynamicToolResult(value: unknown, result: DynamicToolCallResponse): void {
+  private recordDynamicToolResult(
+    value: unknown,
+    result: DynamicToolCallResponse,
+  ): void {
     if (result.success || !this.turnCompletion) return;
     const failure = extractDynamicToolFailure(result);
     this.turnCompletion.phoneToolFailures.push({
@@ -661,12 +803,19 @@ export class CodexAppServerClient {
     this.send({ id, error: { code, message } });
   }
 
-  private request(method: string, params: Record<string, unknown>): Promise<JsonRpcMessage> {
+  private request(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<JsonRpcMessage> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
-        reject(new Error(`Timed out waiting for Codex App Server request ${method}.`));
+        reject(
+          new Error(
+            `Timed out waiting for Codex App Server request ${method}.`,
+          ),
+        );
       }, APP_SERVER_REQUEST_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, timer });
       try {
@@ -706,10 +855,12 @@ export class CodexAppServerClient {
       this.send({
         method: "turn/interrupt",
         id: `interrupt-${this.nextId++}`,
-        params: { threadId, ...(turnId ? { turnId } : {}) }
+        params: { threadId, ...(turnId ? { turnId } : {}) },
       });
     } catch (error) {
-      console.error(`[codex-app-server] could not interrupt timed-out turn: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        `[codex-app-server] could not interrupt timed-out turn: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -744,16 +895,6 @@ export class CodexAppServerClient {
   }
 }
 
-const DHD_DYNAMIC_TOOL_TO_DISPATCH = {
-  dhd_list_allowed_apps: "dhd_list_allowed_apps",
-  dhd_browse_app: "dhd_browse_app",
-  dhd_observe: "dhd_observe",
-  dhd_open_app: "dhd_open_app",
-  dhd_execute: "dhd_execute",
-  dhd_execute_sequence: "dhd_execute_sequence",
-  dhd_request_attention: "dhd_request_attention"
-} as const;
-
 type DynamicToolSpec = Record<string, unknown>;
 
 export interface DhdDynamicToolOptions {
@@ -767,201 +908,236 @@ export interface DhdDynamicToolOptions {
  * request path through the bundled Code Mode host.
  */
 export function buildDhdDynamicTools(
-  options: DhdDynamicToolOptions = {}
+  options: DhdDynamicToolOptions = {},
 ): DynamicToolSpec[] {
-  const enableGuardRegions = options.enableGuardRegions ?? isGuardRegionsEnabled();
+  const enableGuardRegions =
+    options.enableGuardRegions ?? isGuardRegionsEnabled();
   const guardRegion = {
     type: "object",
     properties: {
       left: { type: "integer", minimum: 0 },
       top: { type: "integer", minimum: 0 },
       right: { type: "integer", minimum: 0 },
-      bottom: { type: "integer", minimum: 0 }
+      bottom: { type: "integer", minimum: 0 },
     },
     required: ["left", "top", "right", "bottom"],
-    additionalProperties: false
+    additionalProperties: false,
   };
   const baseMetadataProperties: Record<string, unknown> = {
-    purpose: { type: "string", minLength: 1, maxLength: 240 },
-    targetDescription: { type: "string", minLength: 1, maxLength: 240 },
-    observationId: { type: "string", minLength: 1, maxLength: 240 }
+    purpose: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+    targetDescription: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+    observationId: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
   };
-  const metadataProperties: Record<string, unknown> = { ...baseMetadataProperties };
+  const metadataProperties: Record<string, unknown> = {
+    ...baseMetadataProperties,
+  };
   if (enableGuardRegions) {
-    metadataProperties.guardRegions = { type: "array", maxItems: 8, items: guardRegion };
+    metadataProperties.guardRegions = {
+      type: "array",
+      maxItems: DHD_MAX_GUARD_REGIONS,
+      items: guardRegion,
+    };
   }
   const metadata = {
     type: "object",
     properties: metadataProperties,
     required: ["purpose", "targetDescription", "observationId"],
-    additionalProperties: false
+    additionalProperties: false,
   };
   const sequenceMetadata = {
     type: "object",
     properties: {
-      purpose: { type: "string", minLength: 1, maxLength: 240 },
-      targetDescription: { type: "string", minLength: 1, maxLength: 240 },
+      purpose: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+      targetDescription: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
       ...(enableGuardRegions
-        ? { guardRegions: { type: "array", maxItems: 8, items: guardRegion } }
-        : {})
+        ? { guardRegions: { type: "array", maxItems: DHD_MAX_GUARD_REGIONS, items: guardRegion } }
+        : {}),
     },
     required: ["purpose", "targetDescription"],
-    additionalProperties: false
+    additionalProperties: false,
   };
   const openAppMetadata = {
     type: "object",
     properties: baseMetadataProperties,
     required: ["purpose", "targetDescription", "observationId"],
-    additionalProperties: false
+    additionalProperties: false,
   };
   const actionObject = (
     properties: Record<string, unknown>,
     required: string[],
-    actionMetadata: Record<string, unknown> = metadata
+    actionMetadata: Record<string, unknown> = metadata,
   ) => ({
     type: "object",
     properties: { ...properties, metadata: actionMetadata },
     required: [...required, "metadata"],
-    additionalProperties: false
+    additionalProperties: false,
   });
   const actionVariants = [
     {
-      properties: { type: { const: "tap" }, x: { type: "integer", minimum: 0 }, y: { type: "integer", minimum: 0 } },
-      required: ["type", "x", "y"]
-    },
-    {
-      properties: { type: { const: "type" }, text: { type: "string", minLength: 1, maxLength: 4096 } },
-      required: ["type", "text"]
+      properties: {
+        type: { const: DHD_ACTION_TYPES.tap },
+        x: { type: "integer", minimum: 0 },
+        y: { type: "integer", minimum: 0 },
+      },
+      required: ["type", "x", "y"],
     },
     {
       properties: {
-        type: { const: "swipe" },
+        type: { const: DHD_ACTION_TYPES.type },
+        text: { type: "string", minLength: 1, maxLength: DHD_MAX_TYPE_TEXT_CHARS },
+      },
+      required: ["type", "text"],
+    },
+    {
+      properties: {
+        type: { const: DHD_ACTION_TYPES.swipe },
         startX: { type: "integer", minimum: 0 },
         startY: { type: "integer", minimum: 0 },
         endX: { type: "integer", minimum: 0 },
         endY: { type: "integer", minimum: 0 },
-        durationMs: { type: "integer", minimum: 1, maximum: 10_000 }
+        durationMs: { type: "integer", minimum: 1, maximum: DHD_MAX_SWIPE_DURATION_MS },
       },
-      required: ["type", "startX", "startY", "endX", "endY"]
+      required: ["type", "startX", "startY", "endX", "endY"],
     },
     {
       properties: {
-        type: { const: "scroll" },
-        direction: { type: "string", enum: ["up", "down", "left", "right"] },
-        amount: { type: "string", enum: ["small", "medium", "large"] }
+        type: { const: DHD_ACTION_TYPES.scroll },
+        direction: { type: "string", enum: [...DHD_SCROLL_DIRECTIONS] },
+        amount: { type: "string", enum: [...DHD_SCROLL_AMOUNTS] },
       },
-      required: ["type", "direction", "amount"]
+      required: ["type", "direction", "amount"],
     },
-    { properties: { type: { const: "back" } }, required: ["type"] },
+    { properties: { type: { const: DHD_ACTION_TYPES.back } }, required: ["type"] },
     {
-      properties: { type: { const: "keypress" }, key: { type: "string", enum: ["BACK", "HOME", "ENTER", "DELETE"] } },
-      required: ["type", "key"]
+      properties: {
+        type: { const: DHD_ACTION_TYPES.keypress },
+        key: { type: "string", enum: [...DHD_KEYPRESS_KEYS] },
+      },
+      required: ["type", "key"],
     },
     {
-      properties: { type: { const: "wait" }, durationMs: { type: "integer", minimum: 1, maximum: 30_000 } },
-      required: ["type", "durationMs"]
-    }
+      properties: {
+        type: { const: DHD_ACTION_TYPES.wait },
+        durationMs: { type: "integer", minimum: 1, maximum: DHD_MAX_WAIT_DURATION_MS },
+      },
+      required: ["type", "durationMs"],
+    },
   ];
   const createActionSchema = (actionMetadata: Record<string, unknown>) => ({
-    oneOf: actionVariants.map((variant) => actionObject(
-      variant.properties,
-      variant.required,
-      actionMetadata
-    ))
+    oneOf: actionVariants.map((variant) =>
+      actionObject(variant.properties, variant.required, actionMetadata),
+    ),
   });
   const action = createActionSchema(metadata);
   const sequenceAction = createActionSchema(sequenceMetadata);
   const observeProperties: Record<string, unknown> = {
     expectedPackageName: { type: "string", minLength: 1 },
-    purpose: { type: "string", minLength: 1, maxLength: 240 },
-    targetDescription: { type: "string", minLength: 1, maxLength: 240 }
+    purpose: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+    targetDescription: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
   };
   if (enableGuardRegions) {
-    observeProperties.guardRegions = { type: "array", maxItems: 8, items: guardRegion };
+    observeProperties.guardRegions = {
+      type: "array",
+      maxItems: DHD_MAX_GUARD_REGIONS,
+      items: guardRegion,
+    };
   }
-  const guardRegionGuidance = enableGuardRegions
-    ? " When enabled, provide the same guardRegions to dhd_observe and the corresponding action or first sequence step only when the target must remain unchanged."
-    : "";
 
   return [
     dynamicTool(
       "dhd_list_allowed_apps",
-      "Check the phone's app-access mode. Keep the default result compact. In restricted mode, return the explicit allowlist; when Full Access is active, return capability metadata. Set includeAll to true only when you need the complete launchable app list.",
+      dhdToolDescription("dhd_list_allowed_apps", enableGuardRegions),
       {
         type: "object",
         properties: { includeAll: { type: "boolean", default: false } },
-        additionalProperties: false
-      }
+        additionalProperties: false,
+      },
     ),
     dynamicTool(
       "dhd_browse_app",
-      "Search launchable phone apps by label or package name. Return matching app labels and package names without opening an app or changing permissions. In restricted mode, results are limited to the explicit allowlist.",
+      dhdToolDescription("dhd_browse_app", enableGuardRegions),
       {
         type: "object",
         properties: { query: { type: "string", minLength: 1, maxLength: 120 } },
         required: ["query"],
-        additionalProperties: false
-      }
+        additionalProperties: false,
+      },
+    ),
+    dynamicTool(
+      "dhd_get_foreground_app",
+      dhdToolDescription("dhd_get_foreground_app", enableGuardRegions),
+      emptySchema(),
     ),
     dynamicTool(
       "dhd_observe",
-      `Capture the current physical Android display and return a screenshot for visual context. Use this before every phone action and copy the returned observation.id into the action metadata.observationId.${guardRegionGuidance}`,
+      dhdToolDescription("dhd_observe", enableGuardRegions),
       {
         type: "object",
         properties: observeProperties,
-        additionalProperties: false
-      }
+        additionalProperties: false,
+      },
     ),
     dynamicTool(
       "dhd_open_app",
-      "Open one launchable Android app and return the actual post-action observation. Observe first and copy its observation.id into metadata.observationId. In restricted mode the app must be on the explicit allowlist; Full Access lets you use any launchable app. Include a meaningful user-facing purpose and concrete target description.",
+      dhdToolDescription("dhd_open_app", enableGuardRegions),
       {
         type: "object",
         properties: {
           packageName: { type: "string", minLength: 1 },
-          metadata: openAppMetadata
+          metadata: openAppMetadata,
         },
         required: ["packageName", "metadata"],
-        additionalProperties: false
-      }
+        additionalProperties: false,
+      },
     ),
     dynamicTool(
       "dhd_execute",
-      `Execute one typed phone action using the observation identified by metadata.observationId, then return the actual post-action observation.${guardRegionGuidance} If post-action observation fails, treat the action as unknown and observe before retrying. Never use shell commands.`,
+      dhdToolDescription("dhd_execute", enableGuardRegions),
       {
         type: "object",
         properties: { action },
         required: ["action"],
-        additionalProperties: false
-      }
+        additionalProperties: false,
+      },
     ),
     dynamicTool(
       "dhd_execute_sequence",
-      `Execute up to 16 typed phone actions in order from one observation baseline. Use this only when every later target is predictable without inspecting intermediate screenshots; use dhd_execute for adaptive or branching work. The phone captures and verifies a post-action observation after every step and returns the final observation only after the full sequence is verified. Observe first and pass its observation.id as the top-level observationId. Do not include open_app, shell commands, semantic targets, or execution modes.${enableGuardRegions ? " When enabled, provide guardRegions on the first dhd_observe and the corresponding sequence steps when the guarded target must remain unchanged." : ""} If any step fails, the sequence stops; if post-action observation fails, treat the outcome as unknown and observe before retrying.`,
+      dhdToolDescription("dhd_execute_sequence", enableGuardRegions),
       {
         type: "object",
         properties: {
-          observationId: { type: "string", minLength: 1, maxLength: 240 },
-          actions: { type: "array", minItems: 1, maxItems: 16, items: sequenceAction }
+          observationId: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+          actions: {
+            type: "array",
+            minItems: 1,
+            maxItems: DHD_MAX_SEQUENCE_ACTIONS,
+            items: sequenceAction,
+          },
         },
         required: ["observationId", "actions"],
-        additionalProperties: false
-      }
+        additionalProperties: false,
+      },
     ),
     dynamicTool(
       "dhd_request_attention",
-      "Notify the user that their attention is needed without bringing the assistant app to the foreground. Use this when the user must review or take over; do not continue phone actions afterward.",
+      dhdToolDescription("dhd_request_attention", enableGuardRegions),
       {
         type: "object",
-        properties: { reason: { type: "string", minLength: 1, maxLength: 240 } },
+        properties: {
+          reason: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+        },
         required: ["reason"],
-        additionalProperties: false
-      }
-    )
+        additionalProperties: false,
+      },
+    ),
   ];
 }
 
-function dynamicTool(name: string, description: string, inputSchema: Record<string, unknown>): DynamicToolSpec {
+function dynamicTool(
+  name: DhdToolName,
+  description: string,
+  inputSchema: Record<string, unknown>,
+): DynamicToolSpec {
   return { type: "function", name, description, inputSchema };
 }
 
@@ -969,15 +1145,19 @@ function emptySchema(): Record<string, unknown> {
   return { type: "object", properties: {}, additionalProperties: false };
 }
 
-async function handleDynamicToolCall(value: unknown): Promise<DynamicToolCallResponse> {
+async function handleDynamicToolCall(
+  value: unknown,
+): Promise<DynamicToolCallResponse> {
   const params = extractRecord(value) ?? {};
   const requestedName = extractDynamicToolName(value);
   const name = requestedName.includes(".")
     ? requestedName.slice(requestedName.lastIndexOf(".") + 1)
     : requestedName;
-  const mappedName = DHD_DYNAMIC_TOOL_TO_DISPATCH[name as keyof typeof DHD_DYNAMIC_TOOL_TO_DISPATCH];
+  const mappedName = isDhdToolName(name) ? name : undefined;
   if (!mappedName) {
-    return dynamicToolFailure(`Unsupported dynamic phone tool: ${requestedName || "(missing tool name)"}`);
+    return dynamicToolFailure(
+      `Unsupported dynamic phone tool: ${requestedName || "(missing tool name)"}`,
+    );
   }
 
   const input = normalizeDynamicArguments(params.arguments);
@@ -1002,7 +1182,7 @@ function extractDynamicToolName(value: unknown): string {
 }
 
 function extractDynamicToolFailure(
-  result: DynamicToolCallResponse
+  result: DynamicToolCallResponse,
 ): Omit<PhoneToolFailure, "tool"> {
   for (const item of result.contentItems) {
     if (item.type !== "inputText") continue;
@@ -1010,9 +1190,10 @@ function extractDynamicToolFailure(
       const record = extractRecord(JSON.parse(item.text));
       if (!record) continue;
       const failure: Omit<PhoneToolFailure, "tool"> = {
-        message: typeof record.message === "string" && record.message.trim()
-          ? record.message.trim()
-          : "DHD phone tool failed."
+        message:
+          typeof record.message === "string" && record.message.trim()
+            ? record.message.trim()
+            : "DHD phone tool failed.",
       };
       if (typeof record.code === "string" && record.code.trim()) {
         failure.code = record.code.trim();
@@ -1029,7 +1210,9 @@ function extractDynamicToolFailure(
   return { message: "DHD phone tool failed." };
 }
 
-export function toDynamicToolResponse(result: PhoneAssistantToolResult): DynamicToolCallResponse {
+export function toDynamicToolResponse(
+  result: PhoneAssistantToolResult,
+): DynamicToolCallResponse {
   const contentItems: DynamicToolCallResponse["contentItems"] = [];
   for (const item of result.content) {
     if (item.type === "text") {
@@ -1044,17 +1227,24 @@ export function toDynamicToolResponse(result: PhoneAssistantToolResult): Dynamic
   if (contentItems.length === 0) {
     contentItems.push({
       type: "inputText",
-      text: JSON.stringify(result.structuredContent ?? { ok: !result.isError })
+      text: JSON.stringify(result.structuredContent ?? { ok: !result.isError }),
     });
   }
   return { contentItems, success: !result.isError };
 }
 
 function dynamicToolFailure(message: string): DynamicToolCallResponse {
-  return { contentItems: [{ type: "inputText", text: JSON.stringify({ ok: false, message }) }], success: false };
+  return {
+    contentItems: [
+      { type: "inputText", text: JSON.stringify({ ok: false, message }) },
+    ],
+    success: false,
+  };
 }
 
-function emptyToolAnswers(value: unknown): Record<string, { answers: string[] }> {
+function emptyToolAnswers(
+  value: unknown,
+): Record<string, { answers: string[] }> {
   const questions = extractRecord(value ?? {})?.questions;
   if (!Array.isArray(questions)) return {};
   const answers: Record<string, { answers: string[] }> = {};
@@ -1072,17 +1262,23 @@ function logServerNotification(message: JsonRpcMessage): void {
   }
   if (message.method === "turn/completed") {
     const turn = extractRecord(extractRecord(message.params)?.turn);
-    console.error(`[codex-app-server] turn completed (${String(turn?.status ?? "unknown")})`);
+    console.error(
+      `[codex-app-server] turn completed (${String(turn?.status ?? "unknown")})`,
+    );
     return;
   }
-  if (message.method !== "item/started" && message.method !== "item/completed") return;
+  if (message.method !== "item/started" && message.method !== "item/completed")
+    return;
   const item = extractRecord(extractRecord(message.params)?.item);
   if (!item) return;
   const type = typeof item.type === "string" ? item.type : "item";
   const tool = typeof item.tool === "string" ? ` ${item.tool}` : "";
   const status = typeof item.status === "string" ? ` (${item.status})` : "";
-  const duration = typeof item.durationMs === "number" ? ` [${item.durationMs}ms]` : "";
-  console.error(`[codex-app-server] ${message.method} ${type}${tool}${status}${duration}`);
+  const duration =
+    typeof item.durationMs === "number" ? ` [${item.durationMs}ms]` : "";
+  console.error(
+    `[codex-app-server] ${message.method} ${type}${tool}${status}${duration}`,
+  );
 }
 
 /**
@@ -1103,7 +1299,8 @@ function describeServerEvent(message: JsonRpcMessage): string {
     const type = typeof item.type === "string" ? item.type : "item";
     const tool = typeof item.tool === "string" ? ` ${item.tool}` : "";
     const status = typeof item.status === "string" ? ` (${item.status})` : "";
-    const duration = typeof item.durationMs === "number" ? ` [${item.durationMs}ms]` : "";
+    const duration =
+      typeof item.durationMs === "number" ? ` [${item.durationMs}ms]` : "";
     return `${method} ${type}${tool}${status}${duration}`;
   }
   return method;
@@ -1131,21 +1328,33 @@ export async function runAssistantCompanion(): Promise<void> {
     const active = activeCodexTurn;
     if (active) {
       void active.client.interrupt().catch((error) => {
-        console.error(`[phone-assistant-companion] could not interrupt on shutdown: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(
+          `[phone-assistant-companion] could not interrupt on shutdown: ${error instanceof Error ? error.message : String(error)}`,
+        );
       });
     }
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
-  console.error("[phone-assistant-companion] waiting for a request typed in the Android app");
-  console.error(`[phone-assistant-companion] phone bridge target ${bridgeHost}:${bridgePort}`);
+  console.error(
+    "[phone-assistant-companion] waiting for a request typed in the Android app",
+  );
+  console.error(
+    `[phone-assistant-companion] phone bridge target ${bridgeHost}:${bridgePort}`,
+  );
   if (isLoopbackBridgeHost(bridgeHost)) {
-    console.error("[phone-assistant-companion] loopback mode: adb forward tcp:8765 tcp:8765 is still supported");
+    console.error(
+      "[phone-assistant-companion] loopback mode: adb forward tcp:8765 tcp:8765 is still supported",
+    );
   } else {
-    console.error("[phone-assistant-companion] wireless mode: phone and laptop must share Wi-Fi and PHONE_ASSISTANT_BRIDGE_TOKEN must match DHD settings");
+    console.error(
+      "[phone-assistant-companion] wireless mode: phone and laptop must share Wi-Fi and PHONE_ASSISTANT_BRIDGE_TOKEN must match DHD settings",
+    );
   }
-  console.error("[phone-assistant-companion] a logged-in Codex CLI must be available on this companion host");
+  console.error(
+    "[phone-assistant-companion] a logged-in Codex CLI must be available on this companion host",
+  );
 
   try {
     await prewarmCodexClient(codexClient, "codex-prewarm");
@@ -1156,12 +1365,12 @@ export async function runAssistantCompanion(): Promise<void> {
         if (!pendingRun && !activeCodexTurn) {
           const pending = await requestBridge(
             { type: "pending_request", requestId: randomUUID() },
-            { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
+            { timeoutMs: BRIDGE_POLL_TIMEOUT_MS },
           );
           if (debugTimingEnabled()) {
             logCompanionPhase(
               "poll:complete",
-              `durationMs=${Math.round(performance.now() - pollStartedAt)} available=${pending.available === true}`
+              `durationMs=${Math.round(performance.now() - pollStartedAt)} available=${pending.available === true}`,
             );
           }
           if (pending.warmupRequested === true) {
@@ -1171,17 +1380,21 @@ export async function runAssistantCompanion(): Promise<void> {
           if (pending.ok === true && pending.available === true) {
             logCompanionPhase(
               "poll:request_detected",
-              `durationMs=${Math.round(performance.now() - pollStartedAt)}`
+              `durationMs=${Math.round(performance.now() - pollStartedAt)}`,
             );
             pendingRun = processPendingRequest(pending, codexClient)
               .catch((error) => {
-                console.error(`[phone-assistant-companion] phone request runner failed: ${error instanceof Error ? error.message : String(error)}`);
+                console.error(
+                  `[phone-assistant-companion] phone request runner failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
               })
               .finally(() => {
                 pendingRun = null;
               });
           } else if (pending.ok === false) {
-            console.error(`[phone-assistant-companion] phone bridge rejected poll: ${String(pending.message ?? "unknown error")}`);
+            console.error(
+              `[phone-assistant-companion] phone bridge rejected poll: ${String(pending.message ?? "unknown error")}`,
+            );
           }
         } else if (activeCodexTurn) {
           await processPendingSteer(activeCodexTurn);
@@ -1189,11 +1402,13 @@ export async function runAssistantCompanion(): Promise<void> {
       } catch (error) {
         logCompanionPhase(
           "poll:error",
-          `durationMs=${Math.round(performance.now() - pollStartedAt)}`
+          `durationMs=${Math.round(performance.now() - pollStartedAt)}`,
         );
         // The phone may be disconnected or the bridge may not be running yet.
         // Keep polling so reconnecting the device does not require a restart.
-        console.error(`[phone-assistant-companion] ${error instanceof Error ? error.message : String(error)}`);
+        console.error(
+          `[phone-assistant-companion] ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       if (!stopping) await delay(pollIntervalMs);
     }
@@ -1205,7 +1420,7 @@ export async function runAssistantCompanion(): Promise<void> {
 
 async function prewarmCodexClient(
   codexClient: CodexAppServerClient,
-  scope: string
+  scope: string,
 ): Promise<boolean> {
   for (let attempt = 1; attempt <= PREWARM_ATTEMPTS; attempt += 1) {
     const timing = new PhaseTimer(scope);
@@ -1218,22 +1433,27 @@ async function prewarmCodexClient(
       timing.log("error", `attempt=${attempt}`);
       console.error(
         `[phone-assistant-companion] Codex prewarm attempt ${attempt}/${PREWARM_ATTEMPTS} failed: ` +
-        `${error instanceof Error ? error.message : String(error)}`
+          `${error instanceof Error ? error.message : String(error)}`,
       );
       if (attempt < PREWARM_ATTEMPTS) await delay(PREWARM_RETRY_DELAY_MS);
     }
   }
-  console.error("[phone-assistant-companion] continuing without a warm Codex connection; the next request will retry startup");
+  console.error(
+    "[phone-assistant-companion] continuing without a warm Codex connection; the next request will retry startup",
+  );
   return false;
 }
 
 async function processPendingRequest(
   pending: BridgeMessage,
-  codexClient: CodexAppServerClient
+  codexClient: CodexAppServerClient,
 ): Promise<void> {
-  const sessionId = typeof pending.sessionId === "string" ? pending.sessionId : "";
+  const sessionId =
+    typeof pending.sessionId === "string" ? pending.sessionId : "";
   if (!sessionId) {
-    console.error("[phone-assistant-companion] pending request did not include a session id");
+    console.error(
+      "[phone-assistant-companion] pending request did not include a session id",
+    );
     return;
   }
   const timing = new PhaseTimer(`phone-request:${sessionId}`);
@@ -1243,7 +1463,7 @@ async function processPendingRequest(
     claimed = await requestBridge({
       type: "claim_request",
       requestId: randomUUID(),
-      sessionId
+      sessionId,
     });
     timing.log("claim:complete", `ok=${claimed.ok === true}`);
   } catch (error) {
@@ -1254,14 +1474,18 @@ async function processPendingRequest(
     // Another companion instance may have claimed it between polling and the
     // claim call. This is expected and is safe to ignore.
     if (claimed.code !== "REQUEST_NOT_AVAILABLE") {
-      console.error(`[phone-assistant-companion] could not claim request: ${String(claimed.message ?? "unknown error")}`);
+      console.error(
+        `[phone-assistant-companion] could not claim request: ${String(claimed.message ?? "unknown error")}`,
+      );
     }
     return;
   }
 
   const request = typeof claimed.request === "string" ? claimed.request : "";
   if (!request) {
-    console.error("[phone-assistant-companion] claimed request was empty; releasing it");
+    console.error(
+      "[phone-assistant-companion] claimed request was empty; releasing it",
+    );
     await releaseRequest(sessionId);
     return;
   }
@@ -1269,43 +1493,67 @@ async function processPendingRequest(
   console.error(`[phone-assistant-companion] claimed ${sessionId}: ${request}`);
   activeCodexTurn = { sessionId, client: codexClient };
   try {
-    const conversationId = typeof claimed.conversationId === "string" ? claimed.conversationId : undefined;
-    const existingThreadId = typeof claimed.codexThreadId === "string" ? claimed.codexThreadId : undefined;
-    const threadTitle = typeof claimed.title === "string" ? claimed.title : request;
-    const reasoningEffort = typeof claimed.reasoningEffort === "string" ? claimed.reasoningEffort : undefined;
-    const result = await codexClient.runTurn(request, existingThreadId, threadTitle, timing, reasoningEffort);
+    const conversationId =
+      typeof claimed.conversationId === "string"
+        ? claimed.conversationId
+        : undefined;
+    const existingThreadId =
+      typeof claimed.codexThreadId === "string"
+        ? claimed.codexThreadId
+        : undefined;
+    const threadTitle =
+      typeof claimed.title === "string" ? claimed.title : request;
+    const reasoningEffort =
+      typeof claimed.reasoningEffort === "string"
+        ? claimed.reasoningEffort
+        : undefined;
+    const result = await codexClient.runTurn(
+      request,
+      existingThreadId,
+      threadTitle,
+      timing,
+      reasoningEffort,
+    );
     const phoneToolFailure = result.phoneToolFailures.at(-1);
     if (phoneToolFailure) {
       const reason = formatPhoneToolFailure(phoneToolFailure);
       timing.log("phone-tool:failed", `tool=${phoneToolFailure.tool}`);
       console.error(
-        `[phone-assistant-companion] phone tool failed; refusing to report success: ${reason}`
+        `[phone-assistant-companion] phone tool failed; refusing to report success: ${reason}`,
       );
       const failed = await requestBridge({
         type: "fail_session",
         requestId: randomUUID(),
         sessionId,
-        reason
+        reason,
       });
       if (failed.ok !== true) {
-        console.error(`[phone-assistant-companion] could not mark the phone session failed: ${String(failed.message ?? "unknown error")}`);
+        console.error(
+          `[phone-assistant-companion] could not mark the phone session failed: ${String(failed.message ?? "unknown error")}`,
+        );
       }
       return;
     }
-    if (conversationId && result.threadId && result.threadId !== existingThreadId) {
+    if (
+      conversationId &&
+      result.threadId &&
+      result.threadId !== existingThreadId
+    ) {
       const bound = await requestBridge({
         type: "bind_codex_thread",
         requestId: randomUUID(),
         conversationId,
-        codexThreadId: result.threadId
+        codexThreadId: result.threadId,
       });
       if (bound.ok !== true) {
-        throw new Error(`The phone did not bind Codex thread ${result.threadId}: ${String(bound.message ?? "unknown error")}`);
+        throw new Error(
+          `The phone did not bind Codex thread ${result.threadId}: ${String(bound.message ?? "unknown error")}`,
+        );
       }
     }
     console.error(
       `[phone-assistant-companion] Codex turn reached terminal status; closing phone session` +
-      `${result.text ? `; final assistant message: ${result.text.slice(0, 500)}` : ""}`
+        `${result.text ? `; final assistant message: ${result.text.slice(0, 500)}` : ""}`,
     );
     const feedback = normalizeAgentFeedback(result.text);
     const completed = await requestBridge({
@@ -1313,22 +1561,28 @@ async function processPendingRequest(
       requestId: randomUUID(),
       sessionId,
       message: feedback || DEFAULT_COMPLETION_MESSAGE,
-      ...(feedback ? { feedback } : {})
+      ...(feedback ? { feedback } : {}),
     });
     if (completed.ok !== true) {
-      console.error(`[phone-assistant-companion] could not mark the phone session complete: ${String(completed.message ?? "unknown error")}`);
+      console.error(
+        `[phone-assistant-companion] could not mark the phone session complete: ${String(completed.message ?? "unknown error")}`,
+      );
     }
   } catch (error) {
-    console.error(`[phone-assistant-companion] Codex turn failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `[phone-assistant-companion] Codex turn failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     try {
       await requestBridge({
         type: "fail_session",
         requestId: randomUUID(),
         sessionId,
-        reason: error instanceof Error ? error.message : String(error)
+        reason: error instanceof Error ? error.message : String(error),
       });
     } catch (failureError) {
-      console.error(`[phone-assistant-companion] could not mark the phone session failed: ${failureError instanceof Error ? failureError.message : String(failureError)}`);
+      console.error(
+        `[phone-assistant-companion] could not mark the phone session failed: ${failureError instanceof Error ? failureError.message : String(failureError)}`,
+      );
     }
   } finally {
     if (activeCodexTurn?.sessionId === sessionId) activeCodexTurn = null;
@@ -1342,13 +1596,15 @@ async function processPendingSteer(active: ActiveCodexTurn): Promise<void> {
     {
       type: "pending_steer",
       requestId: randomUUID(),
-      sessionId: active.sessionId
+      sessionId: active.sessionId,
     },
-    { timeoutMs: BRIDGE_POLL_TIMEOUT_MS }
+    { timeoutMs: BRIDGE_POLL_TIMEOUT_MS },
   );
   if (pending.ok !== true) {
     if (pending.message) {
-      console.error(`[phone-assistant-companion] phone bridge rejected steer poll: ${String(pending.message)}`);
+      console.error(
+        `[phone-assistant-companion] phone bridge rejected steer poll: ${String(pending.message)}`,
+      );
     }
     return;
   }
@@ -1358,7 +1614,9 @@ async function processPendingSteer(active: ActiveCodexTurn): Promise<void> {
   // operating the phone after the user has stopped it.
   if (pending.active === false && active.client.isTurnInFlight) {
     await active.client.interrupt().catch((error) => {
-      console.error(`[phone-assistant-companion] could not interrupt stopped phone session: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        `[phone-assistant-companion] could not interrupt stopped phone session: ${error instanceof Error ? error.message : String(error)}`,
+      );
     });
     return;
   }
@@ -1369,18 +1627,22 @@ async function processPendingSteer(active: ActiveCodexTurn): Promise<void> {
 
   const steerId = typeof pending.steerId === "string" ? pending.steerId : "";
   if (!steerId) {
-    console.error("[phone-assistant-companion] pending steer did not include a steer id");
+    console.error(
+      "[phone-assistant-companion] pending steer did not include a steer id",
+    );
     return;
   }
   const claimed = await requestBridge({
     type: "claim_steer",
     requestId: randomUUID(),
     sessionId: active.sessionId,
-    steerId
+    steerId,
   });
   if (claimed.ok !== true) {
     if (claimed.code !== "STEER_NOT_AVAILABLE") {
-      console.error(`[phone-assistant-companion] could not claim steer ${steerId}: ${String(claimed.message ?? "unknown error")}`);
+      console.error(
+        `[phone-assistant-companion] could not claim steer ${steerId}: ${String(claimed.message ?? "unknown error")}`,
+      );
     }
     return;
   }
@@ -1397,14 +1659,20 @@ async function processPendingSteer(active: ActiveCodexTurn): Promise<void> {
       type: "complete_steer",
       requestId: randomUUID(),
       sessionId: active.sessionId,
-      steerId
+      steerId,
     });
     if (completed.ok !== true) {
-      console.error(`[phone-assistant-companion] could not mark steer ${steerId} delivered: ${String(completed.message ?? "unknown error")}`);
+      console.error(
+        `[phone-assistant-companion] could not mark steer ${steerId} delivered: ${String(completed.message ?? "unknown error")}`,
+      );
     }
-    console.error(`[phone-assistant-companion] delivered steer ${steerId} to the active Codex turn`);
+    console.error(
+      `[phone-assistant-companion] delivered steer ${steerId} to the active Codex turn`,
+    );
   } catch (error) {
-    console.error(`[phone-assistant-companion] Codex steer failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `[phone-assistant-companion] Codex steer failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     await releaseSteer(steerId, active.sessionId);
   }
 }
@@ -1415,33 +1683,39 @@ async function releaseSteer(steerId: string, sessionId: string): Promise<void> {
       type: "release_steer",
       requestId: randomUUID(),
       sessionId,
-      steerId
+      steerId,
     });
   } catch (error) {
-    console.error(`[phone-assistant-companion] could not release steer ${steerId}: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `[phone-assistant-companion] could not release steer ${steerId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
 async function releaseRequest(sessionId: string): Promise<void> {
   try {
-    await requestBridge({ type: "release_request", requestId: randomUUID(), sessionId });
+    await requestBridge({
+      type: "release_request",
+      requestId: randomUUID(),
+      sessionId,
+    });
   } catch (error) {
-    console.error(`[phone-assistant-companion] could not release request: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `[phone-assistant-companion] could not release request: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
 function normalizeAgentFeedback(text: string): string {
-  return text
-    .replace(/\r\n?/g, "\n")
-    .trim()
-    .slice(0, MAX_AGENT_FEEDBACK_CHARS);
+  return text.replace(/\r\n?/g, "\n").trim().slice(0, MAX_AGENT_FEEDBACK_CHARS);
 }
 
 function formatPhoneToolFailure(failure: PhoneToolFailure): string {
   const code = failure.code ? ` (${failure.code})` : "";
-  const outcome = failure.outcome?.toLowerCase() === "unknown"
-    ? "could not be verified"
-    : "failed";
+  const outcome =
+    failure.outcome?.toLowerCase() === "unknown"
+      ? "could not be verified"
+      : "failed";
   return `${failure.tool} ${outcome}${code}: ${failure.message}`
     .trim()
     .slice(0, MAX_AGENT_FEEDBACK_CHARS);
@@ -1455,7 +1729,8 @@ function extractThreadId(value: unknown): string | null {
     const id = (thread as Record<string, unknown>).id;
     if (typeof id === "string" && id) return id;
   }
-  if (typeof record.threadId === "string" && record.threadId) return record.threadId;
+  if (typeof record.threadId === "string" && record.threadId)
+    return record.threadId;
   return typeof record.id === "string" && record.id ? record.id : null;
 }
 
@@ -1489,11 +1764,14 @@ function recordAgentMessageStarted(
     agentMessages: Map<string, AgentMessageState>;
     nextAgentMessageOrder: number;
   },
-  value: unknown
+  value: unknown,
 ): void {
   const item = extractAgentMessageItem(value);
   if (!item) return;
-  const state = getAgentMessageState(completion, extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID);
+  const state = getAgentMessageState(
+    completion,
+    extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID,
+  );
   if (typeof item.text === "string") state.text = item.text;
   state.phase = extractAgentMessagePhase(value) || state.phase;
   state.completed = false;
@@ -1505,11 +1783,14 @@ function recordAgentMessageDelta(
     agentMessages: Map<string, AgentMessageState>;
     nextAgentMessageOrder: number;
   },
-  value: unknown
+  value: unknown,
 ): void {
   const delta = extractText(value);
   if (!delta) return;
-  const state = getAgentMessageState(completion, extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID);
+  const state = getAgentMessageState(
+    completion,
+    extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID,
+  );
   state.text += delta;
   state.phase = extractAgentMessagePhase(value) || state.phase;
   touchAgentMessage(completion, state);
@@ -1520,11 +1801,14 @@ function recordAgentMessageCompleted(
     agentMessages: Map<string, AgentMessageState>;
     nextAgentMessageOrder: number;
   },
-  value: unknown
+  value: unknown,
 ): void {
   const item = extractAgentMessageItem(value);
   if (!item) return;
-  const state = getAgentMessageState(completion, extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID);
+  const state = getAgentMessageState(
+    completion,
+    extractAgentMessageId(value) || UNSCOPED_AGENT_MESSAGE_ID,
+  );
   // item/completed is authoritative for the full agentMessage text. This
   // replaces any streamed deltas for this item without touching other phases.
   if (typeof item.text === "string") state.text = item.text;
@@ -1533,7 +1817,9 @@ function recordAgentMessageCompleted(
   touchAgentMessage(completion, state);
 }
 
-function selectFinalAgentMessageText(agentMessages: Map<string, AgentMessageState>): string {
+function selectFinalAgentMessageText(
+  agentMessages: Map<string, AgentMessageState>,
+): string {
   const messages = [...agentMessages.values()]
     .filter((message) => message.text.trim())
     .sort((left, right) => left.lastEventOrder - right.lastEventOrder);
@@ -1541,9 +1827,13 @@ function selectFinalAgentMessageText(agentMessages: Map<string, AgentMessageStat
     .reverse()
     .find((message) => message.completed && message.phase === "final_answer");
   if (finalAnswer) return finalAnswer.text;
-  const lastCompleted = [...messages].reverse().find((message) => message.completed);
+  const lastCompleted = [...messages]
+    .reverse()
+    .find((message) => message.completed);
   if (lastCompleted) return lastCompleted.text;
-  const lastFinalPhase = [...messages].reverse().find((message) => message.phase === "final_answer");
+  const lastFinalPhase = [...messages]
+    .reverse()
+    .find((message) => message.phase === "final_answer");
   return lastFinalPhase?.text || messages.at(-1)?.text || "";
 }
 
@@ -1554,7 +1844,7 @@ function getAgentMessageState(
     agentMessages: Map<string, AgentMessageState>;
     nextAgentMessageOrder: number;
   },
-  id: string
+  id: string,
 ): AgentMessageState {
   const existing = completion.agentMessages.get(id);
   if (existing) return existing;
@@ -1562,7 +1852,7 @@ function getAgentMessageState(
     id,
     text: "",
     completed: false,
-    lastEventOrder: 0
+    lastEventOrder: 0,
   };
   completion.agentMessages.set(id, state);
   return state;
@@ -1572,12 +1862,14 @@ function touchAgentMessage(
   completion: {
     nextAgentMessageOrder: number;
   },
-  state: AgentMessageState
+  state: AgentMessageState,
 ): void {
   state.lastEventOrder = ++completion.nextAgentMessageOrder;
 }
 
-function extractAgentMessageItem(value: unknown): Record<string, unknown> | null {
+function extractAgentMessageItem(
+  value: unknown,
+): Record<string, unknown> | null {
   const record = extractRecord(value);
   const item = extractRecord(record?.item) || record;
   return item?.type === "agentMessage" ? item : null;
@@ -1589,7 +1881,12 @@ function extractAgentMessageId(value: unknown): string | null {
   if (typeof record.itemId === "string" && record.itemId) return record.itemId;
   const item = extractRecord(record.item);
   if (typeof item?.id === "string" && item.id) return item.id;
-  if (record.type === "agentMessage" && typeof record.id === "string" && record.id) return record.id;
+  if (
+    record.type === "agentMessage" &&
+    typeof record.id === "string" &&
+    record.id
+  )
+    return record.id;
   return null;
 }
 
@@ -1645,12 +1942,15 @@ function disabledConfiguredMcpOverrides(codexHome: string): string[] {
 }
 
 function extractRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function parsePollInterval(value: string | undefined): number {
   if (!value?.trim()) return DEFAULT_POLL_INTERVAL_MS;
-  if (!/^\d+$/.test(value.trim())) throw new Error("PHONE_ASSISTANT_POLL_MS must be a positive integer.");
+  if (!/^\d+$/.test(value.trim()))
+    throw new Error("PHONE_ASSISTANT_POLL_MS must be a positive integer.");
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 250 || parsed > 60_000) {
     throw new Error("PHONE_ASSISTANT_POLL_MS must be between 250 and 60000.");
@@ -1663,7 +1963,9 @@ function resolveCodexModel(): string {
 }
 
 function resolveCodexEffort(): string {
-  return normalizeCodexEffort(process.env.PHONE_ASSISTANT_CODEX_REASONING_EFFORT);
+  return normalizeCodexEffort(
+    process.env.PHONE_ASSISTANT_CODEX_REASONING_EFFORT,
+  );
 }
 
 function normalizeCodexEffort(value: string | undefined): string {
@@ -1676,17 +1978,24 @@ function normalizeCodexEffort(value: string | undefined): string {
 function parseTurnTimeout(value: string | undefined): number {
   if (!value?.trim()) return DEFAULT_TURN_TIMEOUT_MS;
   if (!/^\d+$/.test(value.trim())) {
-    throw new Error("PHONE_ASSISTANT_TURN_TIMEOUT_MS must be a positive integer.");
+    throw new Error(
+      "PHONE_ASSISTANT_TURN_TIMEOUT_MS must be a positive integer.",
+    );
   }
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 5_000 || parsed > 3_600_000) {
-    throw new Error("PHONE_ASSISTANT_TURN_TIMEOUT_MS must be between 5000 and 3600000.");
+    throw new Error(
+      "PHONE_ASSISTANT_TURN_TIMEOUT_MS must be between 5000 and 3600000.",
+    );
   }
   return parsed;
 }
 
 function quoteWindowsCommand(command: string): string {
-  if (/\s|[&|<>^]/.test(command) && !(command.startsWith('"') && command.endsWith('"'))) {
+  if (
+    /\s|[&|<>^]/.test(command) &&
+    !(command.startsWith('"') && command.endsWith('"'))
+  ) {
     return `"${command.replaceAll('"', '\\"')}"`;
   }
   return command;
@@ -1699,7 +2008,7 @@ function delay(milliseconds: number): Promise<void> {
 function withTimeout<T>(
   promise: Promise<T>,
   milliseconds: number,
-  onTimeout: () => Error
+  onTimeout: () => Error,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(onTimeout()), milliseconds);
@@ -1711,17 +2020,20 @@ function withTimeout<T>(
       (error: unknown) => {
         clearTimeout(timer);
         reject(error);
-      }
+      },
     );
   });
 }
 
-const isMainModule = process.argv[1]?.endsWith("assistant-companion.ts") ||
+const isMainModule =
+  process.argv[1]?.endsWith("assistant-companion.ts") ||
   process.argv[1]?.endsWith("assistant-companion.js");
 
 if (isMainModule) {
   runAssistantCompanion().catch((error: unknown) => {
-    console.error(`[phone-assistant-companion] ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `[phone-assistant-companion] ${error instanceof Error ? error.message : String(error)}`,
+    );
     process.exitCode = 1;
   });
 }

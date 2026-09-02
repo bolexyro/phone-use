@@ -41,9 +41,9 @@ notifications, request handoff, and observation/action execution.
 Run now creates a phone-owned request that the desktop Codex companion can
 claim. An authenticated LAN development bridge carries that handoff and the
 typed execution path: the companion starts a Codex App Server turn, while the
-configured MCP adapter sends allowlist, observation, single-action, and
-sequence requests back to this app over NDJSON. The legacy `demo_run` request
-remains available for the open -> observe -> tap smoke test.
+configured MCP adapter sends allowlist, foreground-context, observation,
+single-action, and sequence requests back to this app over NDJSON. The legacy
+`demo_run` request remains available for the open -> observe -> tap smoke test.
 
 DHD keeps one local assistant conversation. The stored Codex thread is reused
 when a new request arrives within three hours of the last activity. After three

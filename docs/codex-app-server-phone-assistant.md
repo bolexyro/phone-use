@@ -118,13 +118,16 @@ its loopback port instead:
 adb forward tcp:8765 tcp:8765
 ```
 
-Codex App Server can then discover this seven-tool DHD surface from the `dhd`
+Codex App Server can then discover this eight-tool DHD surface from the `dhd`
 MCP server:
 
 - `dhd_list_allowed_apps` — show the phone-side packages currently enabled in
   the per-app allowlist (all apps start disabled).
 - `dhd_observe` — return the current screenshot and foreground context for the
   next action. The returned observation ID is the action's preflight baseline.
+- `dhd_get_foreground_app` — read the current foreground package, activity, and
+  display context without taking a screenshot or creating an observation ID.
+  This is read-only context; call `dhd_observe` before any phone action.
 - `dhd_open_app` — open one allowlisted app and return the actual post-action
   observation.
 - `dhd_execute` — execute one typed interaction and return the actual
@@ -218,6 +221,7 @@ The bridge preserves the pre-pivot MCP primitives in phone-owned form:
 | MCP-stage interaction | Phone action | Notes |
 | --- | --- | --- |
 | Open app | `dhd_open_app` / `open_app` internally | Launch component is resolved by Android; allowlist is enforced on the phone. |
+| Foreground context | `dhd_get_foreground_app` | Read-only package/activity/display context; it is not an action observation. |
 | Coordinate tap | `tap` | Coordinates use the agent's observation ID; structural state is checked before input. |
 | Fixed typed sequence | `dhd_execute_sequence` | Up to 16 typed actions run serially; each step uses the prior verified post-action observation. |
 | Directional scroll | `scroll` | Android derives a bounded swipe from direction + amount. |

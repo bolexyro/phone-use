@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.hardware.display.DisplayManager
+import android.util.DisplayMetrics
 import android.view.Display
 import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot
@@ -20,6 +21,38 @@ sealed interface ObservationCaptureResult {
     data class Failed(val message: String) : ObservationCaptureResult
 }
 
+data class ForegroundAppInfo(
+    val packageName: String,
+    val activityName: String,
+    val displayId: Int,
+    val rotation: Int,
+    val width: Int,
+    val height: Int,
+)
+
+sealed interface ForegroundAppResult {
+    data class Succeeded(val app: ForegroundAppInfo) : ForegroundAppResult
+    data class Failed(val code: String, val message: String) : ForegroundAppResult
+}
+
+internal data class FocusedWindow(
+    val packageName: String,
+    val activityName: String,
+)
+
+internal fun parseFocusedWindow(text: String): FocusedWindow? {
+    val match = FOCUS_REGEX.find(text) ?: return null
+    val packageName = match.groupValues[1]
+    val activityName = match.groupValues[2].let { raw ->
+        if (raw.startsWith('.')) packageName + raw else raw
+    }
+    return FocusedWindow(packageName, activityName)
+}
+
+private val FOCUS_REGEX = Regex(
+    "m(?:CurrentFocus|FocusedApp)=.*\\s([A-Za-z0-9_.\\$]+)/(\\.?[A-Za-z0-9_.\\$]+)",
+)
+
 /**
  * Captures the physical display using the Shizuku shell and records the
  * package/fingerprint binding needed by the policy layer.
@@ -33,6 +66,49 @@ class ShizukuObservationProvider(
     private val context: Context,
     private val processRunner: ShizukuProcessRunner,
 ) {
+    /**
+     * Read the current focused window without taking a screenshot or creating
+     * an observation baseline. This is only situational context; callers must
+     * still use capture() before sending any physical input.
+     */
+    suspend fun getForegroundApp(): ForegroundAppResult {
+        val focused = when (val result = readFocusedWindowResult()) {
+            is FocusedWindowReadResult.Found -> result.window
+            is FocusedWindowReadResult.Failed -> {
+                return ForegroundAppResult.Failed(result.code, result.message)
+            }
+        }
+        val display = context.getSystemService(DisplayManager::class.java)
+            ?.getDisplay(Display.DEFAULT_DISPLAY)
+            ?: return ForegroundAppResult.Failed(
+                code = "FOREGROUND_UNAVAILABLE",
+                message = "The default display could not be identified.",
+            )
+        val metrics = DisplayMetrics()
+        runCatching { display.getRealMetrics(metrics) }.getOrElse {
+            return ForegroundAppResult.Failed(
+                code = "FOREGROUND_UNAVAILABLE",
+                message = "The current display dimensions could not be identified.",
+            )
+        }
+        if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
+            return ForegroundAppResult.Failed(
+                code = "FOREGROUND_UNAVAILABLE",
+                message = "The current display has no usable dimensions.",
+            )
+        }
+        return ForegroundAppResult.Succeeded(
+            ForegroundAppInfo(
+                packageName = focused.packageName,
+                activityName = focused.activityName,
+                displayId = Display.DEFAULT_DISPLAY,
+                rotation = display.rotation,
+                width = metrics.widthPixels,
+                height = metrics.heightPixels,
+            ),
+        )
+    }
+
     suspend fun capture(
         expectedPackageName: String? = null,
         guardRegions: List<GuardRegion> = emptyList(),
@@ -84,19 +160,29 @@ class ShizukuObservationProvider(
         return ObservationCaptureResult.Succeeded(snapshot, screenshot)
     }
 
-    private suspend fun readFocusedWindow(): FocusedWindow? {
+    private suspend fun readFocusedWindow(): FocusedWindow? = when (val result = readFocusedWindowResult()) {
+        is FocusedWindowReadResult.Found -> result.window
+        is FocusedWindowReadResult.Failed -> null
+    }
+
+    private suspend fun readFocusedWindowResult(): FocusedWindowReadResult {
         // One UI's `dumpsys window windows` omits the focus summary. The
         // top-level `window` dump includes mCurrentFocus/mFocusedApp while
         // retaining the same shell permission boundary.
         val result = processRunner.run(listOf("dumpsys", "window"))
-        if (result.timedOut || result.exitCode != 0) return null
-        val text = result.stdout.toString(Charsets.UTF_8)
-        val match = FOCUS_REGEX.find(text) ?: return null
-        val packageName = match.groupValues[1]
-        val activityName = match.groupValues[2].let { raw ->
-            if (raw.startsWith('.')) packageName + raw else raw
+        if (result.timedOut || result.exitCode != 0) {
+            val detail = result.stderr.ifBlank { "exit ${result.exitCode}" }
+            return FocusedWindowReadResult.Failed(
+                code = foregroundFailureCode(detail),
+                message = "Could not read the current foreground app through Shizuku: $detail",
+            )
         }
-        return FocusedWindow(packageName, activityName)
+        val text = result.stdout.toString(Charsets.UTF_8)
+        return parseFocusedWindow(text)?.let(FocusedWindowReadResult::Found)
+            ?: FocusedWindowReadResult.Failed(
+                code = "FOREGROUND_UNAVAILABLE",
+                message = "The current foreground app could not be identified.",
+            )
     }
 
     private fun decodeBounds(bytes: ByteArray): Pair<Int, Int>? {
@@ -145,17 +231,17 @@ class ShizukuObservationProvider(
         return sha256(bytes.array())
     }
 
-    private data class FocusedWindow(
-        val packageName: String,
-        val activityName: String,
-    )
+    private sealed interface FocusedWindowReadResult {
+        data class Found(val window: FocusedWindow) : FocusedWindowReadResult
+        data class Failed(val code: String, val message: String) : FocusedWindowReadResult
+    }
 
     private companion object {
-        // mCurrentFocus and mFocusedApp use the same package/component shape
-        // on current AOSP and One UI builds. The parser is deliberately narrow.
-        val FOCUS_REGEX = Regex(
-            "m(?:CurrentFocus|FocusedApp)=.*\\s([A-Za-z0-9_.\\$]+)/(\\.?[A-Za-z0-9_.\\$]+)",
-        )
+        private fun foregroundFailureCode(detail: String): String = when {
+            detail.contains("Shizuku is unavailable", ignoreCase = true) -> "SHIZUKU_UNAVAILABLE"
+            detail.contains("permission is required", ignoreCase = true) -> "SHIZUKU_PERMISSION_REQUIRED"
+            else -> "FOREGROUND_UNAVAILABLE"
+        }
 
         fun sha256(bytes: ByteArray): String = MessageDigest
             .getInstance("SHA-256")

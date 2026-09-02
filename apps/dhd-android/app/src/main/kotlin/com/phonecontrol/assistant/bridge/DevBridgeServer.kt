@@ -25,6 +25,7 @@ import com.phonecontrol.assistant.session.ActionExecutionResult
 import com.phonecontrol.assistant.session.AssistantForegroundService
 import com.phonecontrol.assistant.session.SessionCoordinator
 import com.phonecontrol.assistant.session.SessionState
+import com.phonecontrol.assistant.shizuku.ForegroundAppResult
 import com.phonecontrol.assistant.shizuku.ObservationCaptureResult
 import com.phonecontrol.assistant.shizuku.ShizukuObservationProvider
 import com.phonecontrol.assistant.shizuku.TransportResult
@@ -323,6 +324,7 @@ class DevBridgeServer(
                     "fail_session" -> failSession(requestId, json, writer)
                     "allowed_apps" -> allowedApps(requestId, json, writer)
                     "browse_apps" -> browseApps(requestId, json, writer)
+                    "foreground_app" -> foregroundApp(requestId, writer)
                     "observe" -> observe(requestId, json, writer)
                     "execute_action" -> phoneActionMutex.withLock { executeAction(requestId, json, writer) }
                     "execute_sequence" -> phoneActionMutex.withLock { executeSequence(requestId, json, writer) }
@@ -812,6 +814,33 @@ class DevBridgeServer(
                 remember(captured.snapshot)
                 writeObservation(writer, requestId, captured.snapshot, captured.screenshot)
             }
+        }
+    }
+
+    private suspend fun foregroundApp(
+        requestId: String,
+        writer: BufferedWriter,
+    ) {
+        when (val result = observationProvider.getForegroundApp()) {
+            is ForegroundAppResult.Failed -> write(
+                writer,
+                errorResponse(requestId, result.message).put("code", result.code),
+            )
+
+            is ForegroundAppResult.Succeeded -> write(
+                writer,
+                JSONObject()
+                    .put("type", "foreground_app")
+                    .put("requestId", requestId)
+                    .put("ok", true)
+                    .put("packageName", result.app.packageName)
+                    .put("activityName", result.app.activityName)
+                    .put("displayId", result.app.displayId)
+                    .put("rotation", result.app.rotation)
+                    .put("width", result.app.width)
+                    .put("height", result.app.height)
+                    .put("message", "The current foreground app is ${result.app.packageName}."),
+            )
         }
     }
 
