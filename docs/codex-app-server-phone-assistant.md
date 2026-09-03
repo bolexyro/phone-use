@@ -297,6 +297,8 @@ short label, such as “Searching for jollof rice”. Expanding an item reveals 
 target and full safe explanation. When the turn finishes, the companion marks
 the phone session completed. DHD pins its own App Server turns to `gpt-5.6-luna` with `max`
 reasoning by default, independently of the interactive Codex chat's settings.
+The expanded phone composer also exposes a persisted Fast toggle; enabled turns
+send `serviceTier: "priority"` and disabled turns send `serviceTier: "default"`.
 Set `PHONE_ASSISTANT_CODEX_MODEL` or `PHONE_ASSISTANT_CODEX_REASONING_EFFORT`
 only when intentionally overriding that development default. The companion runs
 `codex app-server --listen stdio:// --enable code_mode_host` so the App Server's

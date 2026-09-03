@@ -56,6 +56,7 @@ class AssistantForegroundService : Service() {
                         conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID),
                         reasoningEffort = intent.getStringExtra(EXTRA_REASONING_EFFORT)
                             ?: ReasoningEffort.default.codexValue,
+                        fastMode = intent.getBooleanExtra(EXTRA_FAST_MODE, false),
                     )
                 }
             }
@@ -160,6 +161,7 @@ class AssistantForegroundService : Service() {
         const val EXTRA_REQUEST = "com.phonecontrol.assistant.extra.REQUEST"
         const val EXTRA_CONVERSATION_ID = "com.phonecontrol.assistant.extra.CONVERSATION_ID"
         const val EXTRA_REASONING_EFFORT = "com.phonecontrol.assistant.extra.REASONING_EFFORT"
+        const val EXTRA_FAST_MODE = "com.phonecontrol.assistant.extra.FAST_MODE"
 
         private const val CHANNEL_ID = "assistant_sessions"
         private const val RESULT_CHANNEL_ID = "assistant_results"

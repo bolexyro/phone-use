@@ -54,6 +54,7 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -109,6 +110,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
@@ -147,10 +149,12 @@ fun AssistantScreen(
     store: ConversationStore,
     coordinator: SessionCoordinator,
     @Suppress("UNUSED_PARAMETER") initialConversationId: String?,
-    onRunRequest: (String, String?, String?) -> Unit,
+    onRunRequest: (String, String?, String?, Boolean) -> Unit,
     reasoningEffort: ReasoningEffort,
     visibleReasoningEfforts: List<ReasoningEffort>,
     onSelectReasoningEffort: (ReasoningEffort) -> Unit,
+    fastMode: Boolean,
+    onSetFastMode: (Boolean) -> Unit,
     onStopSession: () -> Unit,
     onSteerRequest: (String) -> Boolean,
     onOpenSettings: () -> Unit,
@@ -169,6 +173,7 @@ fun AssistantScreen(
     var steerDraft by rememberSaveable { mutableStateOf("") }
     var steerDraftSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var steerDraftReasoningEffort by rememberSaveable { mutableStateOf<String?>(null) }
+    var steerDraftFastMode by rememberSaveable { mutableStateOf<Boolean?>(null) }
     var composerEditText by rememberSaveable { mutableStateOf<String?>(null) }
     var showReasoningSelector by rememberSaveable { mutableStateOf(false) }
     val activeSessionId = state.sessionIdOrNullForUi()
@@ -178,6 +183,8 @@ fun AssistantScreen(
         if (steerDraftSessionId != activeSessionId) {
             steerDraft = ""
             steerDraftSessionId = activeSessionId
+            steerDraftReasoningEffort = null
+            steerDraftFastMode = null
         }
     }
     LaunchedEffect(state) {
@@ -195,8 +202,10 @@ fun AssistantScreen(
             normalRequest,
             DHD_CONVERSATION_ID,
             steerDraftReasoningEffort ?: reasoningEffort.codexValue,
+            steerDraftFastMode ?: fastMode,
         )
         steerDraftReasoningEffort = null
+        steerDraftFastMode = null
     }
     val recentCutoff = System.currentTimeMillis() - RECENT_HISTORY_WINDOW_MS
     val recentTimeline = timeline.filter { item ->
@@ -301,7 +310,12 @@ fun AssistantScreen(
                         EmptyChat(
                             modifier = Modifier.fillMaxSize(),
                             onSelectPrompt = {
-                                prompt -> onRunRequest(prompt, DHD_CONVERSATION_ID, reasoningEffort.codexValue)
+                                prompt -> onRunRequest(
+                                    prompt,
+                                    DHD_CONVERSATION_ID,
+                                    reasoningEffort.codexValue,
+                                    fastMode,
+                                )
                             },
                         )
                     } else {
@@ -347,6 +361,7 @@ fun AssistantScreen(
                                     if (onSteerRequest(steerDraft)) {
                                         steerDraft = ""
                                         steerDraftReasoningEffort = null
+                                        steerDraftFastMode = null
                                         true
                                     } else {
                                         false
@@ -355,6 +370,7 @@ fun AssistantScreen(
                                 onDismiss = {
                                     steerDraft = ""
                                     steerDraftReasoningEffort = null
+                                    steerDraftFastMode = null
                                 },
                                 onEdit = {
                                     composerEditText = steerDraft
@@ -371,6 +387,8 @@ fun AssistantScreen(
                             visibleReasoningEfforts = visibleReasoningEfforts,
                             showReasoningSelector = showReasoningSelector,
                             onOpenReasoningSelector = { showReasoningSelector = true },
+                            fastMode = fastMode,
+                            onSetFastMode = onSetFastMode,
                             onExpandedChanged = { expanded ->
                                 if (!expanded) showReasoningSelector = false
                             },
@@ -381,9 +399,15 @@ fun AssistantScreen(
                                     steerDraft = request
                                     steerDraftSessionId = activeSessionId
                                     steerDraftReasoningEffort = reasoningEffort.codexValue
+                                    steerDraftFastMode = fastMode
                                     true
                                 } else {
-                                    onRunRequest(request, DHD_CONVERSATION_ID, reasoningEffort.codexValue)
+                                    onRunRequest(
+                                        request,
+                                        DHD_CONVERSATION_ID,
+                                        reasoningEffort.codexValue,
+                                        fastMode,
+                                    )
                                     true
                                 }
                             },
@@ -1468,6 +1492,8 @@ private fun RequestComposer(
     canSteer: Boolean,
     reasoningEffort: ReasoningEffort,
     visibleReasoningEfforts: List<ReasoningEffort>,
+    fastMode: Boolean,
+    onSetFastMode: (Boolean) -> Unit,
     showReasoningSelector: Boolean,
     onOpenReasoningSelector: () -> Unit,
     onExpandedChanged: (Boolean) -> Unit,
@@ -1679,6 +1705,12 @@ private fun RequestComposer(
                     ) {
                         AttachButton(colors = colors)
                         Spacer(Modifier.weight(1f))
+                        FastModeButton(
+                            enabled = enabled,
+                            selected = fastMode,
+                            onToggle = { onSetFastMode(!fastMode) },
+                        )
+                        Spacer(Modifier.width(8.dp))
                         ReasoningEffortButton(
                             effort = reasoningEffort,
                             visibleEfforts = visibleReasoningEfforts,
@@ -1722,6 +1754,42 @@ private fun AttachButton(
                 contentDescription = "Attach",
                 tint = colors.textPrimary,
                 modifier = Modifier.size(24.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun FastModeButton(
+    enabled: Boolean,
+    selected: Boolean,
+    onToggle: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    val shape = RoundedCornerShape(18.dp)
+    Surface(
+        shape = shape,
+        color = if (selected) colors.accentBlue else Color.Transparent,
+        border = if (selected) null else BorderStroke(1.dp, colors.borderColor),
+        modifier = Modifier
+            .size(36.dp)
+            .clip(shape)
+            .toggleable(
+                value = selected,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = { onToggle() },
+            )
+            .semantics {
+                contentDescription = "Fast mode: ${if (selected) "On" else "Off"}"
+            },
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painterResource(R.drawable.ic_fast_mode),
+                contentDescription = null,
+                tint = if (selected) Color.White else if (enabled) colors.textPrimary else colors.textSecondary.copy(alpha = 0.45f),
+                modifier = Modifier.size(18.dp),
             )
         }
     }

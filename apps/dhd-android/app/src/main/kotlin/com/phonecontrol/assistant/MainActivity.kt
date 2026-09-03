@@ -17,15 +17,19 @@ class MainActivity : ComponentActivity() {
     private var pendingRequest: String? = null
     private var pendingConversationId: String? = null
     private var pendingReasoningEffort: String? = null
+    private var pendingFastMode: Boolean = false
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            pendingRequest?.let { launchSession(it, pendingConversationId, pendingReasoningEffort) }
+            pendingRequest?.let {
+                launchSession(it, pendingConversationId, pendingReasoningEffort, pendingFastMode)
+            }
         }
         pendingRequest = null
         pendingConversationId = null
         pendingReasoningEffort = null
+        pendingFastMode = false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,7 +54,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startSession(request: String, conversationId: String?, reasoningEffort: String?) {
+    private fun startSession(
+        request: String,
+        conversationId: String?,
+        reasoningEffort: String?,
+        fastMode: Boolean,
+    ) {
         if (request.isBlank()) return
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -60,9 +69,10 @@ class MainActivity : ComponentActivity() {
             pendingRequest = request
             pendingConversationId = conversationId
             pendingReasoningEffort = reasoningEffort
+            pendingFastMode = fastMode
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            launchSession(request, conversationId, reasoningEffort)
+            launchSession(request, conversationId, reasoningEffort, fastMode)
         }
     }
 
@@ -70,6 +80,7 @@ class MainActivity : ComponentActivity() {
         request: String,
         conversationId: String? = null,
         reasoningEffort: String? = null,
+        fastMode: Boolean = false,
     ) {
         val intent = Intent(this, AssistantForegroundService::class.java)
             .setAction(AssistantForegroundService.ACTION_START)
@@ -80,6 +91,7 @@ class MainActivity : ComponentActivity() {
         if (!reasoningEffort.isNullOrBlank()) {
             intent.putExtra(AssistantForegroundService.EXTRA_REASONING_EFFORT, reasoningEffort)
         }
+        intent.putExtra(AssistantForegroundService.EXTRA_FAST_MODE, fastMode)
         ContextCompat.startForegroundService(this, intent)
     }
 

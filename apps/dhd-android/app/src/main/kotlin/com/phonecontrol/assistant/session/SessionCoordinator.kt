@@ -30,6 +30,7 @@ sealed interface SessionState {
         val startedAtEpochMs: Long,
         val conversationId: String? = null,
         val reasoningEffort: String = ReasoningEffort.default.codexValue,
+        val fastMode: Boolean = false,
     ) : SessionState
 
     data class Paused(
@@ -39,6 +40,7 @@ sealed interface SessionState {
         val startedAtEpochMs: Long,
         val conversationId: String? = null,
         val reasoningEffort: String = ReasoningEffort.default.codexValue,
+        val fastMode: Boolean = false,
     ) : SessionState
 
     data class Stopped(
@@ -71,6 +73,7 @@ data class PendingRequest(
     val conversationId: String? = null,
     val codexThreadId: String? = null,
     val reasoningEffort: String = ReasoningEffort.default.codexValue,
+    val fastMode: Boolean = false,
 )
 
 /** A user instruction waiting to be appended to the active Codex turn. */
@@ -112,6 +115,7 @@ class SessionCoordinator(
         request: String,
         conversationId: String? = null,
         reasoningEffort: String = ReasoningEffort.default.codexValue,
+        fastMode: Boolean = false,
     ): Boolean = synchronized(lock) {
         if (request.isBlank() || _state.value.isActive) return false
 
@@ -128,6 +132,7 @@ class SessionCoordinator(
             startedAtEpochMs = now,
             conversationId = startedRun?.conversationId ?: conversationId,
             reasoningEffort = normalizedReasoningEffort,
+            fastMode = fastMode,
         )
         sessionJob?.cancel()
         sessionJob = SupervisorJob()
@@ -267,6 +272,7 @@ class SessionCoordinator(
             startedAtEpochMs = running.startedAtEpochMs,
             conversationId = running.conversationId,
             reasoningEffort = running.reasoningEffort,
+            fastMode = running.fastMode,
         )
         conversationStore?.setRunStatus(running.sessionId, RunStatus.PAUSED)
         appendEvent(ActivityEventKind.SESSION_PAUSED, "Session paused.", running.sessionId)
@@ -282,6 +288,7 @@ class SessionCoordinator(
             startedAtEpochMs = paused.startedAtEpochMs,
             conversationId = paused.conversationId,
             reasoningEffort = paused.reasoningEffort,
+            fastMode = paused.fastMode,
         )
         conversationStore?.setRunStatus(paused.sessionId, RunStatus.RUNNING)
         appendEvent(ActivityEventKind.SESSION_RESUMED, "Session resumed.", paused.sessionId)
@@ -543,6 +550,7 @@ class SessionCoordinator(
         conversationId = running.conversationId,
         codexThreadId = conversationStore?.codexThreadId(running.conversationId),
         reasoningEffort = running.reasoningEffort,
+        fastMode = running.fastMode,
     )
 
     private fun appendEvent(

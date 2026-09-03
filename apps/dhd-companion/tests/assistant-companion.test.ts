@@ -118,6 +118,7 @@ describe("Codex App Server agent-message extraction", () => {
     };
     internals.notify = () => undefined;
     let threadStarts = 0;
+    const turnStartParams: Array<Record<string, unknown>> = [];
     internals.request = async (method: string, params?: Record<string, unknown>) => {
       requests.push(method);
       if (method === "initialize") return { result: {} };
@@ -127,6 +128,7 @@ describe("Codex App Server agent-message extraction", () => {
         return { result: { thread: { id: threadStarts === 1 ? "thread-loaded" : "thread-new" } } };
       }
       if (method === "turn/start") {
+        turnStartParams.push(params ?? {});
         turnInputs.push(params?.input);
         queueMicrotask(() => {
           internals.handleLine(JSON.stringify({
@@ -170,6 +172,11 @@ describe("Codex App Server agent-message extraction", () => {
       [{ type: "text", text: "hi" }],
       [{ type: "text", text: "second request" }],
       [{ type: "text", text: "rotated request" }]
+    ]);
+    expect(turnStartParams.map((params) => params.serviceTier)).toEqual([
+      "default",
+      "default",
+      "default"
     ]);
     expect(timingLogs.some((line) => line.includes("phase=turn/started"))).toBe(true);
     expect(timingLogs.some((line) => line.includes("phase=userMessage"))).toBe(true);

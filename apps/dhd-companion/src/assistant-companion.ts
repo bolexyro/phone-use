@@ -71,6 +71,8 @@ const PREWARM_RETRY_DELAY_MS = 500;
 // do not depend on the user's interactive Codex chat or global config.
 const DEFAULT_CODEX_MODEL = "gpt-5.6-luna";
 const DEFAULT_CODEX_EFFORT = "max";
+const DEFAULT_CODEX_SERVICE_TIER = "default";
+const FAST_CODEX_SERVICE_TIER = "priority";
 const CODEX_REASONING_EFFORTS = new Set([
   "low",
   "medium",
@@ -258,6 +260,7 @@ export class CodexAppServerClient {
     threadTitle?: string,
     timing?: PhaseTimer,
     reasoningEffort: string = resolveCodexEffort(),
+    fastMode = false,
     onAgentMessageDelta?: (update: AgentMessageStreamUpdate) => void,
   ): Promise<TurnResult> {
     const logger = timing ?? new PhaseTimer("codex-turn");
@@ -345,6 +348,7 @@ export class CodexAppServerClient {
           threadId,
           model: resolveCodexModel(),
           effort: normalizeCodexEffort(reasoningEffort),
+          serviceTier: serviceTierForFastMode(fastMode),
           cwd: this.runtimeCwd,
           input: [{ type: "text", text: phoneRequest }],
         });
@@ -1552,12 +1556,14 @@ async function processPendingRequest(
       typeof claimed.reasoningEffort === "string"
         ? claimed.reasoningEffort
         : undefined;
+    const fastMode = claimed.fastMode === true;
     const result = await codexClient.runTurn(
       request,
       existingThreadId,
       threadTitle,
       timing,
       reasoningEffort,
+      fastMode,
       (update) => agentMessageStreamer.push(update),
     );
     const phoneToolFailure = result.phoneToolFailures.at(-1);
@@ -2025,6 +2031,10 @@ function normalizeCodexEffort(value: string | undefined): string {
   return normalized && CODEX_REASONING_EFFORTS.has(normalized)
     ? normalized
     : DEFAULT_CODEX_EFFORT;
+}
+
+function serviceTierForFastMode(fastMode: boolean): string {
+  return fastMode ? FAST_CODEX_SERVICE_TIER : DEFAULT_CODEX_SERVICE_TIER;
 }
 
 function quoteWindowsCommand(command: string): string {

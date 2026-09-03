@@ -80,10 +80,16 @@ class SessionCoordinatorTest {
     @Test
     fun `pending desktop request carries the selected reasoning effort`() {
         val coordinator = coordinator()
-        coordinator.start("Find a restaurant", reasoningEffort = ReasoningEffort.EXTRA_HIGH.codexValue)
+        coordinator.start(
+            "Find a restaurant",
+            reasoningEffort = ReasoningEffort.EXTRA_HIGH.codexValue,
+            fastMode = true,
+        )
 
         assertEquals("xhigh", coordinator.pendingRequest()?.reasoningEffort)
         assertEquals("xhigh", (coordinator.state.value as SessionState.Running).reasoningEffort)
+        assertTrue(coordinator.pendingRequest()?.fastMode == true)
+        assertTrue((coordinator.state.value as SessionState.Running).fastMode)
     }
 
     @Test

@@ -113,6 +113,7 @@ private const val PREFS_NAME = "dhd_ui_preferences"
 private const val KEY_THEME_MODE = "pref_theme_mode"
 private const val KEY_REASONING_EFFORT = "pref_reasoning_effort"
 private const val KEY_VISIBLE_REASONING_EFFORTS = "pref_visible_reasoning_efforts"
+private const val KEY_FAST_MODE = "pref_fast_mode"
 
 enum class ThemeMode(val storageValue: String, val label: String) {
     SYSTEM("system", "System (Default)"),
@@ -146,7 +147,7 @@ object AppRoutes {
 @Composable
 fun PhoneControlApp(
     initialConversationId: String? = null,
-    onRunRequest: (String, String?, String?) -> Unit,
+    onRunRequest: (String, String?, String?, Boolean) -> Unit,
     onStopSession: () -> Unit,
     onSteerRequest: (String) -> Boolean,
 ) {
@@ -169,6 +170,9 @@ fun PhoneControlApp(
                 prefs.getString(KEY_VISIBLE_REASONING_EFFORTS, null),
             ).map(ReasoningEffort::storageValue),
         )
+    }
+    var fastMode by rememberSaveable {
+        mutableStateOf(prefs.getBoolean(KEY_FAST_MODE, false))
     }
 
     val isDarkMode = when (themeMode) {
@@ -198,6 +202,10 @@ fun PhoneControlApp(
             reasoningEffortValue = effort.storageValue
             prefs.edit().putString(KEY_REASONING_EFFORT, effort.storageValue).apply()
         }
+    }
+    val setFastMode: (Boolean) -> Unit = { enabled ->
+        fastMode = enabled
+        prefs.edit().putBoolean(KEY_FAST_MODE, enabled).apply()
     }
     val setReasoningEffortVisibility: (ReasoningEffort, Boolean) -> Unit = { effort, visible ->
         val current = visibleReasoningEfforts.toSet()
@@ -291,6 +299,8 @@ fun PhoneControlApp(
                             reasoningEffort = reasoningEffort,
                             visibleReasoningEfforts = visibleReasoningEfforts,
                             onSelectReasoningEffort = setReasoningEffort,
+                            fastMode = fastMode,
+                            onSetFastMode = setFastMode,
                             onStopSession = onStopSession,
                             onSteerRequest = onSteerRequest,
                             onOpenSettings = { navController.navigate(AppRoutes.SETTINGS) },

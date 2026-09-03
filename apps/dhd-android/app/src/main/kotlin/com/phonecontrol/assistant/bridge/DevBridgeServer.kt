@@ -354,7 +354,8 @@ class DevBridgeServer(
         val reasoningEffort = json.optString("reasoningEffort")
             .trim()
             .ifBlank { ReasoningEffort.default.codexValue }
-        if (!coordinator.start(request, conversationId, reasoningEffort)) {
+        val fastMode = json.optBoolean("fastMode", false)
+        if (!coordinator.start(request, conversationId, reasoningEffort, fastMode)) {
             write(writer, errorResponse(requestId, "The phone already has an active session."))
             return
         }
@@ -368,6 +369,7 @@ class DevBridgeServer(
                 .setAction(AssistantForegroundService.ACTION_START)
                 .putExtra(AssistantForegroundService.EXTRA_REQUEST, request)
                 .putExtra(AssistantForegroundService.EXTRA_REASONING_EFFORT, reasoningEffort)
+                .putExtra(AssistantForegroundService.EXTRA_FAST_MODE, fastMode)
             if (!conversationId.isNullOrBlank()) {
                 serviceIntent.putExtra(AssistantForegroundService.EXTRA_CONVERSATION_ID, conversationId)
             }
@@ -387,6 +389,7 @@ class DevBridgeServer(
                 .put("sessionId", sessionId)
                 .put("conversationId", (state as? SessionState.Running)?.conversationId ?: JSONObject.NULL)
                 .put("reasoningEffort", (state as? SessionState.Running)?.reasoningEffort ?: ReasoningEffort.default.codexValue)
+                .put("fastMode", (state as? SessionState.Running)?.fastMode ?: false)
                 .put("message", "Phone assistant session started."),
         )
     }
@@ -409,12 +412,14 @@ class DevBridgeServer(
                 .put("conversationId", state.conversationId ?: JSONObject.NULL)
                 .put("request", state.request)
                 .put("currentPurpose", state.currentPurpose)
+                .put("fastMode", state.fastMode)
                 .put("requestAvailable", coordinator.pendingRequest()?.sessionId == state.sessionId)
             is SessionState.Paused -> response
                 .put("sessionId", state.sessionId)
                 .put("conversationId", state.conversationId ?: JSONObject.NULL)
                 .put("request", state.request)
                 .put("currentPurpose", state.currentPurpose)
+                .put("fastMode", state.fastMode)
             else -> Unit
         }
         write(writer, response)
@@ -441,6 +446,7 @@ class DevBridgeServer(
                 .put("conversationId", pending.conversationId ?: JSONObject.NULL)
                 .put("codexThreadId", pending.codexThreadId ?: JSONObject.NULL)
                 .put("reasoningEffort", pending.reasoningEffort)
+                .put("fastMode", pending.fastMode)
                 .put("request", pending.request)
         }
         write(writer, response)
@@ -471,6 +477,7 @@ class DevBridgeServer(
                 .put("conversationId", claimed.conversationId ?: JSONObject.NULL)
                 .put("codexThreadId", claimed.codexThreadId ?: JSONObject.NULL)
                 .put("reasoningEffort", claimed.reasoningEffort)
+                .put("fastMode", claimed.fastMode)
                 .put("request", claimed.request)
                 .put("message", "Phone request claimed by the desktop Codex companion."),
         )
