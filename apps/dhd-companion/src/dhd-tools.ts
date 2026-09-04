@@ -324,6 +324,9 @@ export function normalizeScreenshot(
 function withoutScreenshot(message: BridgeMessage): Record<string, unknown> {
   const copy = { ...message };
   delete copy.screenshotBase64;
+  delete copy.beforeScreenshotBase64;
+  delete copy.beforeScreenshotMimeType;
+  delete copy.beforeObservation;
   return copy;
 }
 
@@ -334,11 +337,25 @@ type AssistantImageContent = {
   mimeType: typeof DHD_SCREENSHOT_MIME_TYPE;
 };
 
+export type PhoneAssistantDebugImage = {
+  type: "image";
+  label: "before" | "after";
+  data: string;
+  mimeType: typeof DHD_SCREENSHOT_MIME_TYPE;
+};
+
+export interface DhdToolInvocationOptions {
+  /** Include dashboard-only before/after screenshots in the diagnostic event. */
+  includeDebugImages?: boolean;
+}
+
 export interface PhoneAssistantToolResult {
   [key: string]: unknown;
   isError?: boolean;
   content: Array<AssistantTextContent | AssistantImageContent>;
   structuredContent?: Record<string, unknown>;
+  /** Never consumed by the model-facing dynamic-tool response. */
+  debugImages?: PhoneAssistantDebugImage[];
 }
 
 interface DhdMarkerContext {
@@ -436,7 +453,8 @@ function renderScreenshot(
 export function toMcpResult(
   message: BridgeMessage,
   error?: unknown,
-  markerContext?: DhdMarkerContext
+  markerContext?: DhdMarkerContext,
+  options: DhdToolInvocationOptions = {},
 ): PhoneAssistantToolResult {
   const isError = Boolean(error) || message.ok === false;
   if (message.type === "stopped") screenshotMarkerPresenter.reset();
@@ -445,10 +463,54 @@ export function toMcpResult(
   ];
   let screenshot = normalizeScreenshot(message.screenshotBase64, message.screenshotMimeType);
   let marker: ScreenshotMarker | undefined;
+  let debugImages: PhoneAssistantDebugImage[] | undefined;
+  let beforeScreenshot: NormalizedScreenshot | undefined;
+  if (options.includeDebugImages) {
+    try {
+      beforeScreenshot = normalizeScreenshot(
+        message.beforeScreenshotBase64,
+        message.beforeScreenshotMimeType,
+      );
+    } catch (debugError) {
+      console.error(
+        `[phone-assistant-mcp] debug before-screenshot ignored: ${
+          debugError instanceof Error ? debugError.message : String(debugError)
+        }`,
+      );
+    }
+  }
+  if (beforeScreenshot && screenshot && !error && message.ok === true) {
+    const beforeMessage: BridgeMessage = {
+      ...message,
+      ...(message.beforeObservation !== undefined
+        ? { observation: message.beforeObservation }
+        : {})
+    };
+    const beforeRendered = renderScreenshot(beforeMessage, beforeScreenshot, markerContext);
+    const afterRendered = renderScreenshot(message, screenshot, markerContext);
+    screenshot = afterRendered.screenshot;
+    marker = afterRendered.marker;
+    debugImages = [
+      {
+        type: "image",
+        label: "before",
+        data: beforeRendered.screenshot.base64,
+        mimeType: beforeRendered.screenshot.mimeType,
+      },
+      {
+        type: "image",
+        label: "after",
+        data: afterRendered.screenshot.base64,
+        mimeType: afterRendered.screenshot.mimeType,
+      },
+    ];
+  }
   if (screenshot && !error) {
-    const rendered = renderScreenshot(message, screenshot, markerContext);
-    screenshot = rendered.screenshot;
-    marker = rendered.marker;
+    if (!debugImages) {
+      const rendered = renderScreenshot(message, screenshot, markerContext);
+      screenshot = rendered.screenshot;
+      marker = rendered.marker;
+    }
   }
   const responseMessage = withoutScreenshot(message);
   if (marker) responseMessage.screenshotMarker = marker;
@@ -464,16 +526,18 @@ export function toMcpResult(
     content,
     structuredContent: error
       ? { ok: false, message: error instanceof Error ? error.message : String(error) }
-      : responseMessage
+      : responseMessage,
+    ...(debugImages ? { debugImages } : {})
   };
 }
 
 async function safely(
   work: () => Promise<BridgeMessage>,
-  markerContext?: () => DhdMarkerContext | undefined
+  markerContext?: () => DhdMarkerContext | undefined,
+  options: DhdToolInvocationOptions = {},
 ) {
   try {
-    return toMcpResult(await work(), undefined, markerContext?.());
+    return toMcpResult(await work(), undefined, markerContext?.(), options);
   } catch (error) {
     console.error(`[phone-assistant-mcp] ${error instanceof Error ? error.message : String(error)}`);
     return toMcpResult({ ok: false }, error);
@@ -489,7 +553,8 @@ async function safely(
  */
 export async function invokeDhdTool(
   name: string,
-  input: unknown
+  input: unknown,
+  options: DhdToolInvocationOptions = {},
 ): Promise<PhoneAssistantToolResult> {
   const schemas = createDhdToolSchemas();
   switch (name) {
@@ -534,7 +599,7 @@ export async function invokeDhdTool(
           ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {}),
           ...(guardRegions ? { guardRegions } : {})
         });
-      });
+      }, undefined, options);
     case "dhd_open_app":
       let openedAction: Record<string, unknown> | undefined;
       return safely(() => {
@@ -552,14 +617,14 @@ export async function invokeDhdTool(
             metadata: parsed.metadata
           }
         });
-      }, () => ({ resetMarker: true, action: openedAction }));
+      }, () => ({ resetMarker: true, action: openedAction }), options);
     case "dhd_execute":
       let executedAction: Record<string, unknown> | undefined;
       return safely(() => {
         const action = parseInput(schemas.dhdExecuteActionSchema, readRecord(input).action);
         executedAction = action as unknown as Record<string, unknown>;
         return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
-      }, () => ({ action: executedAction }));
+      }, () => ({ action: executedAction }), options);
     case "dhd_execute_sequence":
       let sequenceActions: readonly Record<string, unknown>[] | undefined;
       return safely(() => {
@@ -571,7 +636,7 @@ export async function invokeDhdTool(
           observationId: parsed.observationId,
           actions: parsed.actions
         });
-      }, () => ({ sequenceActions }));
+      }, () => ({ sequenceActions }), options);
     case "dhd_request_attention":
       return safely(() => {
         const reason = parseInput(z.string().min(1).max(DHD_MAX_TEXT_CHARS), readRecord(input).reason);

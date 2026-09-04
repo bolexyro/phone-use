@@ -431,7 +431,11 @@ class SessionCoordinator(
     }
 
     /** Record a safe purpose-bearing operation such as a fresh screen observation. */
-    fun recordPurpose(purpose: String, targetDescription: String? = null): Boolean = synchronized(lock) {
+    fun recordPurpose(
+        purpose: String,
+        targetDescription: String? = null,
+        toolName: String? = null,
+    ): Boolean = synchronized(lock) {
         val sessionId = _state.value.sessionIdOrNull ?: return@synchronized false
         val safePurpose = userFacingActivityLabel(actionType = null, purpose = purpose)
             .take(MAX_TEXT_CHARS)
@@ -447,6 +451,7 @@ class SessionCoordinator(
             ActivityEventKind.SYSTEM,
             safePurpose,
             sessionId = sessionId,
+            toolName = toolName,
             purpose = safePurpose,
             targetDescription = targetDescription?.trim()?.take(MAX_TEXT_CHARS),
         )
@@ -457,6 +462,7 @@ class SessionCoordinator(
     suspend fun executeAction(
         action: PhoneAction,
         observation: ObservationSnapshot?,
+        toolName: String? = null,
     ): ActionExecutionResult {
         val running = _state.value as? SessionState.Running
             ?: return ActionExecutionResult.SessionNotRunning
@@ -473,6 +479,7 @@ class SessionCoordinator(
             action.metadata.purpose,
             sessionId = running.sessionId,
             actionType = action.type,
+            toolName = toolName,
             purpose = displayPurpose,
             observationId = action.metadata.observationId,
             targetDescription = action.metadata.targetDescription,
@@ -495,6 +502,7 @@ class SessionCoordinator(
                     decision.message,
                     sessionId = running.sessionId,
                     actionType = action.type,
+                    toolName = toolName,
                     purpose = displayPurpose,
                     observationId = action.metadata.observationId,
                     targetDescription = action.metadata.targetDescription,
@@ -508,6 +516,7 @@ class SessionCoordinator(
             "Executing ${action.type.name.lowercase().replace('_', ' ')}",
             sessionId = running.sessionId,
             actionType = action.type,
+            toolName = toolName,
             purpose = displayPurpose,
             observationId = action.metadata.observationId,
             targetDescription = action.metadata.targetDescription,
@@ -523,6 +532,7 @@ class SessionCoordinator(
             transportMessage(result),
             sessionId = running.sessionId,
             actionType = action.type,
+            toolName = toolName,
             purpose = displayPurpose,
             observationId = action.metadata.observationId,
             targetDescription = action.metadata.targetDescription,
@@ -558,6 +568,7 @@ class SessionCoordinator(
         message: String,
         sessionId: String? = _state.value.sessionIdOrNull,
         actionType: com.phonecontrol.assistant.domain.ActionType? = null,
+        toolName: String? = null,
         purpose: String? = null,
         observationId: String? = null,
         targetDescription: String? = null,
@@ -570,6 +581,7 @@ class SessionCoordinator(
             kind = kind,
             message = message,
             actionType = actionType,
+            toolName = toolName,
             purpose = purpose,
             observationId = observationId,
             targetDescription = targetDescription,

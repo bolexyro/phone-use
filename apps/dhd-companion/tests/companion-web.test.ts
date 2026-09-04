@@ -48,6 +48,7 @@ describe("companion tool diagnostics", () => {
   it("keeps text and structured response data while serving images outside SSE state", async () => {
     const { baseUrl } = await openWebServer();
     const imageData = Buffer.from("test-image").toString("base64");
+    const beforeImageData = Buffer.from("before-image").toString("base64");
 
     ingestCompanionToolCallEvent({
       type: "dhd_tool_call",
@@ -66,6 +67,10 @@ describe("companion tool diagnostics", () => {
         content: [
           { type: "text", text: '{"ok":true}' },
           { type: "image", data: imageData, mimeType: "image/png" },
+        ],
+        debugImages: [
+          { type: "image", label: "before", data: beforeImageData, mimeType: "image/png" },
+          { type: "image", label: "after", data: imageData, mimeType: "image/png" },
         ],
         structuredContent: { ok: true },
       },
@@ -89,11 +94,28 @@ describe("companion tool diagnostics", () => {
             index: 1,
           }
         ],
+        debugImages: [
+          {
+            type: "image",
+            label: "before",
+            imageUrl: "/api/tool-calls/call-image/images/0?source=debug",
+            mimeType: "image/png",
+            index: 0,
+          },
+          {
+            type: "image",
+            label: "after",
+            imageUrl: "/api/tool-calls/call-image/images/1?source=debug",
+            mimeType: "image/png",
+            index: 1,
+          },
+        ],
         structuredContent: { ok: true },
       },
     });
     expect(state.toolCalls[0].response).not.toHaveProperty("content");
     expect(JSON.stringify(state)).not.toContain(imageData);
+    expect(JSON.stringify(state)).not.toContain(beforeImageData);
 
     const imageUrl = `${baseUrl}${state.toolCalls[0].response?.images[0]?.imageUrl}`;
     const imageResponse = await fetch(imageUrl);
@@ -101,10 +123,17 @@ describe("companion tool diagnostics", () => {
     expect(imageResponse.headers.get("content-type")).toBe("image/png");
     expect(Buffer.from(await imageResponse.arrayBuffer())).toEqual(Buffer.from("test-image"));
 
+    const debugImageUrl = `${baseUrl}${state.toolCalls[0].response?.debugImages?.[0]?.imageUrl}`;
+    const debugImageResponse = await fetch(debugImageUrl);
+    expect(debugImageResponse.status).toBe(200);
+    expect(debugImageResponse.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await debugImageResponse.arrayBuffer())).toEqual(Buffer.from("before-image"));
+
     const clearResponse = await fetch(`${baseUrl}/api/clear-tool-calls`, { method: "POST" });
     expect(clearResponse.ok).toBe(true);
     expect((await readState(baseUrl)).toolCalls).toEqual([]);
     expect((await fetch(imageUrl)).status).toBe(404);
+    expect((await fetch(debugImageUrl)).status).toBe(404);
   });
 
   it("associates out-of-order completions with their stable call IDs and ignores non-DHD events", async () => {

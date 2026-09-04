@@ -38,7 +38,9 @@ class SequenceExecutorTest {
         val result = SequenceExecutor(
             executeAction = { action, observation ->
                 executedObservationIds += "${action.type.name.lowercase()}:${observation.id}:${action.metadata.observationId}"
-                ActionExecutionResult.TransportFinished(TransportResult.Succeeded("done"))
+                ActionExecutionResult.TransportFinished(
+                    TransportResult.Succeeded("done", beforeScreenshot = byteArrayOf(9)),
+                )
             },
             captureAfterAction = { captures[captureIndex++] },
             rememberObservation = { remembered += it.id },
@@ -51,6 +53,7 @@ class SequenceExecutorTest {
         assertEquals(listOf("tap", "keypress"), settledActions)
         assertEquals(listOf("obs-1", "obs-2"), remembered)
         assertEquals("obs-2", result.finalObservation?.snapshot?.id)
+        assertEquals(listOf<Byte>(9), result.beforeScreenshot?.toList())
         assertEquals(listOf("obs-1", "obs-2"), result.steps.mapNotNull { it.observationId })
     }
 

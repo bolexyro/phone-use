@@ -1218,6 +1218,13 @@ html[data-theme="light"] .connection-card {
   gap: 8px;
 }
 
+.tool-images-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .tool-images-title {
   color: var(--text-muted);
   font-size: 10px;
@@ -1232,9 +1239,33 @@ html[data-theme="light"] .connection-card {
   gap: 8px;
 }
 
+.tool-debug-image-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: flex-start;
+}
+
+.tool-debug-image {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  width: 100%;
+  margin: 0;
+}
+
+.tool-debug-image-label {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .tool-image-preview {
   display: block;
-  width: min(100%, 240px);
+  width: 100%;
   height: 180px;
   padding: 0;
   overflow: hidden;
@@ -1247,6 +1278,31 @@ html[data-theme="light"] .connection-card {
 .tool-image-preview:hover {
   border-color: var(--accent-blue-hover);
   transform: translateY(-1px);
+}
+
+.tool-image-pair-button {
+  flex-shrink: 0;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background-color: var(--bg-elevated);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tool-image-pair-button:hover {
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+}
+
+.tool-image-pair-button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
 }
 
 .tool-image-preview img {
@@ -1303,6 +1359,37 @@ html[data-theme="light"] .connection-card {
   max-width: 100%;
   max-height: calc(92vh - 72px);
   object-fit: contain;
+}
+
+.tool-image-dialog-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.tool-image-dialog-frame {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.tool-image-dialog-frame img {
+  width: 100%;
+  height: auto;
+  max-height: calc(92vh - 112px);
+}
+
+.tool-image-dialog-frame figcaption {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
 }
 
 @keyframes spin {

@@ -2,7 +2,9 @@ import type {
   CompanionClientApi,
   CompanionLogEntry,
   CompanionState,
-  CompanionToolCall
+  CompanionToolCall,
+  CompanionToolCallDebugImage,
+  CompanionToolCallImageContent
 } from "./api.js";
 import {
   displayPairingCode,
@@ -140,6 +142,7 @@ const elements = {
   toolList: byId<HTMLDivElement>("tool-list"),
   toolScrollContainer: byId<HTMLDivElement>("tool-scroll-container"),
   toolImageDialog: byId<HTMLDialogElement>("tool-image-dialog"),
+  toolImageDialogGallery: byId<HTMLDivElement>("tool-image-dialog-gallery"),
   toolImageDialogImage: byId<HTMLImageElement>("tool-image-dialog-image"),
   toolImageDialogLabel: byId<HTMLSpanElement>("tool-image-dialog-label"),
   closeToolImageDialog: byId<HTMLButtonElement>("close-tool-image-dialog"),
@@ -329,6 +332,145 @@ function toolCallDuration(call: CompanionToolCall): string {
   return `${call.durationMs}ms`;
 }
 
+type ToolImage = CompanionToolCallImageContent | CompanionToolCallDebugImage;
+
+function toolImageLabel(item: ToolImage): string {
+  return "label" in item
+    ? item.label === "before" ? "Before action" : "After action"
+    : `Response image ${item.index + 1}`;
+}
+
+function openToolImageDialog(
+  call: CompanionToolCall,
+  items: readonly ToolImage[],
+  title: string,
+): void {
+  const image = items[0];
+  if (!image) return;
+
+  elements.toolImageDialogLabel.textContent = `${call.tool} · ${title}`;
+  elements.toolImageDialogGallery.replaceChildren();
+
+  if (items.length === 1) {
+    const imageLabel = toolImageLabel(image);
+    elements.toolImageDialogGallery.hidden = true;
+    elements.toolImageDialogImage.hidden = false;
+    elements.toolImageDialogImage.src = image.imageUrl;
+    elements.toolImageDialogImage.alt = `${call.tool} ${imageLabel.toLowerCase()}`;
+  } else {
+    elements.toolImageDialogImage.hidden = true;
+    elements.toolImageDialogImage.removeAttribute("src");
+    elements.toolImageDialogImage.alt = "";
+    elements.toolImageDialogGallery.hidden = false;
+    elements.toolImageDialogGallery.setAttribute(
+      "aria-label",
+      `${call.tool} ${title.toLowerCase()}`,
+    );
+    elements.toolImageDialogGallery.setAttribute("role", "group");
+
+    for (const item of items) {
+      const imageLabel = toolImageLabel(item);
+      const frame = document.createElement("figure");
+      frame.className = "tool-image-dialog-frame";
+      const frameImage = document.createElement("img");
+      frameImage.src = item.imageUrl;
+      frameImage.alt = `${call.tool} ${imageLabel.toLowerCase()}`;
+      frameImage.loading = "eager";
+      frameImage.decoding = "async";
+      const caption = document.createElement("figcaption");
+      caption.textContent = imageLabel;
+      frame.append(frameImage, caption);
+      elements.toolImageDialogGallery.append(frame);
+    }
+  }
+
+  if (!elements.toolImageDialog.open) elements.toolImageDialog.showModal();
+}
+
+function resetToolImageDialog(): void {
+  elements.toolImageDialogGallery.replaceChildren();
+  elements.toolImageDialogGallery.hidden = true;
+  elements.toolImageDialogGallery.removeAttribute("aria-label");
+  elements.toolImageDialogGallery.removeAttribute("role");
+  elements.toolImageDialogImage.hidden = false;
+  elements.toolImageDialogImage.removeAttribute("src");
+  elements.toolImageDialogImage.alt = "Tool response image";
+}
+
+function renderToolImageSection(
+  call: CompanionToolCall,
+  title: string,
+  images: CompanionToolCallImageContent[] | CompanionToolCallDebugImage[],
+  showLabels = false,
+): HTMLDivElement {
+  const imageSection = document.createElement("div");
+  imageSection.className = "tool-images";
+  const imageHeader = document.createElement("div");
+  imageHeader.className = "tool-images-header";
+  const imageTitle = document.createElement("div");
+  imageTitle.className = "tool-images-title";
+  imageTitle.textContent = title;
+  imageHeader.append(imageTitle);
+  if (showLabels && images.length > 1) {
+    const viewBoth = document.createElement("button");
+    viewBoth.className = "tool-image-pair-button";
+    viewBoth.type = "button";
+    viewBoth.textContent = "View both frames";
+    viewBoth.setAttribute("aria-label", `Open both ${title.toLowerCase()}`);
+    viewBoth.addEventListener("click", () => {
+      openToolImageDialog(call, images, "Before and after action");
+    });
+    imageHeader.append(viewBoth);
+  }
+  imageSection.append(imageHeader);
+
+  const imageGrid = document.createElement("div");
+  imageGrid.className = showLabels ? "tool-image-grid tool-debug-image-grid" : "tool-image-grid";
+  for (const item of images) {
+    const imageLabel = toolImageLabel(item);
+    const imageAlt = `${call.tool} ${imageLabel.toLowerCase()}`;
+    const previewButton = document.createElement("button");
+    previewButton.className = "tool-image-preview";
+    previewButton.type = "button";
+    previewButton.title = showLabels && images.length > 1
+      ? "Open both frames"
+      : "Open image preview";
+    previewButton.setAttribute(
+      "aria-label",
+      showLabels && images.length > 1
+        ? `Open both ${title.toLowerCase()}`
+        : `Open ${imageAlt}`,
+    );
+    const image = document.createElement("img");
+    image.src = item.imageUrl;
+    image.alt = imageAlt;
+    image.loading = "lazy";
+    image.decoding = "async";
+    previewButton.append(image);
+    previewButton.addEventListener("click", () => {
+      openToolImageDialog(
+        call,
+        showLabels && images.length > 1 ? images : [item],
+        showLabels && images.length > 1 ? "Before and after action" : imageLabel,
+      );
+    });
+
+    if (showLabels) {
+      const frame = document.createElement("figure");
+      frame.className = "tool-debug-image";
+      const caption = document.createElement("figcaption");
+      caption.className = "tool-debug-image-label";
+      caption.textContent = imageLabel;
+      frame.append(previewButton, caption);
+      imageGrid.append(frame);
+    } else {
+      imageGrid.append(previewButton);
+    }
+  }
+  imageSection.append(imageGrid);
+  return imageSection;
+}
+
 function renderToolCall(
   call: CompanionToolCall,
   open: boolean,
@@ -407,38 +549,17 @@ function renderToolCall(
   }
 
   const images = call.response?.images ?? [];
-  if (images.length > 0) {
-    const imageSection = document.createElement("div");
-    imageSection.className = "tool-images";
-    const imageTitle = document.createElement("div");
-    imageTitle.className = "tool-images-title";
-    imageTitle.textContent = `Response images (${images.length})`;
-    imageSection.append(imageTitle);
-
-    const imageGrid = document.createElement("div");
-    imageGrid.className = "tool-image-grid";
-    for (const item of images) {
-      const previewButton = document.createElement("button");
-      previewButton.className = "tool-image-preview";
-      previewButton.type = "button";
-      previewButton.title = "Open image preview";
-      previewButton.setAttribute("aria-label", `Open ${call.tool} response image ${item.index + 1}`);
-      const image = document.createElement("img");
-      image.src = item.imageUrl;
-      image.alt = `${call.tool} response image ${item.index + 1}`;
-      image.loading = "lazy";
-      image.decoding = "async";
-      previewButton.append(image);
-      previewButton.addEventListener("click", () => {
-        elements.toolImageDialogImage.src = item.imageUrl;
-        elements.toolImageDialogImage.alt = image.alt;
-        elements.toolImageDialogLabel.textContent = `${call.tool} · image ${item.index + 1}`;
-        if (!elements.toolImageDialog.open) elements.toolImageDialog.showModal();
-      });
-      imageGrid.append(previewButton);
-    }
-    imageSection.append(imageGrid);
-    body.append(imageSection);
+  const debugImages = call.response?.debugImages ?? [];
+  if (debugImages.length > 0) {
+    body.append(renderToolImageSection(
+      call,
+      "Execution frames (before / after)",
+      debugImages,
+      true,
+    ));
+  }
+  if (images.length > 0 && !debugImages.some((item) => item.label === "after")) {
+    body.append(renderToolImageSection(call, `Response images (${images.length})`, images));
   }
 
   card.append(summary, body);
@@ -692,6 +813,8 @@ elements.toolImageDialog.addEventListener("click", (event) => {
     elements.toolImageDialog.close();
   }
 });
+
+elements.toolImageDialog.addEventListener("close", resetToolImageDialog);
 
 // Theme Management
 const themeToggle = document.getElementById("theme-toggle") as HTMLButtonElement | null;

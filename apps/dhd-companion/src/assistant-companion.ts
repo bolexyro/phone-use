@@ -1184,7 +1184,9 @@ export async function handleDynamicToolCall(
 
   let result: PhoneAssistantToolResult | undefined;
   try {
-    result = await invoke(mappedName, normalizedArguments.value);
+    result = options.invoke
+      ? await invoke(mappedName, normalizedArguments.value)
+      : await invokeDhdTool(mappedName, normalizedArguments.value, { includeDebugImages: true });
     const response = toDynamicToolResponse(result);
     emit({
       type: "dhd_tool_call",

@@ -128,7 +128,14 @@ import com.phonecontrol.assistant.apps.AppPermissionRepository
 import com.phonecontrol.assistant.apps.InstalledUserApp
 import com.phonecontrol.assistant.bridge.DevBridgeServer
 import com.phonecontrol.assistant.data.ConversationStore
+import com.phonecontrol.assistant.data.DHD_BROWSE_APP_TOOL
 import com.phonecontrol.assistant.data.DHD_CONVERSATION_ID
+import com.phonecontrol.assistant.data.DHD_EXECUTE_SEQUENCE_TOOL
+import com.phonecontrol.assistant.data.DHD_EXECUTE_TOOL
+import com.phonecontrol.assistant.data.DHD_FOREGROUND_APP_TOOL
+import com.phonecontrol.assistant.data.DHD_LIST_ALLOWED_APPS_TOOL
+import com.phonecontrol.assistant.data.DHD_OBSERVE_TOOL
+import com.phonecontrol.assistant.data.DHD_OPEN_APP_TOOL
 import com.phonecontrol.assistant.data.TimelineItem
 import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.userFacingActivityLabel
@@ -1340,11 +1347,25 @@ private fun WorkedTraceSection(
 private fun TraceStepRow(activity: TimelineItem.Activity) {
     val colors = LocalAssistantColors.current
 
-    val statusColor = when (activity.status.lowercase()) {
+    val status = activity.status.lowercase()
+    val statusColor = when (status) {
         "completed" -> colors.accentGreen
         "failed" -> colors.errorRed
         "attention" -> colors.warningAmber
         else -> colors.textSecondary
+    }
+    val iconColor = when (status) {
+        "failed" -> colors.errorRed
+        "attention" -> colors.warningAmber
+        else -> when (activity.toolName?.lowercase()) {
+            DHD_OBSERVE_TOOL, "dhd_observe_app" -> colors.accentBlue
+            DHD_EXECUTE_TOOL, DHD_EXECUTE_SEQUENCE_TOOL -> colors.accentGreen
+            DHD_BROWSE_APP_TOOL -> colors.accentPurple
+            DHD_OPEN_APP_TOOL -> colors.accentGold
+            DHD_FOREGROUND_APP_TOOL -> colors.accentOrange
+            DHD_LIST_ALLOWED_APPS_TOOL -> colors.accentPink
+            else -> statusColor
+        }
     }
 
     Row(
@@ -1357,8 +1378,8 @@ private fun TraceStepRow(activity: TimelineItem.Activity) {
     ) {
         Icon(
             painter = painterResource(R.drawable.ic_connected_nodes),
-            contentDescription = "Tool Call",
-            tint = statusColor,
+            contentDescription = "${activity.toolName ?: "Tool"} call",
+            tint = iconColor,
             modifier = Modifier.size(18.dp),
         )
         Text(

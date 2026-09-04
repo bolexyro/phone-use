@@ -20,7 +20,15 @@ import kotlinx.coroutines.delay
 sealed interface TransportResult {
     data class Rejected(val code: RejectionCode, val message: String) : TransportResult
     data class Unsupported(val message: String) : TransportResult
-    data class Succeeded(val message: String) : TransportResult
+    data class Succeeded(
+        val message: String,
+        /**
+         * The exact screenshot captured by the freshness check immediately
+         * before input dispatch. This is diagnostic metadata for the desktop
+         * companion and is never part of the model-facing action result.
+         */
+        val beforeScreenshot: ByteArray? = null,
+    ) : TransportResult
 }
 
 enum class RejectionCode {
@@ -82,7 +90,7 @@ class ShizukuActionTransport(
         }
 
         return when (action) {
-            is OpenAppAction -> openApp(action)
+            is OpenAppAction -> openApp(action, observation)
             is TapAction -> tap(action, observation)
             is TypeAction -> type(action, observation)
             is SwipeAction -> swipe(action, observation)
@@ -93,7 +101,14 @@ class ShizukuActionTransport(
         }
     }
 
-    private suspend fun openApp(action: OpenAppAction): TransportResult {
+    private suspend fun openApp(
+        action: OpenAppAction,
+        observation: ObservationSnapshot,
+    ): TransportResult {
+        val before = when (val check = freshCheck(action, observation)) {
+            is FreshCheck.Rejected -> return check.result
+            is FreshCheck.Ready -> check
+        }
         val launchIntent = context.packageManager.getLaunchIntentForPackage(action.packageName)
             ?: return TransportResult.Rejected(
                 RejectionCode.COMMAND_FAILED,
@@ -123,17 +138,18 @@ class ShizukuActionTransport(
         return commandResult(
             result,
             successMessage = "Opened ${action.packageName}.",
-        )
+        ).withBeforeScreenshot(before.screenshot)
     }
 
     private suspend fun tap(
         action: TapAction,
         observation: ObservationSnapshot,
     ): TransportResult {
-        val current = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation)) {
             is FreshCheck.Rejected -> return check.result
-            is FreshCheck.Ready -> check.snapshot
+            is FreshCheck.Ready -> check
         }
+        val current = before.snapshot
         if (!current.contains(action.x, action.y)) {
             return TransportResult.Rejected(
                 RejectionCode.INVALID_COORDINATE,
@@ -147,16 +163,16 @@ class ShizukuActionTransport(
         return commandResult(
             result,
             successMessage = "Tapped ${action.x},${action.y}: ${action.metadata.purpose}",
-        )
+        ).withBeforeScreenshot(before.screenshot)
     }
 
     private suspend fun type(
         action: TypeAction,
         observation: ObservationSnapshot,
     ): TransportResult {
-        when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation)) {
             is FreshCheck.Rejected -> return check.result
-            is FreshCheck.Ready -> Unit
+            is FreshCheck.Ready -> check
         }
         val encoded = try {
             encodeInputText(action.text)
@@ -170,17 +186,18 @@ class ShizukuActionTransport(
         return commandResult(
             result,
             successMessage = "Typed ${action.text.length} characters: ${action.metadata.purpose}",
-        )
+        ).withBeforeScreenshot(before.screenshot)
     }
 
     private suspend fun swipe(
         action: SwipeAction,
         observation: ObservationSnapshot,
     ): TransportResult {
-        val current = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation)) {
             is FreshCheck.Rejected -> return check.result
-            is FreshCheck.Ready -> check.snapshot
+            is FreshCheck.Ready -> check
         }
+        val current = before.snapshot
         if (!current.contains(action.startX, action.startY) || !current.contains(action.endX, action.endY)) {
             return TransportResult.Rejected(
                 RejectionCode.INVALID_COORDINATE,
@@ -201,7 +218,7 @@ class ShizukuActionTransport(
         return commandResult(
             result,
             successMessage = "Swiped from ${action.startX},${action.startY} to ${action.endX},${action.endY}: ${action.metadata.purpose}",
-        )
+        ).withBeforeScreenshot(before.screenshot)
     }
 
     private suspend fun back(
@@ -220,9 +237,9 @@ class ShizukuActionTransport(
         observation: ObservationSnapshot,
         displayName: String = "Pressed ${action.key.name}",
     ): TransportResult {
-        when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation)) {
             is FreshCheck.Rejected -> return check.result
-            is FreshCheck.Ready -> Unit
+            is FreshCheck.Ready -> check
         }
         val keyCode = when (action.key) {
             KeypressKey.BACK -> "KEYCODE_BACK"
@@ -232,16 +249,18 @@ class ShizukuActionTransport(
         }
         val result = processRunner.run(listOf("input", "keyevent", keyCode))
         return commandResult(result, successMessage = "$displayName: ${action.metadata.purpose}")
+            .withBeforeScreenshot(before.screenshot)
     }
 
     private suspend fun scroll(
         action: ScrollAction,
         observation: ObservationSnapshot,
     ): TransportResult {
-        val current = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation)) {
             is FreshCheck.Rejected -> return check.result
-            is FreshCheck.Ready -> check.snapshot
+            is FreshCheck.Ready -> check
         }
+        val current = before.snapshot
         val gesture = scrollGesture(current, action.direction, action.amount)
         val result = processRunner.run(
             listOf(
@@ -257,19 +276,22 @@ class ShizukuActionTransport(
         return commandResult(
             result,
             successMessage = "Scrolled ${action.direction.name.lowercase()} (${action.amount.name.lowercase()}): ${action.metadata.purpose}",
-        )
+        ).withBeforeScreenshot(before.screenshot)
     }
 
     private suspend fun wait(
         action: WaitAction,
         observation: ObservationSnapshot,
     ): TransportResult {
-        when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation)) {
             is FreshCheck.Rejected -> return check.result
-            is FreshCheck.Ready -> Unit
+            is FreshCheck.Ready -> check
         }
         delay(action.durationMs)
-        return TransportResult.Succeeded("Waited ${action.durationMs} ms: ${action.metadata.purpose}")
+        return TransportResult.Succeeded(
+            "Waited ${action.durationMs} ms: ${action.metadata.purpose}",
+            beforeScreenshot = before.screenshot.copyOf(),
+        )
     }
 
     private suspend fun freshCheck(
@@ -307,7 +329,7 @@ class ShizukuActionTransport(
                 ),
             )
         }
-        return FreshCheck.Ready(current)
+        return FreshCheck.Ready(current, fresh.screenshot)
     }
 
     private fun commandResult(
@@ -325,9 +347,18 @@ class ShizukuActionTransport(
     }
 
     private sealed interface FreshCheck {
-        data class Ready(val snapshot: ObservationSnapshot) : FreshCheck
+        data class Ready(
+            val snapshot: ObservationSnapshot,
+            val screenshot: ByteArray,
+        ) : FreshCheck
         data class Rejected(val result: TransportResult.Rejected) : FreshCheck
     }
+
+    private fun TransportResult.withBeforeScreenshot(screenshot: ByteArray): TransportResult =
+        when (this) {
+            is TransportResult.Succeeded -> copy(beforeScreenshot = screenshot.copyOf())
+            else -> this
+        }
 
     private fun ObservationSnapshot.contains(x: Int, y: Int): Boolean =
         x in 0 until width && y in 0 until height

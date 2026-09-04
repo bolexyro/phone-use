@@ -49,9 +49,14 @@ export interface CompanionToolCallImageContent {
   index: number;
 }
 
+export interface CompanionToolCallDebugImage extends CompanionToolCallImageContent {
+  label: "before" | "after";
+}
+
 export interface CompanionToolCallResponse {
   isError?: boolean;
   images: CompanionToolCallImageContent[];
+  debugImages?: CompanionToolCallDebugImage[];
   structuredContent?: { [key: string]: CompanionJsonValue };
 }
 

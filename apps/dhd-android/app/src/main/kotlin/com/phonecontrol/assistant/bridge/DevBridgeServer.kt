@@ -5,6 +5,11 @@ import android.content.Context
 import android.content.Intent
 import com.phonecontrol.assistant.apps.InstalledAppsRepository
 import com.phonecontrol.assistant.apps.InstalledUserApp
+import com.phonecontrol.assistant.data.DHD_BROWSE_APP_TOOL
+import com.phonecontrol.assistant.data.DHD_FOREGROUND_APP_TOOL
+import com.phonecontrol.assistant.data.DHD_EXECUTE_SEQUENCE_TOOL
+import com.phonecontrol.assistant.data.DHD_LIST_ALLOWED_APPS_TOOL
+import com.phonecontrol.assistant.data.DHD_OBSERVE_TOOL
 import com.phonecontrol.assistant.domain.ActionMetadata
 import com.phonecontrol.assistant.domain.BackAction
 import com.phonecontrol.assistant.domain.GuardRegion
@@ -782,6 +787,10 @@ class DevBridgeServer(
     ) {
         val fullAccess = fullAccessProvider()
         val includeAll = json.optBoolean("includeAll", false)
+        coordinator.recordPurpose(
+            purpose = if (includeAll) "Listing all launchable apps" else "Listing allowed apps",
+            toolName = DHD_LIST_ALLOWED_APPS_TOOL,
+        )
         if (includeAll && !fullAccess) {
             write(
                 writer,
@@ -820,6 +829,12 @@ class DevBridgeServer(
             return
         }
 
+        coordinator.recordPurpose(
+            purpose = "Browsing installed apps",
+            targetDescription = query,
+            toolName = DHD_BROWSE_APP_TOOL,
+        )
+
         val fullAccess = fullAccessProvider()
         val allowedPackages = if (fullAccess) emptySet() else allowedPackagesProvider()
         val candidates = installedAppsRepository.listLaunchableApps()
@@ -854,13 +869,13 @@ class DevBridgeServer(
                 "expectedPackageName is not a valid Android package name."
             }
         }
-        val purpose = json.optString("purpose").trim().take(MAX_TEXT_CHARS).ifBlank { null }
-        if (purpose != null) {
-            coordinator.recordPurpose(
-                purpose = purpose,
-                targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { expectedPackage },
-            )
-        }
+        val purpose = json.optString("purpose").trim().take(MAX_TEXT_CHARS)
+            .ifBlank { "Observing current screen" }
+        coordinator.recordPurpose(
+            purpose = purpose,
+            targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { expectedPackage },
+            toolName = DHD_OBSERVE_TOOL,
+        )
         val guardRegions = parseGuardRegions(json.optJSONArray("guardRegions"))
         when (val captured = captureWithRetry(expectedPackage, guardRegions)) {
             is ObservationCaptureResult.Failed -> write(writer, errorResponse(requestId, captured.message))
@@ -875,6 +890,10 @@ class DevBridgeServer(
         requestId: String,
         writer: BufferedWriter,
     ) {
+        coordinator.recordPurpose(
+            purpose = "Checking foreground app",
+            toolName = DHD_FOREGROUND_APP_TOOL,
+        )
         when (val result = observationProvider.getForegroundApp()) {
             is ForegroundAppResult.Failed -> write(
                 writer,
@@ -935,6 +954,11 @@ class DevBridgeServer(
                 .put("action", wireActionName(action))
                 .put("message", result.failureMessage())
             result.failureCode()?.let { response.put("code", it) }
+            addBeforeDebug(
+                response,
+                observation,
+                result.beforeScreenshotOrNull(),
+            )
             write(writer, response)
             return
         }
@@ -961,18 +985,21 @@ class DevBridgeServer(
 
             is ObservationCaptureResult.Succeeded -> {
                 remember(captured.snapshot)
-                write(
-                    writer,
-                    JSONObject()
-                        .put("type", "completed")
-                        .put("requestId", requestId)
-                        .put("ok", true)
-                        .put("action", wireActionName(action))
-                        .put("message", result.successMessage())
-                        .put("observation", snapshotJson(captured.snapshot))
-                        .put("screenshotBase64", Base64.encodeToString(captured.screenshot, Base64.NO_WRAP))
-                        .put("screenshotMimeType", "image/png"),
+                val response = JSONObject()
+                    .put("type", "completed")
+                    .put("requestId", requestId)
+                    .put("ok", true)
+                    .put("action", wireActionName(action))
+                    .put("message", result.successMessage())
+                    .put("observation", snapshotJson(captured.snapshot))
+                    .put("screenshotBase64", Base64.encodeToString(captured.screenshot, Base64.NO_WRAP))
+                    .put("screenshotMimeType", "image/png")
+                addBeforeDebug(
+                    response,
+                    observation,
+                    result.beforeScreenshotOrNull(),
                 )
+                write(writer, response)
             }
         }
     }
@@ -1015,12 +1042,14 @@ class DevBridgeServer(
         }
 
         val result = SequenceExecutor(
-            executeAction = { action, baseline -> coordinator.executeAction(action, baseline) },
+            executeAction = { action, baseline ->
+                coordinator.executeAction(action, baseline, DHD_EXECUTE_SEQUENCE_TOOL)
+            },
             captureAfterAction = { guardRegions -> captureWithRetry(null, guardRegions) },
             rememberObservation = ::remember,
             settleAfterAction = ::settleAfterAction,
         ).execute(observation, request.actions)
-        writeSequenceResult(writer, requestId, result)
+        writeSequenceResult(writer, requestId, result, observation)
     }
 
     private suspend fun settleAfterAction(action: PhoneAction) {
@@ -1237,6 +1266,18 @@ class DevBridgeServer(
         }
     }
 
+    private fun addBeforeDebug(
+        response: JSONObject,
+        observation: ObservationSnapshot,
+        screenshot: ByteArray?,
+    ) {
+        if (screenshot == null) return
+        response
+            .put("beforeObservation", snapshotJson(observation))
+            .put("beforeScreenshotBase64", Base64.encodeToString(screenshot, Base64.NO_WRAP))
+            .put("beforeScreenshotMimeType", "image/png")
+    }
+
     private fun writeObservation(
         writer: BufferedWriter,
         requestId: String,
@@ -1259,6 +1300,7 @@ class DevBridgeServer(
         writer: BufferedWriter,
         requestId: String,
         result: SequenceExecutionResult,
+        beforeObservation: ObservationSnapshot? = null,
     ) {
         val response = JSONObject()
             .put("type", "completed")
@@ -1301,6 +1343,9 @@ class DevBridgeServer(
                 .put("observation", snapshotJson(captured.snapshot))
                 .put("screenshotBase64", Base64.encodeToString(captured.screenshot, Base64.NO_WRAP))
                 .put("screenshotMimeType", "image/png")
+            if (beforeObservation != null) {
+                addBeforeDebug(response, beforeObservation, result.beforeScreenshot)
+            }
         }
         write(writer, response)
     }
@@ -1655,6 +1700,13 @@ private fun buildAppResponse(app: InstalledUserApp): JSONObject = JSONObject()
 
 private fun ActionExecutionResult.isSuccessful(): Boolean = this is ActionExecutionResult.TransportFinished &&
     this.result is TransportResult.Succeeded
+
+private fun ActionExecutionResult.beforeScreenshotOrNull(): ByteArray? = when (this) {
+    is ActionExecutionResult.TransportFinished ->
+        (result as? TransportResult.Succeeded)?.beforeScreenshot
+    is ActionExecutionResult.PolicyRejected,
+    ActionExecutionResult.SessionNotRunning -> null
+}
 
 private fun ActionExecutionResult.failureMessage(): String = when (this) {
     is ActionExecutionResult.TransportFinished -> when (val result = result) {

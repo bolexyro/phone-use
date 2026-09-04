@@ -131,6 +131,65 @@ describe("DHD phone tool contract", () => {
     expect((tapped.structuredContent as Record<string, any>).screenshotMarker).not.toEqual(firstMarker);
   });
 
+  it("keeps the model on one post-action image while returning a marked debug pair", () => {
+    const result = toMcpResult(
+      {
+        type: "completed",
+        ok: true,
+        beforeObservation: {
+          id: "debug-before",
+          displayId: 92,
+          packageName: "com.example.app",
+          rotation: 0,
+          width: 1,
+          height: 1,
+        },
+        observation: {
+          id: "debug-after",
+          displayId: 92,
+          packageName: "com.example.app",
+          rotation: 0,
+          width: 1,
+          height: 1,
+        },
+        beforeScreenshotBase64: pngBase64,
+        beforeScreenshotMimeType: "image/png",
+        screenshotBase64: pngBase64,
+        screenshotMimeType: "image/png",
+      },
+      undefined,
+      { action: { type: "tap", x: 0, y: 0 } },
+      { includeDebugImages: true },
+    );
+
+    expect(result.content.filter((item) => item.type === "image")).toHaveLength(1);
+    expect(result.debugImages).toHaveLength(2);
+    expect(result.debugImages?.map((item) => item.label)).toEqual(["before", "after"]);
+    expect(result.structuredContent).not.toHaveProperty("beforeScreenshotBase64");
+    expect(result.structuredContent).not.toHaveProperty("beforeObservation");
+    expect(toDynamicToolResponse(result).contentItems.filter((item) => item.type === "inputImage")).toHaveLength(1);
+  });
+
+  it("ignores malformed debug-only before images without changing the tool result", () => {
+    const result = toMcpResult(
+      {
+        type: "completed",
+        ok: true,
+        observation: { id: "debug-after-invalid", width: 1, height: 1 },
+        beforeScreenshotBase64: "not-an-image",
+        screenshotBase64: pngBase64,
+        screenshotMimeType: "image/png",
+      },
+      undefined,
+      { action: { type: "tap", x: 0, y: 0 } },
+      { includeDebugImages: true },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toHaveLength(2);
+    expect(result.debugImages).toBeUndefined();
+  });
+
   it("normalizes an already-prefixed screenshot data URL without double-prefixing it", () => {
     const result = toMcpResult({
       ok: true,

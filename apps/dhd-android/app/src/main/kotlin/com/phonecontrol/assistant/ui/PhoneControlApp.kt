@@ -53,6 +53,10 @@ data class AssistantColorScheme(
     val userBubbleText: Color,
     val accentBlue: Color,
     val accentGreen: Color,
+    val accentPurple: Color,
+    val accentGold: Color,
+    val accentOrange: Color,
+    val accentPink: Color,
     val errorRed: Color,
     val warningAmber: Color,
     val sendButtonActiveBg: Color,
@@ -76,6 +80,10 @@ val DarkAssistantColors = AssistantColorScheme(
     userBubbleText = Color.White,
     accentBlue = Color(0xFF2C67C5), // Specified #2C67C5
     accentGreen = Color(0xFF10A37F),
+    accentPurple = Color(0xFFB38CFF),
+    accentGold = Color(0xFFFACC15),
+    accentOrange = Color(0xFFFB923C),
+    accentPink = Color(0xFFF472B6),
     errorRed = Color(0xFFEF4444),
     warningAmber = Color(0xFFF59E0B),
     sendButtonActiveBg = Color(0xFF2C67C5), // App blue
@@ -99,6 +107,10 @@ val LightAssistantColors = AssistantColorScheme(
     userBubbleText = Color(0xFF0D0D0D),
     accentBlue = Color(0xFF2C67C5),
     accentGreen = Color(0xFF10A37F),
+    accentPurple = Color(0xFF7C3AED),
+    accentGold = Color(0xFFA16207),
+    accentOrange = Color(0xFFC2410C),
+    accentPink = Color(0xFFBE185D),
     errorRed = Color(0xFFDC2626),
     warningAmber = Color(0xFFD97706),
     sendButtonActiveBg = Color(0xFF2C67C5), // App blue

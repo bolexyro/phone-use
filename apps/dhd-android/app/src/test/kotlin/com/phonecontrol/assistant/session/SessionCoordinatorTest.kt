@@ -185,6 +185,23 @@ class SessionCoordinatorTest {
         })
     }
 
+    @Test
+    fun `purpose events retain the originating tool name`() {
+        val coordinator = coordinator()
+        coordinator.start("Find an app")
+
+        assertTrue(
+            coordinator.recordPurpose(
+                purpose = "Browsing installed apps",
+                targetDescription = "Spotify",
+                toolName = "dhd_browse_app",
+            ),
+        )
+
+        val event = coordinator.events.value.last()
+        assertEquals("dhd_browse_app", event.toolName)
+    }
+
     private fun coordinator(phoneActionsReady: () -> Boolean = { true }): SessionCoordinator = SessionCoordinator(
         enabledPackagesProvider = { setOf("com.example.shop") },
         policyEngine = PolicyEngine(),

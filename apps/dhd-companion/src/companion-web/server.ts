@@ -173,11 +173,16 @@ function appendLog(
 }
 
 function toolImageKey(callId: string, index: number): string {
-  return `${callId}:${index}`;
+  return `${callId}:response:${index}`;
 }
 
-function toolImageUrl(callId: string, index: number): string {
-  return `/api/tool-calls/${encodeURIComponent(callId)}/images/${index}`;
+function toolDebugImageKey(callId: string, index: number): string {
+  return `${callId}:debug:${index}`;
+}
+
+function toolImageUrl(callId: string, index: number, source: "response" | "debug" = "response"): string {
+  const suffix = source === "debug" ? "?source=debug" : "";
+  return `/api/tool-calls/${encodeURIComponent(callId)}/images/${index}${suffix}`;
 }
 
 function removeToolImages(callId: string): void {
@@ -249,6 +254,35 @@ function dashboardToolResponse(
   });
 
   const response: CompanionToolCallResponse = { images };
+  const debugImages: NonNullable<CompanionToolCallResponse["debugImages"]> = [];
+  const rawDebugImages = Array.isArray(result.debugImages) ? result.debugImages : [];
+  rawDebugImages.forEach((value, index) => {
+    if (!value || typeof value !== "object") return;
+    const item = value as Record<string, unknown>;
+    if (
+      item.type !== "image" ||
+      (item.label !== "before" && item.label !== "after") ||
+      typeof item.data !== "string" ||
+      typeof item.mimeType !== "string" ||
+      !item.mimeType.startsWith("image/")
+    ) {
+      return;
+    }
+    const bytes = decodeImage(item.data);
+    if (!bytes) return;
+    toolImages.set(toolDebugImageKey(callId, index), {
+      bytes,
+      mimeType: item.mimeType
+    });
+    debugImages.push({
+      type: "image",
+      label: item.label,
+      imageUrl: toolImageUrl(callId, index, "debug"),
+      mimeType: item.mimeType,
+      index
+    });
+  });
+  if (debugImages.length > 0) response.debugImages = debugImages;
   if (result.isError === true) response.isError = true;
   if (result.structuredContent && typeof result.structuredContent === "object" && !Array.isArray(result.structuredContent)) {
     response.structuredContent = toJsonValue(result.structuredContent) as { [key: string]: CompanionJsonValue };
@@ -730,8 +764,11 @@ export function createCompanionWebServer(): http.Server {
         return;
       }
       const imageIndex = Number(toolImageMatch[2]);
+      const source = url.searchParams.get("source") === "debug" ? "debug" : "response";
       const image = Number.isSafeInteger(imageIndex)
-        ? toolImages.get(toolImageKey(callId, imageIndex))
+        ? toolImages.get(source === "debug"
+          ? toolDebugImageKey(callId, imageIndex)
+          : toolImageKey(callId, imageIndex))
         : undefined;
       if (!image) {
         res.writeHead(404, { "Content-Type": "text/plain" });

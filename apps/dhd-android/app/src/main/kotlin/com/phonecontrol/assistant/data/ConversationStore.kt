@@ -23,8 +23,13 @@ import java.util.UUID
 
 const val DHD_CONVERSATION_ID = "dhd-assistant"
 const val DHD_THREAD_INACTIVITY_MS = 3 * 60 * 60 * 1000L
+const val DHD_LIST_ALLOWED_APPS_TOOL = "dhd_list_allowed_apps"
+const val DHD_FOREGROUND_APP_TOOL = "dhd_get_foreground_app"
 const val DHD_EXECUTE_TOOL = "dhd_execute"
+const val DHD_EXECUTE_SEQUENCE_TOOL = "dhd_execute_sequence"
 const val DHD_OPEN_APP_TOOL = "dhd_open_app"
+const val DHD_BROWSE_APP_TOOL = "dhd_browse_app"
+const val DHD_OBSERVE_TOOL = "dhd_observe"
 
 /** Local, app-private conversation metadata. Codex remains the remote context source of truth. */
 @Entity(tableName = "conversations")
@@ -424,7 +429,7 @@ class ConversationStore(context: Context) {
                         // Action lifecycle events are emitted by the DHD tool
                         // boundary. Keep the public tool name so the UI can
                         // distinguish real tool calls from system activity.
-                        toolName = when (event.actionType) {
+                        toolName = event.toolName ?: when (event.actionType) {
                             ActionType.OPEN_APP -> DHD_OPEN_APP_TOOL
                             null -> null
                             else -> DHD_EXECUTE_TOOL
@@ -454,6 +459,7 @@ class ConversationStore(context: Context) {
                 }
                 dao.updateActivity(
                     existing.copy(
+                        toolName = event.toolName ?: existing.toolName,
                         status = status,
                         message = updatedMessage,
                         updatedAtEpochMs = event.timestampEpochMs,

@@ -191,6 +191,7 @@ data class ActivityEvent(
     val kind: ActivityEventKind,
     val message: String,
     val actionType: ActionType? = null,
+    val toolName: String? = null,
     val purpose: String? = null,
     val observationId: String? = null,
     val targetDescription: String? = null,
