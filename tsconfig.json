@@ -5,6 +5,7 @@
   },
   "files": [],
   "references": [
+    { "path": "./packages/screenshot-markers" },
     { "path": "./packages/phone-control" },
     { "path": "./apps/phone-control-mcp" },
     { "path": "./apps/phone-viewer" },

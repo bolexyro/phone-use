@@ -23,6 +23,9 @@ importers:
 
   apps/dhd-companion:
     dependencies:
+      '@dhd/screenshot-markers':
+        specifier: workspace:*
+        version: link:../../packages/screenshot-markers
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(zod@3.25.76)
@@ -35,6 +38,9 @@ importers:
       '@dhd/phone-control':
         specifier: workspace:*
         version: link:../../packages/phone-control
+      '@dhd/screenshot-markers':
+        specifier: workspace:*
+        version: link:../../packages/screenshot-markers
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
         version: 1.29.0(zod@3.25.76)
@@ -47,11 +53,24 @@ importers:
       '@dhd/phone-control':
         specifier: workspace:*
         version: link:../../packages/phone-control
+      '@dhd/screenshot-markers':
+        specifier: workspace:*
+        version: link:../../packages/screenshot-markers
       electron:
         specifier: 36.4.0
         version: 36.4.0
 
   packages/phone-control: {}
+
+  packages/screenshot-markers:
+    dependencies:
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
+    devDependencies:
+      '@types/pngjs':
+        specifier: 6.0.5
+        version: 6.0.5
 
 packages:
 
@@ -407,6 +426,9 @@ packages:
 
   '@types/node@22.15.21':
     resolution: {integrity: sha512-EV/37Td6c+MgKAbkcLG6vqZ2zEYHD7bvSrzqqs2RIhbA6w3x+Dqz8MZM3sP6kGTeLrdoOgKZe+Xja7tUB2DNkQ==}
+
+  '@types/pngjs@6.0.5':
+    resolution: {integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==}
 
   '@types/responselike@1.0.3':
     resolution: {integrity: sha512-H/+L+UkTV33uf49PH5pCAUBVPNj2nDBXTN+qS1dOwyyg24l3CcicicCA7ca+HMvJBZcFgl5r8e+RR6elsb4Lyw==}
@@ -918,6 +940,10 @@ packages:
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
 
   postcss@8.5.26:
     resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
@@ -1441,6 +1467,10 @@ snapshots:
   '@types/node@22.15.21':
     dependencies:
       undici-types: 6.21.0
+
+  '@types/pngjs@6.0.5':
+    dependencies:
+      '@types/node': 22.15.21
 
   '@types/responselike@1.0.3':
     dependencies:
@@ -1990,6 +2020,8 @@ snapshots:
   picomatch@4.0.5: {}
 
   pkce-challenge@5.0.1: {}
+
+  pngjs@7.0.0: {}
 
   postcss@8.5.26:
     dependencies:

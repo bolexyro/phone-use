@@ -16,6 +16,7 @@
     "bridge-demo": "tsx src/desktop-codex-bridge-demo.ts"
   },
   "dependencies": {
+    "@dhd/screenshot-markers": "workspace:*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "zod": "3.25.76"
   }

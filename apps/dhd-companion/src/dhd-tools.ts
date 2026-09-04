@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -19,6 +20,12 @@ import {
   dhdToolDescription,
   isGuardRegionsEnabled,
 } from "./dhd-tool-contract.js";
+import {
+  ScreenshotMarkerPresenter,
+  type ScreenshotMarker,
+  type ScreenshotMarkerObservation,
+  type ScreenshotMarkerPoint,
+} from "@dhd/screenshot-markers";
 
 export * from "./dhd-tool-contract.js";
 
@@ -252,6 +259,7 @@ function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
 
 const DHD_SCREENSHOT_MIME_TYPE = "image/png" as const;
 const SCREENSHOT_DATA_URL_PATTERN = /^data:([^;,]+);base64,([\s\S]*)$/i;
+const screenshotMarkerPresenter = new ScreenshotMarkerPresenter();
 
 export interface NormalizedScreenshot {
   base64: string;
@@ -333,15 +341,121 @@ export interface PhoneAssistantToolResult {
   structuredContent?: Record<string, unknown>;
 }
 
-export function toMcpResult(message: BridgeMessage, error?: unknown): PhoneAssistantToolResult {
+interface DhdMarkerContext {
+  resetMarker?: boolean;
+  action?: Record<string, unknown>;
+  sequenceActions?: readonly Record<string, unknown>[];
+}
+
+function markerObservation(message: BridgeMessage): ScreenshotMarkerObservation | undefined {
+  const observation = readRecord(message.observation);
+  const observationId = typeof observation.id === "string" ? observation.id : undefined;
+  const displayId = typeof observation.displayId === "number" ? observation.displayId : undefined;
+  const rotation = typeof observation.rotation === "number" ? observation.rotation : undefined;
+  const width = typeof observation.width === "number" ? observation.width : undefined;
+  const height = typeof observation.height === "number" ? observation.height : undefined;
+  if (!observationId || width === undefined || height === undefined) return undefined;
+  return {
+    observationId,
+    displayId,
+    packageName: typeof observation.packageName === "string" ? observation.packageName : undefined,
+    rotation,
+    screenshotDimensions: { width, height },
+  };
+}
+
+function tapPoint(value: Record<string, unknown> | undefined): ScreenshotMarkerPoint | undefined {
+  if (value?.type !== "tap" || !Number.isInteger(value.x) || !Number.isInteger(value.y)) {
+    return undefined;
+  }
+  return { x: value.x as number, y: value.y as number };
+}
+
+function successfulSequenceTap(
+  message: BridgeMessage,
+  actions: readonly Record<string, unknown>[] | undefined
+): ScreenshotMarkerPoint | undefined {
+  if (!actions) return undefined;
+  const steps = Array.isArray(message.steps) ? message.steps : [];
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = readRecord(steps[index]);
+    if (step.status !== "success" || !Number.isInteger(step.index)) continue;
+    const action = actions[step.index as number];
+    const point = tapPoint(action);
+    if (point) return point;
+  }
+  return undefined;
+}
+
+function markerForContext(
+  message: BridgeMessage,
+  context: DhdMarkerContext | undefined
+): ScreenshotMarkerPoint | undefined {
+  if (!context) return undefined;
+  if (context.action) {
+    return message.ok === true ? tapPoint(context.action) : undefined;
+  }
+  return successfulSequenceTap(message, context.sequenceActions);
+}
+
+function renderScreenshot(
+  message: BridgeMessage,
+  screenshot: NormalizedScreenshot,
+  context: DhdMarkerContext | undefined
+): { screenshot: NormalizedScreenshot; marker?: ScreenshotMarker } {
+  const observation = markerObservation(message);
+  if (!observation) return { screenshot };
+  if (context?.resetMarker) {
+    screenshotMarkerPresenter.reset(observation.displayId);
+  }
+  try {
+    const rendered = screenshotMarkerPresenter.render(
+      Buffer.from(screenshot.base64, "base64"),
+      observation,
+      { lastTap: markerForContext(message, context) }
+    );
+    const base64 = Buffer.from(rendered.screenshot).toString("base64");
+    return {
+      screenshot: {
+        base64,
+        mimeType: screenshot.mimeType,
+        dataUrl: `data:${screenshot.mimeType};base64,${base64}`,
+      },
+      marker: rendered.marker,
+    };
+  } catch (error) {
+    console.error(
+      `[phone-assistant-mcp] screenshot marker render failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return { screenshot };
+  }
+}
+
+export function toMcpResult(
+  message: BridgeMessage,
+  error?: unknown,
+  markerContext?: DhdMarkerContext
+): PhoneAssistantToolResult {
   const isError = Boolean(error) || message.ok === false;
+  if (message.type === "stopped") screenshotMarkerPresenter.reset();
   const content: Array<AssistantTextContent | AssistantImageContent> = [
-    {
-      type: "text",
-      text: JSON.stringify(error ? { ok: false, message: error instanceof Error ? error.message : String(error) } : withoutScreenshot(message))
-    }
+    { type: "text", text: "" }
   ];
-  const screenshot = normalizeScreenshot(message.screenshotBase64, message.screenshotMimeType);
+  let screenshot = normalizeScreenshot(message.screenshotBase64, message.screenshotMimeType);
+  let marker: ScreenshotMarker | undefined;
+  if (screenshot && !error) {
+    const rendered = renderScreenshot(message, screenshot, markerContext);
+    screenshot = rendered.screenshot;
+    marker = rendered.marker;
+  }
+  const responseMessage = withoutScreenshot(message);
+  if (marker) responseMessage.screenshotMarker = marker;
+  content[0] = {
+    type: "text",
+    text: JSON.stringify(error ? { ok: false, message: error instanceof Error ? error.message : String(error) } : responseMessage)
+  };
   if (screenshot) {
     content.push({ type: "image", data: screenshot.base64, mimeType: screenshot.mimeType });
   }
@@ -350,13 +464,16 @@ export function toMcpResult(message: BridgeMessage, error?: unknown): PhoneAssis
     content,
     structuredContent: error
       ? { ok: false, message: error instanceof Error ? error.message : String(error) }
-      : withoutScreenshot(message)
+      : responseMessage
   };
 }
 
-async function safely(work: () => Promise<BridgeMessage>) {
+async function safely(
+  work: () => Promise<BridgeMessage>,
+  markerContext?: () => DhdMarkerContext | undefined
+) {
   try {
-    return toMcpResult(await work());
+    return toMcpResult(await work(), undefined, markerContext?.());
   } catch (error) {
     console.error(`[phone-assistant-mcp] ${error instanceof Error ? error.message : String(error)}`);
     return toMcpResult({ ok: false }, error);
@@ -419,8 +536,13 @@ export async function invokeDhdTool(
         });
       });
     case "dhd_open_app":
+      let openedAction: Record<string, unknown> | undefined;
       return safely(() => {
         const parsed = parseInput(schemas.dhdOpenAppInputSchema, input);
+        openedAction = {
+          type: "open_app",
+          packageName: parsed.packageName,
+        };
         return requestBridge({
           type: "execute_action",
           requestId: randomUUID(),
@@ -430,22 +552,26 @@ export async function invokeDhdTool(
             metadata: parsed.metadata
           }
         });
-      });
+      }, () => ({ resetMarker: true, action: openedAction }));
     case "dhd_execute":
+      let executedAction: Record<string, unknown> | undefined;
       return safely(() => {
         const action = parseInput(schemas.dhdExecuteActionSchema, readRecord(input).action);
+        executedAction = action as unknown as Record<string, unknown>;
         return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
-      });
+      }, () => ({ action: executedAction }));
     case "dhd_execute_sequence":
+      let sequenceActions: readonly Record<string, unknown>[] | undefined;
       return safely(() => {
         const parsed = parseInput(schemas.dhdExecuteSequenceInputSchema, input);
+        sequenceActions = parsed.actions as readonly Record<string, unknown>[];
         return requestBridge({
           type: "execute_sequence",
           requestId: randomUUID(),
           observationId: parsed.observationId,
           actions: parsed.actions
         });
-      });
+      }, () => ({ sequenceActions }));
     case "dhd_request_attention":
       return safely(() => {
         const reason = parseInput(z.string().min(1).max(DHD_MAX_TEXT_CHARS), readRecord(input).reason);

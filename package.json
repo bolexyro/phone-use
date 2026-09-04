@@ -10,8 +10,8 @@
   },
   "scripts": {
     "build": "pnpm --recursive --if-present --sort build",
-    "typecheck": "pnpm --filter @dhd/phone-control build && pnpm --recursive --if-present --sort typecheck",
-    "test": "pnpm --filter @dhd/phone-control build && pnpm --recursive --if-present --sort test",
+    "typecheck": "pnpm --filter @dhd/screenshot-markers build && pnpm --filter @dhd/phone-control build && pnpm --recursive --if-present --sort typecheck",
+    "test": "pnpm --filter @dhd/screenshot-markers build && pnpm --filter @dhd/phone-control build && pnpm --recursive --if-present --sort test",
     "phone-control-mcp:start": "pnpm --filter @dhd/phone-control-mcp start",
     "phone-control-mcp:dev": "pnpm --filter @dhd/phone-control-mcp dev",
     "phone-control-viewer:start": "pnpm --filter @dhd/phone-viewer start",

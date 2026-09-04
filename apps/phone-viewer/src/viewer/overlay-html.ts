@@ -1,5 +1,12 @@
+import {
+  POINTER_ARROW_FILL,
+  POINTER_ARROW_PATH
+} from "@dhd/screenshot-markers";
+
 export function buildOverlayHtml(cursorDurationMs: number): string {
   const duration = JSON.stringify(cursorDurationMs);
+  const pointerArrowFill = JSON.stringify(POINTER_ARROW_FILL);
+  const pointerArrowPath = JSON.stringify(POINTER_ARROW_PATH);
   return `<!doctype html>
 <html>
 <head>
@@ -228,8 +235,8 @@ export function buildOverlayHtml(cursorDurationMs: number): string {
     <div id="pointer-icon">
       <svg viewBox="0 0 48 48" role="presentation">
         <path
-          d="M 4 4 L 38 16 L 24 24 L 16 38 Z"
-          fill="#2b8cdb"
+          d=${pointerArrowPath}
+          fill=${pointerArrowFill}
           stroke="#ffffff"
           stroke-width="2.5"
           stroke-linejoin="round"

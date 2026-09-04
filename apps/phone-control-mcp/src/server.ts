@@ -26,6 +26,13 @@ import type {
   ToolSuccessResult,
   WaitCondition
 } from "@dhd/phone-control";
+import {
+  SCREENSHOT_MARKER_GUIDANCE,
+  ScreenshotMarkerPresenter,
+  type ScreenshotMarker,
+  type ScreenshotMarkerObservation,
+  type ScreenshotMarkerPoint
+} from "@dhd/screenshot-markers";
 
 export const PHONE_CONTROL_TOOL_NAMES = [
   "phone_status",
@@ -254,6 +261,11 @@ export type PhoneControlMcpResult = {
   isError?: boolean;
 };
 
+type ScreenshotAttachment = {
+  bytes: Uint8Array;
+  marker?: ScreenshotMarker;
+};
+
 function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
   const parsed = schema.safeParse(input);
   if (parsed.success) {
@@ -273,10 +285,14 @@ function observationBytes(
 
 export function toSuccessResponse(
   result: ToolSuccessResult<object>,
-  screenshot?: Uint8Array
+  screenshot?: Uint8Array,
+  screenshotMarker?: ScreenshotMarker
 ): PhoneControlMcpResult {
+  const response = screenshotMarker
+    ? { ...result, screenshotMarker }
+    : result;
   const content: Array<TextContent | ImageContent> = [
-    { type: "text", text: JSON.stringify(result) }
+    { type: "text", text: JSON.stringify(response) }
   ];
   if (screenshot) {
     content.push({
@@ -287,7 +303,7 @@ export function toSuccessResponse(
   }
   return {
     content,
-    structuredContent: result as unknown as Record<string, unknown>
+    structuredContent: response as unknown as Record<string, unknown>
   };
 }
 
@@ -303,12 +319,16 @@ export function toErrorResponse(error: unknown): PhoneControlMcpResult {
 
 async function safely<T extends object>(
   work: () => Promise<T> | T,
-  screenshot?: (result: T) => Uint8Array | undefined
+  screenshot?: (result: T) => Uint8Array | ScreenshotAttachment | undefined
 ): Promise<PhoneControlMcpResult> {
   try {
     const result = await work();
     const success = result as ToolSuccessResult<object>;
-    return toSuccessResponse(success, screenshot?.(result));
+    const attachment = screenshot?.(result);
+    if (attachment instanceof Uint8Array) {
+      return toSuccessResponse(success, attachment);
+    }
+    return toSuccessResponse(success, attachment?.bytes, attachment?.marker);
   } catch (error) {
     const normalized = asPhoneControlError(error);
     console.error(`[phone-control] ${normalized.code}: ${normalized.message}`);
@@ -319,8 +339,10 @@ async function safely<T extends object>(
 function resolveScreenshot(
   service: PhoneControlToolService,
   result: unknown,
-  includeScreenshot = false
-): Uint8Array | undefined {
+  markerPresenter: ScreenshotMarkerPresenter,
+  includeScreenshot = false,
+  lastTap?: ScreenshotMarkerPoint
+): Uint8Array | ScreenshotAttachment | undefined {
   const data = (result as {
     data?: {
       observation?: ObservationSummary;
@@ -330,7 +352,65 @@ function resolveScreenshot(
   const summary = data?.observation ?? data?.finalObservation;
   if (!summary) return undefined;
   if (includeScreenshot || summary.mode === "visual") {
-    return service.observationStore.get(summary.observationId)?.screenshot;
+    const screenshot = service.observationStore.get(summary.observationId)?.screenshot;
+    if (!screenshot) return undefined;
+    const markerObservation: ScreenshotMarkerObservation = {
+      observationId: summary.observationId,
+      displayId: summary.displayId,
+      packageName: summary.packageName,
+      rotation: summary.rotation,
+      screenshotDimensions: {
+        width: summary.screenshot.width,
+        height: summary.screenshot.height
+      }
+    };
+    try {
+      const rendered = markerPresenter.render(screenshot, markerObservation, {
+        ...(lastTap ? { lastTap } : {})
+      });
+      return { bytes: rendered.screenshot, marker: rendered.marker };
+    } catch (error) {
+      console.error(
+        `[phone-control] screenshot marker render failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      return { bytes: screenshot };
+    }
+  }
+  return undefined;
+}
+
+function clickPointFromResult(result: unknown): ScreenshotMarkerPoint | undefined {
+  const pointerEvent = (result as {
+    data?: { pointerEvent?: { action?: string; x?: number; y?: number } };
+  })?.data?.pointerEvent;
+  const x = pointerEvent?.x;
+  const y = pointerEvent?.y;
+  if (pointerEvent?.action !== "click" || !Number.isInteger(x) || !Number.isInteger(y)) {
+    return undefined;
+  }
+  return { x: x as number, y: y as number };
+}
+
+function lastSequenceClick(result: unknown): ScreenshotMarkerPoint | undefined {
+  const steps = (result as {
+    data?: {
+      steps?: Array<{
+        status?: string;
+        pointerEvent?: { action?: string; x?: number; y?: number };
+      }>;
+    };
+  })?.data?.steps;
+  if (!Array.isArray(steps)) return undefined;
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index];
+    if (step.status !== "success" || step.pointerEvent?.action !== "click") continue;
+    const x = step.pointerEvent.x;
+    const y = step.pointerEvent.y;
+    if (Number.isInteger(x) && Number.isInteger(y)) {
+      return { x: x as number, y: y as number };
+    }
   }
   return undefined;
 }
@@ -339,6 +419,8 @@ export function registerPhoneControlTools(
   server: McpServer,
   service: PhoneControlToolService
 ): void {
+  const markerPresenter = new ScreenshotMarkerPresenter();
+
   server.registerTool(
     "phone_status",
     {
@@ -370,7 +452,7 @@ export function registerPhoneControlTools(
     "phone_open_app",
     {
       description:
-        "Launch an allowlisted package in an isolated virtual display. This is the required first step to interact with an app; it returns an initial observation with observationId. Reuses an existing session for the package by default; set newInstance true to request another display. Use mode 'visual' for a screenshot-only observation/action loop; semantic remains the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists.",
+        `Launch an allowlisted package in an isolated virtual display. This is the required first step to interact with an app; it returns an initial observation with observationId. Reuses an existing session for the package by default; set newInstance true to request another display. Use mode 'visual' for a screenshot-only observation/action loop; semantic remains the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists. ${SCREENSHOT_MARKER_GUIDANCE}`,
       inputSchema: phoneOpenAppInputSchema.shape
     },
     async (input) => {
@@ -383,7 +465,7 @@ export function registerPhoneControlTools(
             ...(parsed.mode ? { mode: parsed.mode as ObservationMode } : {})
           });
         },
-        (result) => resolveScreenshot(service, result)
+        (result) => resolveScreenshot(service, result, markerPresenter)
       );
     }
   );
@@ -395,9 +477,19 @@ export function registerPhoneControlTools(
       inputSchema: phoneCloseAppInputSchema.shape
     },
     async (input) => {
-      return safely(() => {
+      return safely(async () => {
         const parsed = parseInput(phoneCloseAppInputSchema, input);
-        return service.closeApp(parsed);
+        const result = await service.closeApp(parsed);
+        if (result.data.closed) {
+          if (result.data.displayId !== undefined) {
+            markerPresenter.reset(result.data.displayId);
+          } else if (parsed.displayId !== undefined) {
+            markerPresenter.reset(parsed.displayId);
+          } else {
+            markerPresenter.reset();
+          }
+        }
+        return result;
       });
     }
   );
@@ -406,7 +498,7 @@ export function registerPhoneControlTools(
     "phone_observe_app",
     {
       description:
-        "Capture a fresh observation and native PNG screenshot from an active app session or display. Use mode 'visual' for screenshot-only capture (no shell UI Automator call); its screenshot fingerprint is checked before coordinate actions and a fresh screenshot observation is returned after every action. Pass displayId explicitly when multiple virtual display sessions are active; visual coordinates require exact screenshot/display dimensions with no implicit transform. Semantic is the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists. Do not use this to launch apps; call phone_open_app first.",
+        `Capture a fresh observation and native PNG screenshot from an active app session or display. Use mode 'visual' for screenshot-only capture (no shell UI Automator call); its screenshot fingerprint is checked before coordinate actions and a fresh screenshot observation is returned after every action. Pass displayId explicitly when multiple virtual display sessions are active; visual coordinates require exact screenshot/display dimensions with no implicit transform. Semantic is the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists. Do not use this to launch apps; call phone_open_app first. ${SCREENSHOT_MARKER_GUIDANCE}`,
       inputSchema: phoneObserveInputSchema.shape
     },
     async (input) => {
@@ -421,7 +513,7 @@ export function registerPhoneControlTools(
             ...(parsed.mode ? { mode: parsed.mode as ObservationMode } : {})
           });
         },
-        (result) => resolveScreenshot(service, result, includeScreenshot)
+        (result) => resolveScreenshot(service, result, markerPresenter, includeScreenshot)
       );
     }
   );
@@ -429,7 +521,7 @@ export function registerPhoneControlTools(
   server.registerTool(
     "phone_execute",
     {
-      description: "Execute exactly one typed phone action against a current observation.",
+      description: `Execute exactly one typed phone action against a current observation. ${SCREENSHOT_MARKER_GUIDANCE}`,
       inputSchema: phoneExecuteInputSchema.shape
     },
     async (input) => {
@@ -438,7 +530,13 @@ export function registerPhoneControlTools(
           const parsed = parseInput(phoneExecuteInputSchema, input);
           return service.execute(parsed);
         },
-        (result) => resolveScreenshot(service, result)
+        (result) => resolveScreenshot(
+          service,
+          result,
+          markerPresenter,
+          false,
+          clickPointFromResult(result)
+        )
       );
     }
   );
@@ -447,7 +545,7 @@ export function registerPhoneControlTools(
     "phone_execute_sequence",
     {
       description:
-        `Execute up to ${MAX_SEQUENCE_ACTIONS} typed semantic actions in one MCP call. Choose executionMode for each workflow: use stable_surface whenever every action is a click uniquely resolvable from one surface and earlier clicks cannot change the position or meaning of later targets; examples such as keypads and button grids are illustrative, not exhaustive. Use validated when later actions depend on intermediate UI changes or when uncertain. The default validated mode reuses each authorized post-action UI capture for the next immediate step, rechecks foreground, rematches targets, and captures one final screenshot. stable_surface dispatches a bounded typed tap batch and performs one final observation. Coordinates and state-dependent actions are never accepted in stable_surface mode.`,
+        `Execute up to ${MAX_SEQUENCE_ACTIONS} typed semantic actions in one MCP call. Choose executionMode for each workflow: use stable_surface whenever every action is a click uniquely resolvable from one surface and earlier clicks cannot change the position or meaning of later targets; examples such as keypads and button grids are illustrative, not exhaustive. Use validated when later actions depend on intermediate UI changes or when uncertain. The default validated mode reuses each authorized post-action UI capture for the next immediate step, rechecks foreground, rematches targets, and captures one final screenshot. stable_surface dispatches a bounded typed tap batch and performs one final observation. Coordinates and state-dependent actions are never accepted in stable_surface mode. ${SCREENSHOT_MARKER_GUIDANCE}`,
       inputSchema: phoneExecuteSequenceInputSchema.shape
     },
     async (input) => {
@@ -465,7 +563,13 @@ export function registerPhoneControlTools(
           };
           return service.executeSequence(request);
         },
-        (result) => resolveScreenshot(service, result, includeScreenshot)
+        (result) => resolveScreenshot(
+          service,
+          result,
+          markerPresenter,
+          includeScreenshot,
+          lastSequenceClick(result)
+        )
       );
     }
   );
@@ -484,7 +588,7 @@ export function registerPhoneControlTools(
             timeoutMs: parsed.timeoutMs
           });
         },
-        (result) => resolveScreenshot(service, result)
+        (result) => resolveScreenshot(service, result, markerPresenter)
       );
     }
   );

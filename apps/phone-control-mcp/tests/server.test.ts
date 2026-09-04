@@ -20,6 +20,9 @@ import {
 } from "../src/server.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+const validPngBase64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 describe("MCP boundary schemas and result conversion", () => {
   it("accepts only the optional newInstance field for phone_open_app", () => {
     expect(
@@ -174,6 +177,20 @@ describe("MCP boundary schemas and result conversion", () => {
       data: "AQID"
     });
 
+    const marker = {
+      kind: "calibration" as const,
+      x: 0,
+      y: 0,
+      coordinateSpace: "display" as const
+    };
+    const marked = toSuccessResponse(
+      { ok: true, data: { value: 3 } },
+      Uint8Array.from([1, 2, 3]),
+      marker
+    );
+    expect(marked.structuredContent).toMatchObject({ screenshotMarker: marker });
+    expect(JSON.parse((marked.content[0] as { text: string }).text)).toMatchObject({ screenshotMarker: marker });
+
     const error = toErrorResponse(
       new PhoneControlError("FORBIDDEN_APP", "denied", { packageName: "x" })
     );
@@ -291,6 +308,61 @@ describe("MCP boundary schemas and result conversion", () => {
     expect(response.content[1]).toMatchObject({
       data: Buffer.from([10, 20, 30]).toString("base64")
     });
+  });
+
+  it("annotates visual observations and keeps the calibration marker stable", async () => {
+    const tools = new Map<string, (input: unknown) => Promise<any>>();
+    const fakeServer = {
+      registerTool(
+        name: string,
+        _schema: unknown,
+        handler: (input: unknown) => Promise<any>
+      ): void {
+        tools.set(name, handler);
+      }
+    } as unknown as McpServer;
+
+    const store = new ObservationStore();
+    const screenshot = Uint8Array.from(Buffer.from(validPngBase64, "base64"));
+    const observation = store.create({
+      serial: "RFCW40B3G7X",
+      packageName: "com.example.app",
+      activity: "com.example.app/.MainActivity",
+      display: { width: 1, height: 1 },
+      rotation: 0,
+      mode: "visual",
+      screenshotDimensions: { width: 1, height: 1 },
+      observedAt: Date.now(),
+      elements: [],
+      screenshot
+    });
+    const fakeService = {
+      observationStore: store,
+      observe: async () => ({
+        ok: true,
+        data: { observation: store.summary(observation) }
+      })
+    } as unknown as PhoneControlToolService;
+
+    registerPhoneControlTools(fakeServer, fakeService);
+    const observeHandler = tools.get("phone_observe_app")!;
+    const first = await observeHandler({ mode: "visual" });
+    const firstMarker = (first.structuredContent as Record<string, any>).screenshotMarker;
+
+    expect(firstMarker).toMatchObject({
+      kind: "calibration",
+      coordinateSpace: "display"
+    });
+    expect(firstMarker.x).toBe(0);
+    expect(firstMarker.y).toBe(0);
+    expect(first.content[1]).toMatchObject({
+      type: "image",
+      mimeType: "image/png"
+    });
+    expect(first.content[1].data).not.toBe(validPngBase64);
+
+    const second = await observeHandler({ mode: "visual" });
+    expect((second.structuredContent as Record<string, any>).screenshotMarker).toEqual(firstMarker);
   });
 
   it("does not infer a screenshot from an empty semantic element list", async () => {

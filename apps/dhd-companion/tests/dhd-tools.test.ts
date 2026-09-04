@@ -76,6 +76,61 @@ describe("DHD phone tool contract", () => {
     expect(JSON.stringify(dynamicResult.contentItems[0])).not.toContain(pngBase64);
   });
 
+  it("adds a calibration marker and then marks the last successful tap", () => {
+    const first = toMcpResult({
+      type: "observation",
+      ok: true,
+      observation: {
+        id: "marker-obs-1",
+        displayId: 91,
+        packageName: "com.example.app",
+        rotation: 0,
+        width: 1,
+        height: 1
+      },
+      screenshotBase64: pngBase64,
+      screenshotMimeType: "image/png"
+    });
+    const firstMarker = (first.structuredContent as Record<string, any>).screenshotMarker;
+
+    expect(firstMarker).toMatchObject({
+      kind: "calibration",
+      x: 0,
+      y: 0,
+      coordinateSpace: "display"
+    });
+    expect((first.content[0] as { text: string }).text).toContain('"screenshotMarker"');
+    expect(first.content[1]).toMatchObject({ type: "image", mimeType: "image/png" });
+    expect((first.content[1] as { data: string }).data).not.toBe(pngBase64);
+
+    const tapped = toMcpResult(
+      {
+        type: "completed",
+        ok: true,
+        observation: {
+          id: "marker-obs-2",
+          displayId: 91,
+          packageName: "com.example.app",
+          rotation: 0,
+          width: 1,
+          height: 1
+        },
+        screenshotBase64: pngBase64,
+        screenshotMimeType: "image/png"
+      },
+      undefined,
+      { action: { type: "tap", x: 0, y: 0 } }
+    );
+
+    expect((tapped.structuredContent as Record<string, any>).screenshotMarker).toEqual({
+      kind: "last_tap",
+      x: 0,
+      y: 0,
+      coordinateSpace: "display"
+    });
+    expect((tapped.structuredContent as Record<string, any>).screenshotMarker).not.toEqual(firstMarker);
+  });
+
   it("normalizes an already-prefixed screenshot data URL without double-prefixing it", () => {
     const result = toMcpResult({
       ok: true,
@@ -132,6 +187,7 @@ describe("DHD phone tool contract", () => {
     expect(record(foregroundTool.inputSchema).properties).toEqual({});
     expect(record(observeTool.inputSchema).properties).not.toHaveProperty("guardRegions");
     expect(String(openAppTool.description)).toContain("Full Access");
+    expect(String(observeTool.description)).toContain("not part of the Android app UI");
   });
 
   it("keeps app launch separate from typed execution", () => {
