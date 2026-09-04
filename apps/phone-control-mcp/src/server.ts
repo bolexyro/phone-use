@@ -433,7 +433,8 @@ export function registerPhoneControlTools(
   server.registerTool(
     "phone_list_allowed_apps",
     {
-      description: "List the server-side allowlisted Android packages.",
+      description:
+        "Show the server-side Android app access policy, including whether full app access is enabled.",
       inputSchema: {}
     },
     async () => safely(() => service.allowedApps())
@@ -452,7 +453,7 @@ export function registerPhoneControlTools(
     "phone_open_app",
     {
       description:
-        `Launch an allowlisted package in an isolated virtual display. This is the required first step to interact with an app; it returns an initial observation with observationId. Reuses an existing session for the package by default; set newInstance true to request another display. Use mode 'visual' for a screenshot-only observation/action loop; semantic remains the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists. ${SCREENSHOT_MARKER_GUIDANCE}`,
+        `Launch a policy-permitted package in an isolated virtual display. This is the required first step to interact with an app; it returns an initial observation with observationId. Reuses an existing session for the package by default; set newInstance true to request another display. Use mode 'visual' for a screenshot-only observation/action loop; semantic remains the default on display 0 and is unavailable on secondary displays until a display-scoped UI adapter exists. ${SCREENSHOT_MARKER_GUIDANCE}`,
       inputSchema: phoneOpenAppInputSchema.shape
     },
     async (input) => {

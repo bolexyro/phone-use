@@ -46,6 +46,22 @@ The ADB executable is resolved in this order:
 
 Use `PHONE_CONTROL_DEVICE_SERIAL` when more than one authorized device is connected. Without it, exactly one device in the ADB `device` state is required. `PHONE_CONTROL_PROFILE` defaults to `local`; `PHONE_CONTROL_CONFIG_PATH` can point at another server-side policy file.
 
+To permit every non-empty Android package, set the active profile's
+`allowAllApps` flag and omit `allowedApps`:
+
+```json
+{
+  "profiles": {
+    "local": {
+      "allowAllApps": true
+    }
+  }
+}
+```
+
+The MCP still exposes only its typed phone-control actions; this setting removes
+the package-level allowlist, not the observation and input validation checks.
+
 ## Phone-assistant pivot
 
 The standalone `apps/dhd-android/` app is now the phone-side Watch-mode

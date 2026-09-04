@@ -7,6 +7,8 @@ import type {
 export interface PolicyProfile {
   profile: string;
   allowedApps: readonly string[];
+  /** When true, every non-empty Android package is permitted. */
+  allowAllApps?: boolean;
 }
 
 export type DeviceState =
@@ -290,6 +292,7 @@ export interface PhoneStatusData {
 export interface AllowedAppsData {
   profile: string;
   allowedApps: readonly string[];
+  allowAllApps: boolean;
 }
 
 export interface ActiveAppsData {

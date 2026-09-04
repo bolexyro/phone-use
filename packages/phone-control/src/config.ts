@@ -66,10 +66,20 @@ function parsePolicyDocument(raw: unknown, configPath: string, profile: string):
     });
   }
 
+  const allowAllApps = profileValue.allowAllApps;
+  if (allowAllApps !== undefined && typeof allowAllApps !== "boolean") {
+    return invalidPolicy("Policy profile allowAllApps must be a boolean.", {
+      configPath,
+      profile
+    });
+  }
+
+  const unrestricted = allowAllApps === true;
   const allowedApps = profileValue.allowedApps;
   if (
-    !Array.isArray(allowedApps) ||
-    allowedApps.some((packageName) => typeof packageName !== "string")
+    allowedApps !== undefined &&
+    (!Array.isArray(allowedApps) ||
+      allowedApps.some((packageName) => typeof packageName !== "string"))
   ) {
     return invalidPolicy("Policy profile allowedApps must be an array of strings.", {
       configPath,
@@ -77,7 +87,14 @@ function parsePolicyDocument(raw: unknown, configPath: string, profile: string):
     });
   }
 
-  const normalizedApps = allowedApps.map((packageName) => packageName.trim());
+  if (!unrestricted && allowedApps === undefined) {
+    return invalidPolicy(
+      "Policy profile must define allowedApps or set allowAllApps to true.",
+      { configPath, profile }
+    );
+  }
+
+  const normalizedApps = (allowedApps ?? []).map((packageName) => packageName.trim());
   if (normalizedApps.some((packageName) => packageName.length === 0)) {
     return invalidPolicy("Policy profile allowedApps cannot contain empty values.", {
       configPath,
@@ -88,7 +105,8 @@ function parsePolicyDocument(raw: unknown, configPath: string, profile: string):
   return Object.freeze({
     profile,
     configPath,
-    allowedApps: Object.freeze([...new Set(normalizedApps)])
+    allowedApps: Object.freeze([...new Set(normalizedApps)]),
+    allowAllApps: unrestricted
   });
 }
 

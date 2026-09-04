@@ -5,7 +5,10 @@ export function isAllowedPackage(
   policy: PolicyProfile,
   packageName: string | null | undefined
 ): packageName is string {
-  return Boolean(packageName && policy.allowedApps.includes(packageName));
+  return Boolean(
+    packageName &&
+      (policy.allowAllApps === true || policy.allowedApps.includes(packageName))
+  );
 }
 
 export function assertAllowedTarget(
@@ -16,7 +19,11 @@ export function assertAllowedTarget(
     throw new PhoneControlError(
       "FORBIDDEN_APP",
       `Package '${packageName}' is not allowed by the active policy.`,
-      { packageName, allowedApps: policy.allowedApps }
+      {
+        packageName,
+        allowedApps: policy.allowedApps,
+        allowAllApps: policy.allowAllApps === true
+      }
     );
   }
 }

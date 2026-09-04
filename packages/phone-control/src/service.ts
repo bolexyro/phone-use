@@ -184,7 +184,8 @@ export class PhoneControlService {
       ok: true,
       data: {
         profile: policy.profile,
-        allowedApps: policy.allowedApps
+        allowedApps: policy.allowedApps,
+        allowAllApps: policy.allowAllApps === true
       }
     };
   }

@@ -43,6 +43,11 @@ const POLICY: PolicyProfile = {
   profile: "local",
   allowedApps: ["com.sec.android.app.popupcalculator"]
 };
+const FULL_ACCESS_POLICY: PolicyProfile = {
+  profile: "local",
+  allowedApps: [],
+  allowAllApps: true
+};
 
 class MemoryAuditLogger {
   readonly entries: AuditLogEntry[] = [];
@@ -391,6 +396,10 @@ describe("UI Automator and observation core", () => {
 });
 
 describe("phone-control service safety", () => {
+  it("allows any non-empty package when full app access is enabled", () => {
+    expect(() => assertAllowedTarget(FULL_ACCESS_POLICY, "com.android.settings")).not.toThrow();
+  });
+
   it("opens an approved app in a virtual display by default on Android 10+", async () => {
     const adb = new FakeAdb();
     adb.foreground = {
