@@ -1627,25 +1627,17 @@ async function processPendingRequest(
       fastMode,
       (update) => agentMessageStreamer.push(update),
     );
-    const phoneToolFailure = result.phoneToolFailures.at(-1);
-    if (phoneToolFailure) {
-      const reason = formatPhoneToolFailure(phoneToolFailure);
-      timing.log("phone-tool:failed", `tool=${phoneToolFailure.tool}`);
-      console.error(
-        `[phone-assistant-companion] phone tool failed; refusing to report success: ${reason}`,
+    if (result.phoneToolFailures.length > 0) {
+      const failedTools = [
+        ...new Set(result.phoneToolFailures.map((failure) => failure.tool)),
+      ].join(", ");
+      timing.log(
+        "phone-tool:reported_failure",
+        `count=${result.phoneToolFailures.length} tools=${failedTools || "unknown"}`,
       );
-      const failed = await requestBridge({
-        type: "fail_session",
-        requestId: randomUUID(),
-        sessionId,
-        reason,
-      });
-      if (failed.ok !== true) {
-        console.error(
-          `[phone-assistant-companion] could not mark the phone session failed: ${String(failed.message ?? "unknown error")}`,
-        );
-      }
-      return;
+      console.error(
+        `[phone-assistant-companion] ${result.phoneToolFailures.length} phone tool call(s) reported an error; preserving the Codex response and conversation context`,
+      );
     }
     if (
       conversationId &&
@@ -1824,17 +1816,6 @@ async function releaseRequest(sessionId: string): Promise<void> {
 
 function normalizeAgentFeedback(text: string): string {
   return text.replace(/\r\n?/g, "\n").trim().slice(0, MAX_AGENT_FEEDBACK_CHARS);
-}
-
-function formatPhoneToolFailure(failure: PhoneToolFailure): string {
-  const code = failure.code ? ` (${failure.code})` : "";
-  const outcome =
-    failure.outcome?.toLowerCase() === "unknown"
-      ? "could not be verified"
-      : "failed";
-  return `${failure.tool} ${outcome}${code}: ${failure.message}`
-    .trim()
-    .slice(0, MAX_AGENT_FEEDBACK_CHARS);
 }
 
 function extractThreadId(value: unknown): string | null {
