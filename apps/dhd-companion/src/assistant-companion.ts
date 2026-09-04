@@ -8,6 +8,7 @@ import * as readline from "node:readline";
 
 import {
   invokeDhdTool,
+  normalizeScreenshot,
   type PhoneAssistantToolResult,
 } from "./dhd-tools.js";
 import {
@@ -1211,10 +1212,11 @@ export function toDynamicToolResponse(
     if (item.type === "text") {
       contentItems.push({ type: "inputText", text: item.text });
     } else if (item.type === "image") {
-      const imageUrl = item.data.startsWith("data:")
-        ? item.data
-        : `data:${item.mimeType};base64,${item.data}`;
-      contentItems.push({ type: "inputImage", imageUrl });
+      const screenshot = normalizeScreenshot(item.data, item.mimeType);
+      if (!screenshot) {
+        throw new Error("The phone assistant returned an empty screenshot image.");
+      }
+      contentItems.push({ type: "inputImage", imageUrl: screenshot.dataUrl });
     }
   }
   if (contentItems.length === 0) {

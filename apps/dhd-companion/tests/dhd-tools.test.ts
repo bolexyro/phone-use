@@ -12,7 +12,8 @@ import {
   dhdListAllowedAppsInputSchema,
   dhdObserveInputSchema,
   dhdOpenAppInputSchema,
-  isGuardRegionsEnabled
+  isGuardRegionsEnabled,
+  toMcpResult
 } from "../src/dhd-tools.js";
 import { buildDhdDynamicTools, toDynamicToolResponse } from "../src/assistant-companion.js";
 import { dhdToolDescription } from "../src/dhd-tool-contract.js";
@@ -29,7 +30,74 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 describe("DHD phone tool contract", () => {
+  it("keeps screenshots out of text and maps them to image content on both transports", () => {
+    const mcpResult = toMcpResult({
+      type: "observation",
+      ok: true,
+      observation: { id: "obs-1" },
+      screenshotBase64: pngBase64,
+      screenshotMimeType: "image/png"
+    });
+
+    expect(mcpResult.content).toEqual([
+      {
+        type: "text",
+        text: JSON.stringify({
+          type: "observation",
+          ok: true,
+          observation: { id: "obs-1" },
+          screenshotMimeType: "image/png"
+        })
+      },
+      { type: "image", data: pngBase64, mimeType: "image/png" }
+    ]);
+    expect(mcpResult.content[0]).not.toHaveProperty("data");
+    expect(JSON.stringify(mcpResult.content[0])).not.toContain(pngBase64);
+
+    const dynamicResult = toDynamicToolResponse(mcpResult);
+    expect(dynamicResult).toEqual({
+      success: true,
+      contentItems: [
+        {
+          type: "inputText",
+          text: JSON.stringify({
+            type: "observation",
+            ok: true,
+            observation: { id: "obs-1" },
+            screenshotMimeType: "image/png"
+          })
+        },
+        { type: "inputImage", imageUrl: `data:image/png;base64,${pngBase64}` }
+      ]
+    });
+    expect(JSON.stringify(dynamicResult.contentItems[0])).not.toContain(pngBase64);
+  });
+
+  it("normalizes an already-prefixed screenshot data URL without double-prefixing it", () => {
+    const result = toMcpResult({
+      ok: true,
+      screenshotBase64: `data:image/png;base64,${pngBase64}`,
+      screenshotMimeType: "image/png"
+    });
+
+    expect(result.content).toContainEqual({ type: "image", data: pngBase64, mimeType: "image/png" });
+    expect(toDynamicToolResponse(result).contentItems).toContainEqual({
+      type: "inputImage",
+      imageUrl: `data:image/png;base64,${pngBase64}`
+    });
+  });
+
+  it("fails closed for unsupported or malformed screenshot payloads", () => {
+    expect(() => toMcpResult({ screenshotBase64: "not base64" })).toThrow("invalid base64");
+    expect(() => toMcpResult({
+      screenshotBase64: pngBase64,
+      screenshotMimeType: "image/jpeg"
+    })).toThrow("Unsupported phone screenshot MIME type");
+  });
+
   it("uses the same canonical names for the MCP and App Server surfaces", () => {
     const dynamicNames = buildDhdDynamicTools().map((tool) => String(tool.name));
     const listTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_list_allowed_apps"));
