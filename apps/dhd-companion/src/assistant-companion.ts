@@ -12,6 +12,11 @@ import {
   type PhoneAssistantToolResult,
 } from "./dhd-tools.js";
 import {
+  emitCompanionToolCallEvent,
+  type CompanionJsonValue,
+  type CompanionToolCallEvent,
+} from "./companion-events.js";
+import {
   DHD_ACTION_TYPES,
   DHD_KEYPRESS_KEYS,
   DHD_MAX_GUARD_REGIONS,
@@ -1139,8 +1144,14 @@ function emptySchema(): Record<string, unknown> {
   return { type: "object", properties: {}, additionalProperties: false };
 }
 
-async function handleDynamicToolCall(
+interface DynamicToolCallOptions {
+  invoke?: (name: string, input: unknown) => Promise<PhoneAssistantToolResult>;
+  emit?: (event: CompanionToolCallEvent) => void;
+}
+
+export async function handleDynamicToolCall(
   value: unknown,
+  options: DynamicToolCallOptions = {},
 ): Promise<DynamicToolCallResponse> {
   const params = extractRecord(value) ?? {};
   const requestedName = extractDynamicToolName(value);
@@ -1154,19 +1165,65 @@ async function handleDynamicToolCall(
     );
   }
 
-  const input = normalizeDynamicArguments(params.arguments);
+  const normalizedArguments = normalizeDynamicArguments(params.arguments);
+  const callId = randomUUID();
+  const emit = options.emit ?? emitCompanionToolCallEvent;
+  const invoke = options.invoke ?? invokeDhdTool;
+  emit({
+    type: "dhd_tool_call",
+    phase: "started",
+    callId,
+    tool: mappedName,
+    arguments: normalizedArguments.value as CompanionJsonValue,
+    ...(normalizedArguments.rawArguments
+      ? { rawArguments: normalizedArguments.rawArguments }
+      : {}),
+    timestamp: Date.now(),
+  });
   console.error(`[codex-app-server] invoking ${name}`);
-  const result = await invokeDhdTool(mappedName, input);
-  return toDynamicToolResponse(result);
+
+  let result: PhoneAssistantToolResult | undefined;
+  try {
+    result = await invoke(mappedName, normalizedArguments.value);
+    const response = toDynamicToolResponse(result);
+    emit({
+      type: "dhd_tool_call",
+      phase: "completed",
+      callId,
+      tool: mappedName,
+      result,
+      completedAt: Date.now(),
+    });
+    return response;
+  } catch (error) {
+    emit({
+      type: "dhd_tool_call",
+      phase: "completed",
+      callId,
+      tool: mappedName,
+      ...(result ? { result } : {}),
+      error: error instanceof Error ? error.message : String(error),
+      completedAt: Date.now(),
+    });
+    throw error;
+  }
 }
 
-function normalizeDynamicArguments(value: unknown): unknown {
-  if (value === undefined || value === null) return {};
-  if (typeof value !== "string") return value;
+interface NormalizedDynamicArguments {
+  value: unknown;
+  rawArguments?: string;
+}
+
+function normalizeDynamicArguments(value: unknown): NormalizedDynamicArguments {
+  if (value === undefined || value === null) return { value: {} };
+  if (typeof value !== "string") return { value };
   try {
-    return JSON.parse(value) as unknown;
+    return { value: JSON.parse(value) as unknown };
   } catch {
-    return { __invalidArguments: value.slice(0, 240) };
+    return {
+      value: { __invalidArguments: value.slice(0, 240) },
+      rawArguments: value,
+    };
   }
 }
 

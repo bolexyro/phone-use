@@ -988,6 +988,323 @@ html[data-theme="light"] .connection-card {
   text-align: center;
 }
 
+/* Tool Inspector */
+.tools-panel {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 150px);
+  min-height: 460px;
+}
+
+.tool-console-body {
+  padding: 14px;
+}
+
+.tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tool-call-card {
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.tool-call-card.running {
+  border-color: rgba(245, 158, 11, 0.42);
+}
+
+.tool-call-card.error {
+  border-color: rgba(239, 68, 68, 0.42);
+}
+
+.tool-call-card > summary {
+  list-style: none;
+}
+
+.tool-call-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-call-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 46px;
+  padding: 9px 12px;
+  cursor: pointer;
+  background-color: var(--bg-subtle);
+  transition: background-color 140ms ease;
+}
+
+.tool-call-summary:hover {
+  background-color: var(--bg-elevated);
+}
+
+.tool-call-summary:focus-visible,
+.tool-payload-summary:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.tool-call-summary-left,
+.tool-call-summary-right {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.tool-call-name {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-call-summary-right {
+  flex-shrink: 0;
+}
+
+.tool-call-status.success {
+  background-color: var(--accent-green-subtle);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: var(--accent-green);
+}
+
+.tool-call-status.running {
+  background-color: var(--accent-amber-subtle);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: var(--accent-amber);
+}
+
+.tool-call-status.error {
+  background-color: var(--accent-red-subtle);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--accent-red);
+}
+
+.tool-call-duration,
+.tool-call-metadata {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.tool-call-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px 12px 13px;
+  border-top: 1px solid var(--border);
+}
+
+.tool-call-metadata {
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.tool-payload {
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+}
+
+.tool-payload-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-start;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  list-style: none;
+}
+
+.tool-payload-label {
+  flex: 1;
+}
+
+.tool-copy-button {
+  flex-shrink: 0;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background-color: var(--bg-elevated);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tool-copy-button:hover:not(:disabled) {
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+}
+
+.tool-copy-button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.tool-copy-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.tool-payload-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-payload-summary::before {
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--text-dim);
+  content: "▸";
+  transition: transform 140ms ease;
+}
+
+.tool-payload[open] > .tool-payload-summary::before {
+  transform: rotate(90deg);
+}
+
+.tool-payload-content {
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-call-pending {
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--accent-amber);
+  font-size: 11px;
+}
+
+.tool-call-error {
+  padding: 9px 10px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius-sm);
+  background-color: var(--accent-red-subtle);
+  color: var(--accent-red);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.tool-images {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-images-title {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tool-image-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tool-image-preview {
+  display: block;
+  width: min(100%, 240px);
+  height: 180px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+
+.tool-image-preview:hover {
+  border-color: var(--accent-blue-hover);
+  transform: translateY(-1px);
+}
+
+.tool-image-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.tool-image-dialog {
+  width: min(92vw, 1200px);
+  max-width: 92vw;
+  max-height: 92vh;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-panel);
+  color: var(--text-primary);
+}
+
+.tool-image-dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0.78);
+}
+
+.tool-image-dialog-inner {
+  display: flex;
+  flex-direction: column;
+  max-height: 92vh;
+}
+
+.tool-image-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  background-color: var(--bg-subtle);
+}
+
+.tool-image-dialog-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  padding: 14px;
+  overflow: auto;
+  background-color: var(--bg-input);
+}
+
+.tool-image-dialog-body img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(92vh - 72px);
+  object-fit: contain;
+}
+
 @keyframes spin {
   from {
     transform: rotate(0deg);

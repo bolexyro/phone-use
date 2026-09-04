@@ -66,6 +66,11 @@
             <span>Console</span>
             <span class="tab-count font-mono" id="log-count-badge">0</span>
           </button>
+          <button class="tab-btn" data-tab="tools" type="button">
+            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 9l-4 3 4 3"/><path d="M16 9l4 3-4 3"/><path d="M14 5l-4 14"/></svg>
+            <span>Tools</span>
+            <span class="tab-count font-mono" id="tool-count-badge">0</span>
+          </button>
         </nav>
         <div class="subbar-detail" id="app-status-detail">Ready</div>
       </div>
@@ -251,7 +256,30 @@
           </div>
         </section>
 
-        <!-- TAB 3: CONSOLE LOGS -->
+        <!-- TAB 3: TOOL INSPECTOR -->
+        <section id="tab-tools" class="tab-panel">
+          <div class="panel tools-panel">
+            <div class="panel-header console-header">
+              <div class="panel-header-left">
+                <span class="section-tag">Tool Inspector</span>
+                <span class="log-count font-mono" id="tool-count">0 calls</span>
+              </div>
+              <div class="console-controls">
+                <button id="clear-tool-calls" class="action-btn secondary small" type="button">
+                  <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  <span>Clear calls</span>
+                </button>
+              </div>
+            </div>
+            <div class="console-body tool-console-body" id="tool-scroll-container">
+              <div id="tool-list" class="tool-list">
+                <div class="empty-console font-mono">No tool calls recorded yet. Start the companion worker and send a phone request.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 4: CONSOLE LOGS -->
         <section id="tab-logs" class="tab-panel">
           <div class="panel console-panel">
             <div class="panel-header console-header">
@@ -275,6 +303,20 @@
         </section>
       </main>
     </div>
+
+    <dialog id="tool-image-dialog" class="tool-image-dialog" aria-labelledby="tool-image-dialog-label">
+      <div class="tool-image-dialog-inner">
+        <div class="tool-image-dialog-header">
+          <span id="tool-image-dialog-label" class="tool-images-title font-mono">Tool response image</span>
+          <button id="close-tool-image-dialog" class="toast-close-btn" type="button" aria-label="Close image preview">
+            <svg viewBox="0 0 24 24" class="toast-close-svg" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="tool-image-dialog-body">
+          <img id="tool-image-dialog-image" alt="Tool response image" />
+        </div>
+      </div>
+    </dialog>
 
     <div id="toast" class="toast-box" role="status" aria-live="polite">
       <div class="toast-icon-wrap" id="toast-icon"></div>

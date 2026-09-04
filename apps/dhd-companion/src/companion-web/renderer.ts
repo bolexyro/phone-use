@@ -1,7 +1,8 @@
 import type {
   CompanionClientApi,
   CompanionLogEntry,
-  CompanionState
+  CompanionState,
+  CompanionToolCall
 } from "./api.js";
 import {
   displayPairingCode,
@@ -72,6 +73,14 @@ function createWebApi(): CompanionClientApi {
       }
       return res.json();
     },
+    async clearToolCalls(): Promise<CompanionState> {
+      const res = await fetch("/api/clear-tool-calls", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.message || `Server returned ${res.status}`);
+      }
+      return res.json();
+    },
     onState(callback: (state: CompanionState) => void) {
       const source = new EventSource("/api/events");
       source.onmessage = (event) => {
@@ -125,6 +134,15 @@ const elements = {
   logCount: byId<HTMLSpanElement>("log-count"),
   logCountBadge: byId<HTMLSpanElement>("log-count-badge"),
   clearLogs: byId<HTMLButtonElement>("clear-logs"),
+  toolCount: byId<HTMLSpanElement>("tool-count"),
+  toolCountBadge: byId<HTMLSpanElement>("tool-count-badge"),
+  clearToolCalls: byId<HTMLButtonElement>("clear-tool-calls"),
+  toolList: byId<HTMLDivElement>("tool-list"),
+  toolScrollContainer: byId<HTMLDivElement>("tool-scroll-container"),
+  toolImageDialog: byId<HTMLDialogElement>("tool-image-dialog"),
+  toolImageDialogImage: byId<HTMLImageElement>("tool-image-dialog-image"),
+  toolImageDialogLabel: byId<HTMLSpanElement>("tool-image-dialog-label"),
+  closeToolImageDialog: byId<HTMLButtonElement>("close-tool-image-dialog"),
   host: byId<HTMLInputElement>("host-input"),
   port: byId<HTMLInputElement>("port-input"),
   token: byId<HTMLInputElement>("token-input"),
@@ -228,6 +246,286 @@ function renderLogs(entries: CompanionLogEntry[]): void {
   }
 }
 
+function formatJson(value: unknown): string {
+  try {
+    const formatted = JSON.stringify(value, null, 2);
+    return formatted ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const fallback = document.createElement("textarea");
+  fallback.value = value;
+  fallback.setAttribute("readonly", "true");
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  document.body.append(fallback);
+  fallback.select();
+  const copied = document.execCommand("copy");
+  fallback.remove();
+  if (!copied) throw new Error("Clipboard is unavailable.");
+}
+
+function renderPayload(
+  title: string,
+  value: unknown,
+  open: boolean,
+): HTMLDetailsElement {
+  const details = document.createElement("details");
+  details.className = "tool-payload";
+  details.open = open;
+
+  const summary = document.createElement("summary");
+  summary.className = "tool-payload-summary";
+  const label = document.createElement("span");
+  label.className = "tool-payload-label";
+  label.textContent = title;
+
+  const payloadText = typeof value === "string" ? value : formatJson(value);
+  const copy = document.createElement("button");
+  copy.className = "tool-copy-button";
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.setAttribute("aria-label", `Copy ${title}`);
+  copy.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    copy.disabled = true;
+    copy.textContent = "Copying…";
+    void copyText(payloadText).then(() => {
+      copy.textContent = "Copied";
+      window.setTimeout(() => {
+        copy.disabled = false;
+        copy.textContent = "Copy";
+      }, 1_200);
+    }).catch(() => {
+      copy.disabled = false;
+      copy.textContent = "Copy failed";
+      window.setTimeout(() => {
+        copy.textContent = "Copy";
+      }, 1_500);
+    });
+  });
+  summary.append(label, copy);
+
+  const content = document.createElement("pre");
+  content.className = "tool-payload-content font-mono";
+  content.textContent = payloadText;
+
+  details.dataset.payloadTitle = title;
+  details.append(summary, content);
+  return details;
+}
+
+function toolCallDuration(call: CompanionToolCall): string {
+  if (call.durationMs === undefined) return "in progress";
+  return `${call.durationMs}ms`;
+}
+
+function renderToolCall(
+  call: CompanionToolCall,
+  open: boolean,
+  openPayloadKeys: Set<string>,
+  existingCallIds: Set<string>,
+): HTMLDetailsElement {
+  const card = document.createElement("details");
+  card.className = `tool-call-card ${call.status}`;
+  card.dataset.callId = call.id;
+  card.open = open;
+
+  const summary = document.createElement("summary");
+  summary.className = "tool-call-summary";
+
+  const summaryLeft = document.createElement("span");
+  summaryLeft.className = "tool-call-summary-left";
+  const toolName = document.createElement("span");
+  toolName.className = "tool-call-name font-mono";
+  toolName.textContent = call.tool;
+  summaryLeft.append(toolName);
+
+  const summaryRight = document.createElement("span");
+  summaryRight.className = "tool-call-summary-right";
+  const status = document.createElement("span");
+  status.className = `state-badge font-mono tool-call-status ${call.status}`;
+  status.textContent = call.status.toUpperCase();
+  const duration = document.createElement("span");
+  duration.className = "tool-call-duration font-mono";
+  duration.textContent = toolCallDuration(call);
+  summaryRight.append(status, duration);
+  summary.append(summaryLeft, summaryRight);
+
+  const body = document.createElement("div");
+  body.className = "tool-call-body";
+
+  const metadata = document.createElement("div");
+  metadata.className = "tool-call-metadata font-mono";
+  metadata.textContent = [
+    `started ${formatTime(call.startedAt)}`,
+    call.completedAt === undefined ? "awaiting response" : `completed ${formatTime(call.completedAt)}`,
+    `id ${call.id}`
+  ].join("  ·  ");
+  body.append(metadata);
+
+  const defaultPayloadOpen = !existingCallIds.has(call.id);
+  body.append(renderPayload(
+    "Arguments",
+    call.arguments,
+    openPayloadKeys.has(`${call.id}:Arguments`) || defaultPayloadOpen,
+  ));
+  if (call.rawArguments) {
+    body.append(renderPayload(
+      "Raw invalid arguments",
+      call.rawArguments,
+      openPayloadKeys.has(`${call.id}:Raw invalid arguments`),
+    ));
+  }
+  if (call.response) {
+    body.append(renderPayload(
+      "Response",
+      call.response.structuredContent ?? {},
+      openPayloadKeys.has(`${call.id}:Response`) || defaultPayloadOpen,
+    ));
+  } else {
+    const pending = document.createElement("div");
+    pending.className = "tool-call-pending font-mono";
+    pending.textContent = "Waiting for tool response…";
+    body.append(pending);
+  }
+
+  if (call.error) {
+    const error = document.createElement("div");
+    error.className = "tool-call-error";
+    error.textContent = call.error;
+    body.append(error);
+  }
+
+  const images = call.response?.images ?? [];
+  if (images.length > 0) {
+    const imageSection = document.createElement("div");
+    imageSection.className = "tool-images";
+    const imageTitle = document.createElement("div");
+    imageTitle.className = "tool-images-title";
+    imageTitle.textContent = `Response images (${images.length})`;
+    imageSection.append(imageTitle);
+
+    const imageGrid = document.createElement("div");
+    imageGrid.className = "tool-image-grid";
+    for (const item of images) {
+      const previewButton = document.createElement("button");
+      previewButton.className = "tool-image-preview";
+      previewButton.type = "button";
+      previewButton.title = "Open image preview";
+      previewButton.setAttribute("aria-label", `Open ${call.tool} response image ${item.index + 1}`);
+      const image = document.createElement("img");
+      image.src = item.imageUrl;
+      image.alt = `${call.tool} response image ${item.index + 1}`;
+      image.loading = "lazy";
+      image.decoding = "async";
+      previewButton.append(image);
+      previewButton.addEventListener("click", () => {
+        elements.toolImageDialogImage.src = item.imageUrl;
+        elements.toolImageDialogImage.alt = image.alt;
+        elements.toolImageDialogLabel.textContent = `${call.tool} · image ${item.index + 1}`;
+        if (!elements.toolImageDialog.open) elements.toolImageDialog.showModal();
+      });
+      imageGrid.append(previewButton);
+    }
+    imageSection.append(imageGrid);
+    body.append(imageSection);
+  }
+
+  card.append(summary, body);
+  return card;
+}
+
+let renderedToolCallsSignature: string | undefined;
+
+function renderToolCalls(calls: CompanionToolCall[]): void {
+  const signature = JSON.stringify(calls);
+  if (signature === renderedToolCallsSignature) return;
+  renderedToolCallsSignature = signature;
+
+  const previousOuterScrollTop = elements.toolScrollContainer.scrollTop;
+  const previousOuterScrollLeft = elements.toolScrollContainer.scrollLeft;
+  const payloadScrollPositions = new Map<string, { top: number; left: number }>();
+  for (const payload of elements.toolList.querySelectorAll<HTMLDetailsElement>(".tool-payload")) {
+    const callId = payload.closest<HTMLDetailsElement>(".tool-call-card")?.dataset.callId;
+    const title = payload.dataset.payloadTitle;
+    const content = payload.querySelector<HTMLElement>(".tool-payload-content");
+    if (callId && title && content) {
+      payloadScrollPositions.set(`${callId}:${title}`, {
+        top: content.scrollTop,
+        left: content.scrollLeft,
+      });
+    }
+  }
+
+  const existingCards = [...elements.toolList.querySelectorAll<HTMLDetailsElement>(".tool-call-card")];
+  const existingCallIds = new Set(
+    existingCards
+      .map((card) => card.dataset.callId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const openCallIds = new Set(
+    existingCards
+      .filter((card) => card.open)
+      .map((card) => card.dataset.callId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const openPayloadKeys = new Set(
+    [...elements.toolList.querySelectorAll<HTMLDetailsElement>(".tool-payload[open]")]
+      .map((payload) => {
+        const callId = payload.closest<HTMLDetailsElement>(".tool-call-card")?.dataset.callId;
+        const title = payload.dataset.payloadTitle;
+        return callId && title ? `${callId}:${title}` : "";
+      })
+      .filter(Boolean),
+  );
+
+  elements.toolList.replaceChildren();
+  elements.toolCount.textContent = `${calls.length} calls`;
+  elements.toolCountBadge.textContent = `${calls.length}`;
+
+  if (calls.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-console font-mono";
+    empty.textContent = "No tool calls recorded. Start the companion worker and send a phone request.";
+    elements.toolList.append(empty);
+    elements.toolScrollContainer.scrollTop = previousOuterScrollTop;
+    elements.toolScrollContainer.scrollLeft = previousOuterScrollLeft;
+    return;
+  }
+
+  const latestId = calls.at(-1)?.id;
+  for (const call of calls) {
+    const shouldOpen = openCallIds.has(call.id) ||
+      (!existingCallIds.has(call.id) && call.id === latestId);
+    elements.toolList.append(renderToolCall(call, shouldOpen, openPayloadKeys, existingCallIds));
+  }
+
+  // Live state updates must never move the user's viewport. New calls remain
+  // available below the current position for the user to inspect on demand.
+  elements.toolScrollContainer.scrollTop = previousOuterScrollTop;
+  elements.toolScrollContainer.scrollLeft = previousOuterScrollLeft;
+  for (const payload of elements.toolList.querySelectorAll<HTMLDetailsElement>(".tool-payload")) {
+    const callId = payload.closest<HTMLDetailsElement>(".tool-call-card")?.dataset.callId;
+    const title = payload.dataset.payloadTitle;
+    const content = payload.querySelector<HTMLElement>(".tool-payload-content");
+    const position = callId && title ? payloadScrollPositions.get(`${callId}:${title}`) : undefined;
+    if (content && position) {
+      content.scrollTop = position.top;
+      content.scrollLeft = position.left;
+    }
+  }
+}
+
 function render(next: CompanionState): void {
   const targetStr = `${next.settings.host}:${next.settings.port}`;
   if (elements.headerTarget) elements.headerTarget.textContent = targetStr;
@@ -298,6 +596,7 @@ function render(next: CompanionState): void {
   elements.token.placeholder = isManual ? "Token configured (enter new token to replace)" : "Paste manual bridge token";
   elements.pairingCode.placeholder = "ABCD-2345";
   renderLogs(next.logs);
+  renderToolCalls(next.toolCalls);
 }
 
 function hideToast(): void {
@@ -372,6 +671,27 @@ if (elements.clearLogs) {
     }
   });
 }
+
+if (elements.clearToolCalls) {
+  elements.clearToolCalls.addEventListener("click", async () => {
+    try {
+      const nextState = await api.clearToolCalls();
+      render(nextState);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), "error");
+    }
+  });
+}
+
+elements.closeToolImageDialog.addEventListener("click", () => {
+  elements.toolImageDialog.close();
+});
+
+elements.toolImageDialog.addEventListener("click", (event) => {
+  if (event.target === elements.toolImageDialog) {
+    elements.toolImageDialog.close();
+  }
+});
 
 // Theme Management
 const themeToggle = document.getElementById("theme-toggle") as HTMLButtonElement | null;

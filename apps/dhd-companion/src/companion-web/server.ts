@@ -9,6 +9,11 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 import {
+  isCompanionToolCallEvent,
+  type CompanionJsonValue,
+  type CompanionToolCallEvent,
+} from "../companion-events.js";
+import {
   DEFAULT_BRIDGE_HOST,
   DEFAULT_BRIDGE_PORT,
   parsePort,
@@ -24,7 +29,9 @@ import type {
   CompanionSettingsSnapshot,
   CompanionState,
   CompanionProcessStatus,
-  PhoneSnapshot
+  PhoneSnapshot,
+  CompanionToolCall,
+  CompanionToolCallResponse
 } from "./api.js";
 
 interface ConnectionConfig {
@@ -48,16 +55,19 @@ const PROJECT_ROOT = resolve(WEB_DIRECTORY, "../../");
 const COMPANION_SCRIPT_JS = resolve(WEB_DIRECTORY, "../assistant-companion.js");
 const COMPANION_SCRIPT_TS = resolve(PROJECT_ROOT, "src/assistant-companion.ts");
 const MAX_LOG_ENTRIES = 250;
+const MAX_TOOL_CALLS = 50;
 const DEFAULT_WEB_PORT = 8766;
 const DEFAULT_WEB_HOST = "127.0.0.1";
 
-let connection: ConnectionConfig;
+let connection: ConnectionConfig = initialConnection();
 let worker: ChildProcess | null = null;
 let processStatus: CompanionProcessStatus = "stopped";
 let bridgeStatus: BridgeStatus = "unknown";
 let phone: PhoneSnapshot | undefined;
 let lastError: string | undefined;
 let logEntries: CompanionLogEntry[] = [];
+let toolCalls: CompanionToolCall[] = [];
+const toolImages = new Map<string, { bytes: Buffer; mimeType: string }>();
 const sseClients = new Set<http.ServerResponse>();
 
 function readEnvPort(): number {
@@ -133,7 +143,8 @@ function snapshot(): CompanionState {
     settings: settingsSnapshot(),
     ...(phone ? { phone } : {}),
     ...(lastError ? { lastError } : {}),
-    logs: [...logEntries]
+    logs: [...logEntries],
+    toolCalls: [...toolCalls]
   };
 }
 
@@ -158,6 +169,148 @@ function appendLog(
     ...logEntries,
     { id: randomUUID(), timestamp: Date.now(), message: trimmed, ...options }
   ].slice(-MAX_LOG_ENTRIES);
+  publishState();
+}
+
+function toolImageKey(callId: string, index: number): string {
+  return `${callId}:${index}`;
+}
+
+function toolImageUrl(callId: string, index: number): string {
+  return `/api/tool-calls/${encodeURIComponent(callId)}/images/${index}`;
+}
+
+function removeToolImages(callId: string): void {
+  const prefix = `${callId}:`;
+  for (const key of toolImages.keys()) {
+    if (key.startsWith(prefix)) toolImages.delete(key);
+  }
+}
+
+function toJsonValue(value: unknown): CompanionJsonValue {
+  if (value === null) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (Array.isArray(value)) return value.map((item) => toJsonValue(item));
+  if (typeof value === "object") {
+    const object: { [key: string]: CompanionJsonValue } = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      object[key] = toJsonValue(item);
+    }
+    return object;
+  }
+  return String(value);
+}
+
+function decodeImage(value: string): Buffer | undefined {
+  const raw = value.trim();
+  const dataUrlMatch = raw.match(/^data:([^;,]+);base64,([\s\S]*)$/i);
+  const base64 = (dataUrlMatch ? dataUrlMatch[2] : raw).replace(/\s+/g, "");
+  if (!base64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64) || base64.length % 4 !== 0) {
+    return undefined;
+  }
+  const bytes = Buffer.from(base64, "base64");
+  return bytes.length > 0 ? bytes : undefined;
+}
+
+function dashboardToolResponse(
+  callId: string,
+  value: unknown,
+): CompanionToolCallResponse | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const result = value as Record<string, unknown>;
+  removeToolImages(callId);
+  const images: CompanionToolCallResponse["images"] = [];
+  const rawContent = Array.isArray(result.content) ? result.content : [];
+
+  rawContent.forEach((value, index) => {
+    if (!value || typeof value !== "object") return;
+    const item = value as Record<string, unknown>;
+    if (
+      item.type !== "image" ||
+      typeof item.data !== "string" ||
+      typeof item.mimeType !== "string" ||
+      !item.mimeType.startsWith("image/")
+    ) {
+      return;
+    }
+    const bytes = decodeImage(item.data);
+    if (!bytes) return;
+    toolImages.set(toolImageKey(callId, index), {
+      bytes,
+      mimeType: item.mimeType
+    });
+    images.push({
+      type: "image",
+      imageUrl: toolImageUrl(callId, index),
+      mimeType: item.mimeType,
+      index
+    });
+  });
+
+  const response: CompanionToolCallResponse = { images };
+  if (result.isError === true) response.isError = true;
+  if (result.structuredContent && typeof result.structuredContent === "object" && !Array.isArray(result.structuredContent)) {
+    response.structuredContent = toJsonValue(result.structuredContent) as { [key: string]: CompanionJsonValue };
+  }
+  return response;
+}
+
+function upsertToolCall(entry: CompanionToolCall): void {
+  const existingIndex = toolCalls.findIndex((call) => call.id === entry.id);
+  if (existingIndex >= 0) {
+    toolCalls = toolCalls.map((call, index) => index === existingIndex ? entry : call);
+  } else {
+    toolCalls = [...toolCalls, entry];
+  }
+
+  while (toolCalls.length > MAX_TOOL_CALLS) {
+    const evicted = toolCalls.shift();
+    if (evicted) removeToolImages(evicted.id);
+  }
+}
+
+export function ingestCompanionToolCallEvent(value: unknown): void {
+  if (!isCompanionToolCallEvent(value) || !value.tool.startsWith("dhd_")) return;
+  const event: CompanionToolCallEvent = value;
+
+  if (event.phase === "started") {
+    upsertToolCall({
+      id: event.callId,
+      tool: event.tool,
+      arguments: toJsonValue(event.arguments),
+      ...(event.rawArguments ? { rawArguments: event.rawArguments } : {}),
+      startedAt: event.timestamp,
+      status: "running"
+    });
+    publishState();
+    return;
+  }
+
+  const existing = toolCalls.find((call) => call.id === event.callId);
+  const startedAt = existing?.startedAt ?? event.completedAt;
+  let response: CompanionToolCallResponse | undefined;
+  let conversionError: string | undefined;
+  if (event.result) {
+    try {
+      response = dashboardToolResponse(event.callId, event.result);
+    } catch (error) {
+      conversionError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  const error = event.error || conversionError;
+  upsertToolCall({
+    id: event.callId,
+    tool: event.tool,
+    arguments: existing?.arguments ?? {},
+    ...(existing?.rawArguments ? { rawArguments: existing.rawArguments } : {}),
+    startedAt,
+    completedAt: event.completedAt,
+    durationMs: Math.max(0, event.completedAt - startedAt),
+    status: error || event.result?.isError === true ? "error" : "success",
+    ...(response ? { response } : {}),
+    ...(error ? { error } : {})
+  });
   publishState();
 }
 
@@ -229,11 +382,12 @@ function startWorker(): CompanionState {
   const child = spawn(scriptConfig.command, scriptConfig.args, {
     cwd: PROJECT_ROOT,
     env: workerEnvironment(),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
     windowsHide: true
   });
 
   worker = child;
+  child.on("message", ingestCompanionToolCallEvent);
   childOutput(child, "companion");
   child.once("error", (error) => {
     if (worker !== child) return;
@@ -293,6 +447,13 @@ async function stopWorker(): Promise<CompanionState> {
 
 function clearLogs(): CompanionState {
   logEntries = [];
+  publishState();
+  return snapshot();
+}
+
+function clearToolCalls(): CompanionState {
+  toolCalls = [];
+  toolImages.clear();
   publishState();
   return snapshot();
 }
@@ -558,6 +719,34 @@ export function createCompanionWebServer(): http.Server {
       return;
     }
 
+    const toolImageMatch = pathname.match(/^\/api\/tool-calls\/([^/]+)\/images\/(\d+)$/);
+    if (toolImageMatch && req.method === "GET") {
+      let callId: string;
+      try {
+        callId = decodeURIComponent(toolImageMatch[1]);
+      } catch {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Image not found");
+        return;
+      }
+      const imageIndex = Number(toolImageMatch[2]);
+      const image = Number.isSafeInteger(imageIndex)
+        ? toolImages.get(toolImageKey(callId, imageIndex))
+        : undefined;
+      if (!image) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Image not found");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": image.mimeType,
+        "Content-Length": image.bytes.length,
+        "Cache-Control": "no-store"
+      });
+      res.end(image.bytes);
+      return;
+    }
+
     if (pathname === "/api/state" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(snapshot()));
@@ -629,6 +818,18 @@ export function createCompanionWebServer(): http.Server {
     if (pathname === "/api/clear-logs" && req.method === "POST") {
       try {
         const nextState = clearLogs();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(nextState));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: err instanceof Error ? err.message : String(err) }));
+      }
+      return;
+    }
+
+    if (pathname === "/api/clear-tool-calls" && req.method === "POST") {
+      try {
+        const nextState = clearToolCalls();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(nextState));
       } catch (err) {

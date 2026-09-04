@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { CodexAppServerClient } from "../src/assistant-companion.js";
+import type { CompanionToolCallEvent } from "../src/companion-events.js";
+import {
+  CodexAppServerClient,
+  handleDynamicToolCall,
+} from "../src/assistant-companion.js";
 
 describe("Codex App Server agent-message extraction", () => {
   it("uses the final answer instead of concatenating commentary from the same turn", async () => {
@@ -98,6 +102,83 @@ describe("Codex App Server agent-message extraction", () => {
         tool: "unsupported_phone_tool",
         message: "Unsupported dynamic phone tool: unsupported_phone_tool"
       }]
+    });
+  });
+
+  it("emits a complete diagnostic event with normalized arguments and images", async () => {
+    const events: CompanionToolCallEvent[] = [];
+    const imageData = Buffer.from("test-image").toString("base64");
+    const response = await handleDynamicToolCall(
+      { tool: "dhd_observe", arguments: '{"expectedPackageName":"com.example.app"}' },
+      {
+        emit: (event) => events.push(event),
+        invoke: async (_name, input) => {
+          expect(input).toEqual({ expectedPackageName: "com.example.app" });
+          return {
+            content: [
+              { type: "text", text: '{"ok":true}' },
+              { type: "image", data: imageData, mimeType: "image/png" },
+            ],
+            structuredContent: { ok: true },
+          };
+        },
+      },
+    );
+
+    expect(response).toEqual({
+      contentItems: [
+        { type: "inputText", text: '{"ok":true}' },
+        { type: "inputImage", imageUrl: `data:image/png;base64,${imageData}` },
+      ],
+      success: true,
+    });
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      type: "dhd_tool_call",
+      phase: "started",
+      tool: "dhd_observe",
+      arguments: { expectedPackageName: "com.example.app" },
+    });
+    expect(events[1]).toMatchObject({
+      type: "dhd_tool_call",
+      phase: "completed",
+      callId: events[0].callId,
+      tool: "dhd_observe",
+      result: {
+        structuredContent: { ok: true },
+        content: [
+          { type: "text", text: '{"ok":true}' },
+          { type: "image", data: imageData, mimeType: "image/png" },
+        ],
+      },
+    });
+  });
+
+  it("emits raw invalid arguments and thrown tool errors without changing the error path", async () => {
+    const events: CompanionToolCallEvent[] = [];
+    await expect(
+      handleDynamicToolCall(
+        { tool: "dhd_observe", arguments: "not-json" },
+        {
+          emit: (event) => events.push(event),
+          invoke: async (_name, input) => {
+            expect(input).toEqual({ __invalidArguments: "not-json" });
+            throw new Error("bridge unavailable");
+          },
+        },
+      ),
+    ).rejects.toThrow("bridge unavailable");
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      phase: "started",
+      rawArguments: "not-json",
+      arguments: { __invalidArguments: "not-json" },
+    });
+    expect(events[1]).toMatchObject({
+      phase: "completed",
+      callId: events[0].callId,
+      error: "bridge unavailable",
     });
   });
 

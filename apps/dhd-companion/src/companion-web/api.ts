@@ -1,3 +1,7 @@
+import type { CompanionJsonValue } from "../companion-events.js";
+
+export type { CompanionJsonValue } from "../companion-events.js";
+
 export type CompanionProcessStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 export type BridgeStatus = "unknown" | "checking" | "connected" | "offline";
 
@@ -36,6 +40,34 @@ export interface CompanionLogEntry {
   message: string;
 }
 
+export type CompanionToolCallStatus = "running" | "success" | "error";
+
+export interface CompanionToolCallImageContent {
+  type: "image";
+  imageUrl: string;
+  mimeType: string;
+  index: number;
+}
+
+export interface CompanionToolCallResponse {
+  isError?: boolean;
+  images: CompanionToolCallImageContent[];
+  structuredContent?: { [key: string]: CompanionJsonValue };
+}
+
+export interface CompanionToolCall {
+  id: string;
+  tool: string;
+  arguments: CompanionJsonValue;
+  rawArguments?: string;
+  startedAt: number;
+  completedAt?: number;
+  durationMs?: number;
+  status: CompanionToolCallStatus;
+  response?: CompanionToolCallResponse;
+  error?: string;
+}
+
 export interface CompanionState {
   processStatus: CompanionProcessStatus;
   bridgeStatus: BridgeStatus;
@@ -43,6 +75,7 @@ export interface CompanionState {
   phone?: PhoneSnapshot;
   lastError?: string;
   logs: CompanionLogEntry[];
+  toolCalls: CompanionToolCall[];
 }
 
 export interface BridgeCheckResult {
@@ -59,5 +92,6 @@ export interface CompanionClientApi {
   startCompanion(): Promise<CompanionState>;
   stopCompanion(): Promise<CompanionState>;
   clearLogs(): Promise<CompanionState>;
+  clearToolCalls(): Promise<CompanionState>;
   onState(callback: (state: CompanionState) => void): () => void;
 }
