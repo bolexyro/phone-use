@@ -29,9 +29,12 @@ import type {
 import {
   SCREENSHOT_MARKER_GUIDANCE,
   ScreenshotMarkerPresenter,
+  annotateScreenshotPng,
+  cropScreenshotPng,
   type ScreenshotMarker,
   type ScreenshotMarkerObservation,
-  type ScreenshotMarkerPoint
+  type ScreenshotMarkerPoint,
+  type ScreenshotEvidenceMetadata
 } from "@dhd/screenshot-markers";
 
 export const PHONE_CONTROL_TOOL_NAMES = [
@@ -261,9 +264,19 @@ export type PhoneControlMcpResult = {
   isError?: boolean;
 };
 
+type BeforeTapCapture = {
+  screenshot: Uint8Array;
+  observation: ScreenshotMarkerObservation;
+  point: ScreenshotMarkerPoint;
+};
+
 type ScreenshotAttachment = {
   bytes: Uint8Array;
   marker?: ScreenshotMarker;
+  beforeTapEvidence?: {
+    bytes: Uint8Array;
+    metadata: ScreenshotEvidenceMetadata;
+  };
 };
 
 function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
@@ -286,14 +299,26 @@ function observationBytes(
 export function toSuccessResponse(
   result: ToolSuccessResult<object>,
   screenshot?: Uint8Array,
-  screenshotMarker?: ScreenshotMarker
+  screenshotMarker?: ScreenshotMarker,
+  beforeTapEvidence?: ScreenshotAttachment["beforeTapEvidence"]
 ): PhoneControlMcpResult {
-  const response = screenshotMarker
-    ? { ...result, screenshotMarker }
+  const response = screenshotMarker || beforeTapEvidence
+    ? {
+        ...result,
+        ...(screenshotMarker ? { screenshotMarker } : {}),
+        ...(beforeTapEvidence ? { screenshotEvidence: beforeTapEvidence.metadata } : {})
+      }
     : result;
   const content: Array<TextContent | ImageContent> = [
     { type: "text", text: JSON.stringify(response) }
   ];
+  if (beforeTapEvidence) {
+    content.push({
+      type: "image",
+      data: Buffer.from(beforeTapEvidence.bytes).toString("base64"),
+      mimeType: "image/png"
+    });
+  }
   if (screenshot) {
     content.push({
       type: "image",
@@ -328,7 +353,12 @@ async function safely<T extends object>(
     if (attachment instanceof Uint8Array) {
       return toSuccessResponse(success, attachment);
     }
-    return toSuccessResponse(success, attachment?.bytes, attachment?.marker);
+    return toSuccessResponse(
+      success,
+      attachment?.bytes,
+      attachment?.marker,
+      attachment?.beforeTapEvidence
+    );
   } catch (error) {
     const normalized = asPhoneControlError(error);
     console.error(`[phone-control] ${normalized.code}: ${normalized.message}`);
@@ -341,7 +371,8 @@ function resolveScreenshot(
   result: unknown,
   markerPresenter: ScreenshotMarkerPresenter,
   includeScreenshot = false,
-  lastTap?: ScreenshotMarkerPoint
+  lastTap?: ScreenshotMarkerPoint,
+  beforeTap?: BeforeTapCapture
 ): Uint8Array | ScreenshotAttachment | undefined {
   const data = (result as {
     data?: {
@@ -354,21 +385,57 @@ function resolveScreenshot(
   if (includeScreenshot || summary.mode === "visual") {
     const screenshot = service.observationStore.get(summary.observationId)?.screenshot;
     if (!screenshot) return undefined;
-    const markerObservation: ScreenshotMarkerObservation = {
-      observationId: summary.observationId,
-      displayId: summary.displayId,
-      packageName: summary.packageName,
-      rotation: summary.rotation,
-      screenshotDimensions: {
-        width: summary.screenshot.width,
-        height: summary.screenshot.height
-      }
-    };
+    const markerObservation = markerObservationFromSummary(summary);
     try {
       const rendered = markerPresenter.render(screenshot, markerObservation, {
         ...(lastTap ? { lastTap } : {})
       });
-      return { bytes: rendered.screenshot, marker: rendered.marker };
+      if (
+        !beforeTap ||
+        !lastTap ||
+        beforeTap.point.x !== lastTap.x ||
+        beforeTap.point.y !== lastTap.y
+      ) {
+        return { bytes: rendered.screenshot, marker: rendered.marker };
+      }
+
+      try {
+        const beforeAnnotated = annotateScreenshotPng(
+          beforeTap.screenshot,
+          beforeTap.observation.screenshotDimensions,
+          {
+            kind: "last_tap",
+            ...lastTap,
+            coordinateSpace: "display"
+          }
+        );
+        const crop = cropScreenshotPng(
+          beforeAnnotated,
+          beforeTap.observation.screenshotDimensions,
+          lastTap
+        );
+        return {
+          bytes: rendered.screenshot,
+          marker: rendered.marker,
+          beforeTapEvidence: {
+            bytes: crop.screenshot,
+            metadata: {
+              kind: "before_tap_crop",
+              sourceObservationId: beforeTap.observation.observationId,
+              tap: lastTap,
+              coordinateSpace: "display",
+              crop: crop.bounds
+            }
+          }
+        };
+      } catch (error) {
+        console.error(
+          `[phone-control] before-tap evidence render failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        return { bytes: rendered.screenshot, marker: rendered.marker };
+      }
     } catch (error) {
       console.error(
         `[phone-control] screenshot marker render failed: ${
@@ -379,6 +446,19 @@ function resolveScreenshot(
     }
   }
   return undefined;
+}
+
+function markerObservationFromSummary(summary: ObservationSummary): ScreenshotMarkerObservation {
+  return {
+    observationId: summary.observationId,
+    displayId: summary.displayId,
+    packageName: summary.packageName,
+    rotation: summary.rotation,
+    screenshotDimensions: {
+      width: summary.screenshot.width,
+      height: summary.screenshot.height
+    }
+  };
 }
 
 function clickPointFromResult(result: unknown): ScreenshotMarkerPoint | undefined {
@@ -526,9 +606,22 @@ export function registerPhoneControlTools(
       inputSchema: phoneExecuteInputSchema.shape
     },
     async (input) => {
+      let beforeTap: BeforeTapCapture | undefined;
       return safely(
         () => {
           const parsed = parseInput(phoneExecuteInputSchema, input);
+          if (parsed.action.type === "click_coordinate") {
+            const reference = service.observationStore.get(parsed.observationId);
+            if (reference) {
+              beforeTap = {
+                screenshot: Uint8Array.from(reference.screenshot),
+                observation: markerObservationFromSummary(
+                  service.observationStore.summary(reference)
+                ),
+                point: { x: parsed.action.x, y: parsed.action.y }
+              };
+            }
+          }
           return service.execute(parsed);
         },
         (result) => resolveScreenshot(
@@ -536,7 +629,8 @@ export function registerPhoneControlTools(
           result,
           markerPresenter,
           false,
-          clickPointFromResult(result)
+          clickPointFromResult(result),
+          beforeTap
         )
       );
     }

@@ -7,7 +7,10 @@ export const POINTER_ARROW_FILL = "#2b8cdb";
 
 /** Shared prompt text for every agent-facing phone screenshot surface. */
 export const SCREENSHOT_MARKER_GUIDANCE =
-  "Screenshots may contain a small blue arrow with a contrasting black or white outline and glow. This arrow is injected by the phone-control tool for coordinate calibration; it is not part of the Android app UI and is not a control. The arrow tip is the exact display-pixel coordinate. On the first screenshot it marks a calibration point. After a successful tap it marks the last executed tap. The separate screenshotMarker metadata has only kind, x, y, and coordinateSpace; observationId, displayId, and screenshot dimensions remain in the surrounding observation. Use screenshotMarker for its meaning and coordinates, and ignore the arrow when identifying app controls.";
+  "Screenshots may contain a small blue arrow with a contrasting black or white outline and glow. This arrow is injected by the phone-control tool for coordinate calibration; it is not part of the Android app UI and is not a control. The arrow tip is the exact display-pixel coordinate. On the first screenshot it marks a calibration point. After a successful tap it marks the last executed tap. A coordinate-tap response may also include a compact before-tap evidence crop followed by the full current screenshot; screenshotEvidence gives the crop bounds and tap coordinate. The separate screenshotMarker metadata has only kind, x, y, and coordinateSpace; observationId, displayId, and screenshot dimensions remain in the surrounding observation. Use screenshotMarker and screenshotEvidence for their meaning and coordinates, and ignore the arrow when identifying app controls.";
+
+/** Keep the extra before-action image small enough to avoid doubling vision cost. */
+export const ACTION_EVIDENCE_CROP_SIZE = 320;
 
 export type ScreenshotMarkerKind = "calibration" | "last_tap";
 
@@ -32,6 +35,26 @@ export interface ScreenshotMarkerObservation {
 export interface ScreenshotMarkerPoint {
   x: number;
   y: number;
+}
+
+export interface ScreenshotCropBounds {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface ScreenshotEvidenceCrop {
+  screenshot: Uint8Array;
+  bounds: ScreenshotCropBounds;
+}
+
+export interface ScreenshotEvidenceMetadata {
+  kind: "before_tap_crop";
+  sourceObservationId: string;
+  tap: ScreenshotMarkerPoint;
+  coordinateSpace: "display";
+  crop: ScreenshotCropBounds;
 }
 
 export interface ScreenshotMarkerRender {
@@ -339,4 +362,46 @@ export function annotateScreenshotPng(
   }
   drawArrow(png, marker);
   return Uint8Array.from(PNG.sync.write(png));
+}
+
+/**
+ * Extract a small context window around an already-annotated display
+ * screenshot. The returned bounds map the crop back to display coordinates;
+ * the source screenshot is never modified.
+ */
+export function cropScreenshotPng(
+  screenshot: Uint8Array,
+  dimensions: ScreenshotMarkerObservation["screenshotDimensions"],
+  point: ScreenshotMarkerPoint,
+  size = ACTION_EVIDENCE_CROP_SIZE
+): ScreenshotEvidenceCrop {
+  const png = PNG.sync.read(Buffer.from(screenshot));
+  if (png.width !== dimensions.width || png.height !== dimensions.height) {
+    throw new Error(
+      `Screenshot dimensions ${png.width}x${png.height} do not match ${dimensions.width}x${dimensions.height}.`
+    );
+  }
+  if (!pointInBounds(point, dimensions)) {
+    throw new Error(
+      `Screenshot crop point ${point.x},${point.y} is outside ${dimensions.width}x${dimensions.height}.`
+    );
+  }
+  if (!Number.isInteger(size) || size < 1) {
+    throw new Error(`Screenshot crop size must be a positive integer, got ${size}.`);
+  }
+
+  const width = Math.min(size, png.width);
+  const height = Math.min(size, png.height);
+  const left = clamp(point.x - Math.floor(width / 2), 0, png.width - width);
+  const top = clamp(point.y - Math.floor(height / 2), 0, png.height - height);
+  const crop = new PNG({ width, height });
+  for (let y = 0; y < height; y += 1) {
+    const sourceStart = ((top + y) * png.width + left) * 4;
+    const targetStart = y * width * 4;
+    png.data.copy(crop.data, targetStart, sourceStart, sourceStart + width * 4);
+  }
+  return {
+    screenshot: Uint8Array.from(PNG.sync.write(crop)),
+    bounds: { left, top, width, height }
+  };
 }

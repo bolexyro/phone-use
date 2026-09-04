@@ -8,6 +8,7 @@ import {
   SCREENSHOT_MARKER_GUIDANCE,
   ScreenshotMarkerPresenter,
   annotateScreenshotPng,
+  cropScreenshotPng,
   type ScreenshotMarkerObservation
 } from "../src/index.js";
 
@@ -105,7 +106,41 @@ describe("ScreenshotMarkerPresenter", () => {
   it("uses the shared prompt guidance", () => {
     expect(SCREENSHOT_MARKER_GUIDANCE).toContain("not part of the Android app UI");
     expect(SCREENSHOT_MARKER_GUIDANCE).toContain("last executed tap");
+    expect(SCREENSHOT_MARKER_GUIDANCE).toContain("before-tap evidence crop");
     expect(SCREENSHOT_MARKER_GUIDANCE).toContain("only kind, x, y, and coordinateSpace");
     expect(POINTER_ARROW_FILL).toBe("#2b8cdb");
+  });
+
+  it("returns a small crop with display-coordinate bounds without mutating the source", () => {
+    const screenshot = createPng(640, 480, [30, 30, 30]);
+    const original = Uint8Array.from(screenshot);
+    const annotated = annotateScreenshotPng(
+      screenshot,
+      { width: 640, height: 480 },
+      { kind: "last_tap", x: 400, y: 280, coordinateSpace: "display" }
+    );
+    const crop = cropScreenshotPng(
+      annotated,
+      { width: 640, height: 480 },
+      { x: 400, y: 280 },
+      320
+    );
+    const decoded = PNG.sync.read(Buffer.from(crop.screenshot));
+
+    expect(screenshot).toEqual(original);
+    expect(crop.bounds).toEqual({ left: 240, top: 120, width: 320, height: 320 });
+    expect(decoded.width).toBe(320);
+    expect(decoded.height).toBe(320);
+    expect(crop.screenshot).not.toEqual(screenshot);
+  });
+
+  it("clamps evidence crops at display edges and rejects invalid points", () => {
+    const screenshot = createPng(120, 160, [30, 30, 30]);
+    expect(
+      cropScreenshotPng(screenshot, { width: 120, height: 160 }, { x: 0, y: 0 }, 80).bounds
+    ).toEqual({ left: 0, top: 0, width: 80, height: 80 });
+    expect(() =>
+      cropScreenshotPng(screenshot, { width: 120, height: 160 }, { x: 120, y: 0 }, 80)
+    ).toThrow("outside");
   });
 });

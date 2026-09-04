@@ -22,9 +22,11 @@ import {
 } from "./dhd-tool-contract.js";
 import {
   ScreenshotMarkerPresenter,
+  cropScreenshotPng,
   type ScreenshotMarker,
   type ScreenshotMarkerObservation,
   type ScreenshotMarkerPoint,
+  type ScreenshotEvidenceMetadata,
 } from "@dhd/screenshot-markers";
 
 export * from "./dhd-tool-contract.js";
@@ -464,8 +466,12 @@ export function toMcpResult(
   let screenshot = normalizeScreenshot(message.screenshotBase64, message.screenshotMimeType);
   let marker: ScreenshotMarker | undefined;
   let debugImages: PhoneAssistantDebugImage[] | undefined;
+  let beforeTapImage: NormalizedScreenshot | undefined;
+  let screenshotEvidence: ScreenshotEvidenceMetadata | undefined;
   let beforeScreenshot: NormalizedScreenshot | undefined;
-  if (options.includeDebugImages) {
+  let screenshotRendered = false;
+  const actionTap = markerContext?.action ? tapPoint(markerContext.action) : undefined;
+  if (actionTap || options.includeDebugImages) {
     try {
       beforeScreenshot = normalizeScreenshot(
         message.beforeScreenshotBase64,
@@ -473,7 +479,7 @@ export function toMcpResult(
       );
     } catch (debugError) {
       console.error(
-        `[phone-assistant-mcp] debug before-screenshot ignored: ${
+        `[phone-assistant-mcp] before-screenshot evidence ignored: ${
           debugError instanceof Error ? debugError.message : String(debugError)
         }`,
       );
@@ -490,23 +496,73 @@ export function toMcpResult(
     const afterRendered = renderScreenshot(message, screenshot, markerContext);
     screenshot = afterRendered.screenshot;
     marker = afterRendered.marker;
-    debugImages = [
-      {
-        type: "image",
-        label: "before",
-        data: beforeRendered.screenshot.base64,
-        mimeType: beforeRendered.screenshot.mimeType,
-      },
-      {
-        type: "image",
-        label: "after",
-        data: afterRendered.screenshot.base64,
-        mimeType: afterRendered.screenshot.mimeType,
-      },
-    ];
+    screenshotRendered = true;
+    if (actionTap) {
+      try {
+        const beforeObservation = markerObservation(beforeMessage);
+        if (!beforeObservation || message.beforeObservation === undefined) {
+          throw new Error("The before observation is missing provenance or screenshot dimensions.");
+        }
+        const crop = cropScreenshotPng(
+          Buffer.from(beforeRendered.screenshot.base64, "base64"),
+          beforeObservation.screenshotDimensions,
+          actionTap,
+        );
+        const cropBase64 = Buffer.from(crop.screenshot).toString("base64");
+        beforeTapImage = {
+          base64: cropBase64,
+          mimeType: beforeRendered.screenshot.mimeType,
+          dataUrl: `data:${beforeRendered.screenshot.mimeType};base64,${cropBase64}`,
+        };
+        screenshotEvidence = {
+          kind: "before_tap_crop",
+          sourceObservationId: beforeObservation.observationId,
+          tap: actionTap,
+          coordinateSpace: "display",
+          crop: crop.bounds,
+        };
+        if (options.includeDebugImages) {
+          debugImages = [
+            {
+              type: "image",
+              label: "before",
+              data: beforeTapImage.base64,
+              mimeType: beforeTapImage.mimeType,
+            },
+            {
+              type: "image",
+              label: "after",
+              data: afterRendered.screenshot.base64,
+              mimeType: afterRendered.screenshot.mimeType,
+            },
+          ];
+        }
+      } catch (evidenceError) {
+        console.error(
+          `[phone-assistant-mcp] before-tap crop failed: ${
+            evidenceError instanceof Error ? evidenceError.message : String(evidenceError)
+          }`,
+        );
+      }
+    } else if (options.includeDebugImages) {
+      debugImages = [
+        {
+          type: "image",
+          label: "before",
+          data: beforeRendered.screenshot.base64,
+          mimeType: beforeRendered.screenshot.mimeType,
+        },
+        {
+          type: "image",
+          label: "after",
+          data: afterRendered.screenshot.base64,
+          mimeType: afterRendered.screenshot.mimeType,
+        },
+      ];
+    }
   }
   if (screenshot && !error) {
-    if (!debugImages) {
+    if (!debugImages && !screenshotRendered) {
       const rendered = renderScreenshot(message, screenshot, markerContext);
       screenshot = rendered.screenshot;
       marker = rendered.marker;
@@ -514,10 +570,14 @@ export function toMcpResult(
   }
   const responseMessage = withoutScreenshot(message);
   if (marker) responseMessage.screenshotMarker = marker;
+  if (screenshotEvidence) responseMessage.screenshotEvidence = screenshotEvidence;
   content[0] = {
     type: "text",
     text: JSON.stringify(error ? { ok: false, message: error instanceof Error ? error.message : String(error) } : responseMessage)
   };
+  if (beforeTapImage) {
+    content.push({ type: "image", data: beforeTapImage.base64, mimeType: beforeTapImage.mimeType });
+  }
   if (screenshot) {
     content.push({ type: "image", data: screenshot.base64, mimeType: screenshot.mimeType });
   }

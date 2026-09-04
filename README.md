@@ -17,6 +17,8 @@ Appium, an Android-side instrumentation bridge, and other semantic-control appro
 
 Use `mode: "visual"` with `phone_observe_app` (or `phone_open_app`) to make this route explicit. The returned observation contains `mode: "visual"`, a screenshot SHA-256 fingerprint, logical `displayId`, foreground package/activity, display geometry, rotation, and screenshot dimensions. A coordinate action must use that observation; Phone Control refreshes the same context before dispatch, rejects changed screenshots or hard context, and stores a fresh screenshot-based observation after the action. Visual captures never call shell `uiautomator dump`; semantic mode remains the default for display 0.
 
+Agent-facing visual responses include a small calibration marker on the first screenshot and a last-tap marker after successful clicks. A successful coordinate click also returns a compact annotated crop from the exact pre-tap observation, followed by the full fresh current screenshot. `screenshotEvidence.crop` maps the crop back to display coordinates; the annotated images are presentation copies and never change the screenshot bytes or hashes used for freshness validation.
+
 When more than one virtual display session is active, visual observation requires an explicit `displayId`. Coordinate screenshots must have the exact requested display dimensions; there is no implicit scaling or rotation transform.
 
 ## Windows setup

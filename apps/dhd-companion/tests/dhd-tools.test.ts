@@ -131,7 +131,7 @@ describe("DHD phone tool contract", () => {
     expect((tapped.structuredContent as Record<string, any>).screenshotMarker).not.toEqual(firstMarker);
   });
 
-  it("keeps the model on one post-action image while returning a marked debug pair", () => {
+  it("returns compact before-tap evidence followed by the current post-action image", () => {
     const result = toMcpResult(
       {
         type: "completed",
@@ -162,12 +162,19 @@ describe("DHD phone tool contract", () => {
       { includeDebugImages: true },
     );
 
-    expect(result.content.filter((item) => item.type === "image")).toHaveLength(1);
+    expect(result.content.filter((item) => item.type === "image")).toHaveLength(2);
+    expect(result.structuredContent).toHaveProperty("screenshotEvidence", {
+      kind: "before_tap_crop",
+      sourceObservationId: "debug-before",
+      tap: { x: 0, y: 0 },
+      coordinateSpace: "display",
+      crop: { left: 0, top: 0, width: 1, height: 1 },
+    });
     expect(result.debugImages).toHaveLength(2);
     expect(result.debugImages?.map((item) => item.label)).toEqual(["before", "after"]);
     expect(result.structuredContent).not.toHaveProperty("beforeScreenshotBase64");
     expect(result.structuredContent).not.toHaveProperty("beforeObservation");
-    expect(toDynamicToolResponse(result).contentItems.filter((item) => item.type === "inputImage")).toHaveLength(1);
+    expect(toDynamicToolResponse(result).contentItems.filter((item) => item.type === "inputImage")).toHaveLength(2);
   });
 
   it("ignores malformed debug-only before images without changing the tool result", () => {

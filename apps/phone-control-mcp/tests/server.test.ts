@@ -486,6 +486,83 @@ describe("MCP boundary schemas and result conversion", () => {
     );
   });
 
+  it("returns compact before-tap evidence before the fresh current screenshot", async () => {
+    const tools = new Map<string, (input: unknown) => Promise<any>>();
+    const fakeServer = {
+      registerTool(
+        name: string,
+        _schema: unknown,
+        handler: (input: unknown) => Promise<any>
+      ): void {
+        tools.set(name, handler);
+      }
+    } as unknown as McpServer;
+    const store = new ObservationStore();
+    const screenshot = Uint8Array.from(Buffer.from(validPngBase64, "base64"));
+    const initial = store.create({
+      serial: "RFCW40B3G7X",
+      packageName: "com.example.app",
+      activity: "com.example.app/.MainActivity",
+      display: { width: 1, height: 1 },
+      rotation: 0,
+      mode: "visual",
+      screenshotDimensions: { width: 1, height: 1 },
+      observedAt: Date.now(),
+      elements: [],
+      screenshot
+    });
+    const fresh = store.create({
+      serial: "RFCW40B3G7X",
+      packageName: "com.example.app",
+      activity: "com.example.app/.MainActivity",
+      display: { width: 1, height: 1 },
+      rotation: 0,
+      mode: "visual",
+      screenshotDimensions: { width: 1, height: 1 },
+      observedAt: Date.now() + 1,
+      elements: [],
+      screenshot
+    });
+    const fakeService = {
+      observationStore: store,
+      execute: async () => ({
+        ok: true,
+        data: {
+          action: "click_coordinate",
+          pointerEvent: { action: "click", x: 0, y: 0 },
+          observation: store.summary(fresh)
+        }
+      })
+    } as unknown as PhoneControlToolService;
+
+    registerPhoneControlTools(fakeServer, fakeService);
+    const response = await tools.get("phone_execute")!({
+      observationId: initial.observationId,
+      action: { type: "click_coordinate", x: 0, y: 0 }
+    });
+
+    expect(response.content.filter((item: { type: string }) => item.type === "image")).toHaveLength(2);
+    expect(response.content[1]).toMatchObject({ type: "image", mimeType: "image/png" });
+    expect(response.content[2]).toMatchObject({ type: "image", mimeType: "image/png" });
+    expect(response.content[1].data).toBeDefined();
+    expect(response.content[2].data).toBeDefined();
+    expect(response.structuredContent).toMatchObject({
+      screenshotMarker: {
+        kind: "last_tap",
+        x: 0,
+        y: 0,
+        coordinateSpace: "display"
+      },
+      screenshotEvidence: {
+        kind: "before_tap_crop",
+        sourceObservationId: initial.observationId,
+        tap: { x: 0, y: 0 },
+        coordinateSpace: "display",
+        crop: { left: 0, top: 0, width: 1, height: 1 }
+      }
+    });
+  });
+
   it("does not implicitly attach a screenshot to semantic phone_execute", async () => {
     const tools = new Map<string, (input: unknown) => Promise<any>>();
     const fakeServer = {
