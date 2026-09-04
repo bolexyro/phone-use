@@ -182,7 +182,8 @@ export interface OverlaySession {
 
 export async function startViewer(
   env: NodeJS.ProcessEnv = process.env,
-  cwd = process.cwd()
+  cwd = process.cwd(),
+  options: { overlayOnly?: boolean } = {}
 ): Promise<void> {
   if (process.platform !== "win32") {
     throw new PhoneControlError(
@@ -192,8 +193,6 @@ export async function startViewer(
   }
 
   const config = loadViewerConfig(env, cwd);
-  const scrcpyPath = resolveScrcpyPath({ env, cwd, platform: "win32" });
-  const serial = await resolveViewerSerial(env, cwd);
   const overlayPagePath = await prepareOverlayPage(config, cwd);
 
   configureElectronRuntime(cwd);
@@ -241,7 +240,13 @@ export async function startViewer(
     return overlay;
   }
 
-  const scrcpy = spawnScrcpy(scrcpyPath, serial, runtimeConfig);
+  const scrcpy = options.overlayOnly
+    ? undefined
+    : spawnScrcpy(
+        resolveScrcpyPath({ env, cwd, platform: "win32" }),
+        await resolveViewerSerial(env, cwd),
+        runtimeConfig
+      );
 
   let stopping = false;
   const windowRectProvider = new Win32ClientWindowRectProvider();
@@ -265,7 +270,7 @@ export async function startViewer(
       }
     }
     sessions.clear();
-    if (!scrcpy.killed) scrcpy.kill();
+    if (scrcpy && !scrcpy.killed) scrcpy.kill();
   };
   app.on("before-quit", stop);
 
@@ -416,7 +421,7 @@ export async function startViewer(
     }
 
     if (!targetSession) {
-      if (scrcpy.pid !== undefined && sessions.has(scrcpy.pid)) {
+      if (scrcpy?.pid !== undefined && sessions.has(scrcpy.pid)) {
         targetSession = sessions.get(scrcpy.pid);
       } else {
         targetSession = sessions.values().next().value;
@@ -466,10 +471,10 @@ export async function startViewer(
   };
   auditInterval = setInterval(() => void poll(), config.auditPollIntervalMs);
 
-  scrcpy.once("error", (error) => {
+  scrcpy?.once("error", (error) => {
     console.error(`[phone-control-viewer] scrcpy failed: ${error.message}`);
   });
-  scrcpy.once("exit", (code, signal) => {
+  scrcpy?.once("exit", (code, signal) => {
     console.error(`[phone-control-viewer] primary scrcpy exited (${code ?? signal ?? "unknown"}).`);
   });
   app.on("window-all-closed", () => {
@@ -484,7 +489,9 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  void startViewer().catch((error: unknown) => {
+  void startViewer(process.env, process.cwd(), {
+    overlayOnly: process.argv.includes("--overlay-only")
+  }).catch((error: unknown) => {
     const normalized = asPhoneControlError(error, "VIEWER_START_FAILED");
     console.error(`[phone-control-viewer] startup failed: ${normalized.code}: ${normalized.message}`);
     process.exitCode = 1;

@@ -2,6 +2,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { Buffer } from "node:buffer";
 
 import type { FixedAdbAdapter } from "./adb/adapter.js";
+import {
+  ElectronCursorOverlayController,
+  type CursorOverlayController
+} from "./cursor-overlay-controller.js";
 import { PhoneControlError } from "./errors.js";
 import type { VirtualDisplaySession } from "./types.js";
 import { resolveScrcpyPath } from "./scrcpy-path.js";
@@ -97,6 +101,7 @@ export class VirtualDisplayManager {
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #scrcpyPath?: string;
   readonly #spawn: SpawnVirtualDisplay;
+  readonly #cursorOverlay: CursorOverlayController;
   #launchQueue: Promise<void> = Promise.resolve();
 
   public constructor(
@@ -106,6 +111,7 @@ export class VirtualDisplayManager {
       scrcpyPath?: string;
       sleep?: (ms: number) => Promise<void>;
       spawn?: SpawnVirtualDisplay;
+      cursorOverlay?: CursorOverlayController;
     } = {}
   ) {
     this.#adb = adb;
@@ -116,6 +122,9 @@ export class VirtualDisplayManager {
       options.spawn ??
       ((file, args, spawnOptions) =>
         spawn(file, [...args], spawnOptions));
+    this.#cursorOverlay =
+      options.cursorOverlay ??
+      new ElectronCursorOverlayController({ environment: this.#environment });
   }
 
   public get sessions(): readonly VirtualDisplaySession[] {
@@ -198,6 +207,8 @@ export class VirtualDisplayManager {
       // explicit multiple-task flags once its display id is known.
       startApp: options.newInstance !== true
     });
+
+    await this.#cursorOverlay.start();
 
     let child: ChildProcess;
     const stderrChunks: Buffer[] = [];
@@ -327,7 +338,9 @@ export class VirtualDisplayManager {
       };
 
       child.once("exit", () => {
-        this.#sessions.delete(displayId);
+        if (this.#sessions.delete(displayId)) {
+          this.#stopOverlayWhenIdle();
+        }
       });
 
       // Register before checking the flag so an exit racing this section
@@ -348,6 +361,7 @@ export class VirtualDisplayManager {
       // child here also tears down any display scrcpy created before a later
       // ADB poll or metadata read failed.
       killChild();
+      this.#stopOverlayWhenIdle();
       if (error instanceof PhoneControlError && error.code === "VIRTUAL_DISPLAY_FAILED") {
         throw error;
       }
@@ -369,6 +383,7 @@ export class VirtualDisplayManager {
       if (item) {
         if (!item.process.killed) item.process.kill();
         this.#sessions.delete(target.displayId);
+        this.#stopOverlayWhenIdle();
         return true;
       }
       return false;
@@ -379,6 +394,7 @@ export class VirtualDisplayManager {
         if (item.session.packageName === target.packageName) {
           if (!item.process.killed) item.process.kill();
           this.#sessions.delete(id);
+          this.#stopOverlayWhenIdle();
           return true;
         }
       }
@@ -395,5 +411,12 @@ export class VirtualDisplayManager {
       }
     }
     this.#sessions.clear();
+    this.#stopOverlayWhenIdle();
+  }
+
+  #stopOverlayWhenIdle(): void {
+    if (this.#sessions.size === 0) {
+      this.#cursorOverlay.stop();
+    }
   }
 }

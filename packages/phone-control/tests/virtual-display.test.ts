@@ -1,9 +1,10 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { FixedAdbAdapter } from "../src/adb/adapter.js";
+import type { CursorOverlayController } from "../src/cursor-overlay-controller.js";
 import { VirtualDisplayManager } from "../src/virtual-display.js";
 import type {
   DeviceInfo,
@@ -100,6 +101,11 @@ function asChildProcess(child: FakeChild): ChildProcess {
   return child as unknown as ChildProcess;
 }
 
+const noOpCursorOverlay: CursorOverlayController = {
+  start: async () => {},
+  stop: () => {}
+};
+
 describe("VirtualDisplayManager", () => {
   it("reuses a package session by default", async () => {
     const adb = new FakeAdb();
@@ -115,7 +121,8 @@ describe("VirtualDisplayManager", () => {
         ];
         return asChildProcess(child);
       },
-      sleep: async () => {}
+      sleep: async () => {},
+      cursorOverlay: noOpCursorOverlay
     });
 
     const first = await manager.launch("phone-1", "com.example.app");
@@ -142,7 +149,8 @@ describe("VirtualDisplayManager", () => {
         ];
         return asChildProcess(child);
       },
-      sleep: async () => {}
+      sleep: async () => {},
+      cursorOverlay: noOpCursorOverlay
     });
 
     const first = await manager.launch("phone-1", "com.example.app");
@@ -182,7 +190,8 @@ describe("VirtualDisplayManager", () => {
         ];
         return asChildProcess(child);
       },
-      sleep: async () => {}
+      sleep: async () => {},
+      cursorOverlay: noOpCursorOverlay
     });
 
     const [first, second] = await Promise.all([
@@ -212,7 +221,8 @@ describe("VirtualDisplayManager", () => {
         if (displayId === 3) adb.failDisplayIds.add(displayId);
         return asChildProcess(child);
       },
-      sleep: async () => {}
+      sleep: async () => {},
+      cursorOverlay: noOpCursorOverlay
     });
 
     await manager.launch("phone-1", "com.example.app");
@@ -222,5 +232,100 @@ describe("VirtualDisplayManager", () => {
 
     expect(children[1].killed).toBe(true);
     expect(manager.sessions.map((session) => session.displayId)).toEqual([2]);
+  });
+
+  it("owns the cursor overlay for the virtual-display lifecycle", async () => {
+    const adb = new FakeAdb();
+    const child = new FakeChild();
+    const overlay = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn()
+    };
+    let spawnCalls = 0;
+    const manager = new VirtualDisplayManager(adb, {
+      scrcpyPath: "scrcpy.exe",
+      spawn: () => {
+        spawnCalls += 1;
+        adb.displays = [
+          ...adb.displays,
+          { displayId: 2, width: 420, height: 936, rotation: 0 }
+        ];
+        return asChildProcess(child);
+      },
+      sleep: async () => {},
+      cursorOverlay: overlay
+    });
+
+    const session = await manager.launch("phone-1", "com.example.app");
+    expect(overlay.start).toHaveBeenCalledTimes(1);
+    expect(spawnCalls).toBe(1);
+
+    expect(manager.close({ displayId: session.displayId })).toBe(true);
+    expect(overlay.stop).toHaveBeenCalledTimes(1);
+    expect(child.killed).toBe(true);
+  });
+
+  it("keeps the cursor overlay while another display is active", async () => {
+    const adb = new FakeAdb();
+    const children: FakeChild[] = [];
+    let nextDisplayId = 2;
+    const overlay = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn()
+    };
+    const manager = new VirtualDisplayManager(adb, {
+      scrcpyPath: "scrcpy.exe",
+      spawn: () => {
+        const child = new FakeChild();
+        children.push(child);
+        const displayId = nextDisplayId++;
+        adb.displays = [
+          ...adb.displays,
+          { displayId, width: 420, height: 936, rotation: 0 }
+        ];
+        return asChildProcess(child);
+      },
+      sleep: async () => {},
+      cursorOverlay: overlay
+    });
+
+    const first = await manager.launch("phone-1", "com.example.app");
+    const second = await manager.launch("phone-1", "com.example.app", {
+      newInstance: true
+    });
+
+    expect(overlay.start).toHaveBeenCalledTimes(2);
+    expect(manager.close({ displayId: first.displayId })).toBe(true);
+    expect(overlay.stop).not.toHaveBeenCalled();
+    expect(manager.close({ displayId: second.displayId })).toBe(true);
+    expect(overlay.stop).toHaveBeenCalledTimes(1);
+    expect(children).toHaveLength(2);
+  });
+
+  it("stops the cursor overlay when scrcpy exits unexpectedly", async () => {
+    const adb = new FakeAdb();
+    const child = new FakeChild();
+    const overlay = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn()
+    };
+    const manager = new VirtualDisplayManager(adb, {
+      scrcpyPath: "scrcpy.exe",
+      spawn: () => {
+        adb.displays = [
+          ...adb.displays,
+          { displayId: 2, width: 420, height: 936, rotation: 0 }
+        ];
+        return asChildProcess(child);
+      },
+      sleep: async () => {},
+      cursorOverlay: overlay
+    });
+
+    await manager.launch("phone-1", "com.example.app");
+    child.emit("exit", 0, null);
+
+    expect(manager.sessions).toEqual([]);
+    expect(overlay.stop).toHaveBeenCalledTimes(1);
   });
 });
