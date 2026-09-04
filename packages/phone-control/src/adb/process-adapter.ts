@@ -299,6 +299,42 @@ export function parseUniqueSurfaceFlingerVirtualDisplayId(
 }
 
 /**
+ * Resolve the SurfaceFlinger virtual display id by matching the layerStack
+ * configured in its Composition Display State to the Android logical display id.
+ */
+export function parseSurfaceFlingerLayerStack(
+  output: string,
+  logicalDisplayId: number
+): string | undefined {
+  const requested = String(logicalDisplayId);
+  let currentVirtualId: string | null = null;
+
+  for (const line of output.split(/\r?\n/)) {
+    const displayMatch = line.match(
+      /^\s*Display\s+(\d+)\s+\(virtual/i
+    );
+    if (displayMatch) {
+      currentVirtualId = displayMatch[1];
+      continue;
+    }
+
+    if (currentVirtualId) {
+      const layerStackMatch = line.match(/layerFilter=\{layerStack=(\d+)\b/i);
+      if (layerStackMatch) {
+        if (layerStackMatch[1] === requested) {
+          return currentVirtualId;
+        }
+        currentVirtualId = null;
+      } else if (/^\s*Display\s+\d+/i.test(line)) {
+        currentVirtualId = null;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Extract DisplayInfo.uniqueId for one Android logical display. `cmd display
  * get-displays` prints the logical id and unique id on the same line on
  * supported Android versions; the line-oriented parser also accepts the
@@ -606,6 +642,22 @@ export class AdbProcessAdapter implements FixedAdbAdapter {
               displayId,
               logicalUniqueId
             ) ?? parseUniqueSurfaceFlingerVirtualDisplayId(displaysOutput);
+        } catch (error) {
+          if (error instanceof PhoneControlError && error.code === "ADB_TIMEOUT") {
+            throw error;
+          }
+        }
+      }
+
+      if (sfDisplayId === undefined) {
+        try {
+          const sfFilterOutput = await this.#runText([
+            "-s",
+            serial,
+            "shell",
+            "dumpsys SurfaceFlinger | grep -E 'Display [0-9]+|layerFilter=\\{layerStack=[0-9]+'"
+          ]);
+          sfDisplayId = parseSurfaceFlingerLayerStack(sfFilterOutput, displayId);
         } catch (error) {
           if (error instanceof PhoneControlError && error.code === "ADB_TIMEOUT") {
             throw error;
