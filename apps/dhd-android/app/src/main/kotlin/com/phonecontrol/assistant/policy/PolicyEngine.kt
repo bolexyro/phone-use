@@ -3,6 +3,9 @@ package com.phonecontrol.assistant.policy
 import com.phonecontrol.assistant.domain.ActionMetadata
 import com.phonecontrol.assistant.domain.OpenAppAction
 import com.phonecontrol.assistant.domain.PhoneAction
+import com.phonecontrol.assistant.domain.StaleObservationDiagnostics
+import com.phonecontrol.assistant.domain.StaleObservationReason
+import com.phonecontrol.assistant.domain.StaleObservationReasonCode
 import com.phonecontrol.assistant.domain.TapAction
 
 data class PolicyContext(
@@ -18,6 +21,7 @@ sealed interface PolicyDecision {
     data class Denied(
         val code: DenialCode,
         val message: String,
+        val details: StaleObservationDiagnostics? = null,
     ) : PolicyDecision
 }
 
@@ -97,6 +101,17 @@ class PolicyEngine(
                 return PolicyDecision.Denied(
                     DenialCode.STALE_OBSERVATION,
                     "The action was proposed from an older observation.",
+                    StaleObservationDiagnostics(
+                        approvedObservationId = action.metadata.observationId,
+                        currentObservationId = currentObservationId,
+                        reasons = listOf(
+                            StaleObservationReason(
+                                code = StaleObservationReasonCode.OBSERVATION_REPLACED,
+                                approved = action.metadata.observationId,
+                                current = currentObservationId,
+                            ),
+                        ),
+                    ),
                 )
             }
         }

@@ -109,11 +109,11 @@ describe("Codex App Server agent-message extraction", () => {
     const events: CompanionToolCallEvent[] = [];
     const imageData = Buffer.from("test-image").toString("base64");
     const response = await handleDynamicToolCall(
-      { tool: "dhd_observe", arguments: '{"expectedPackageName":"com.example.app"}' },
+      { tool: "dhd_observe", arguments: "{}" },
       {
         emit: (event) => events.push(event),
         invoke: async (_name, input) => {
-          expect(input).toEqual({ expectedPackageName: "com.example.app" });
+          expect(input).toEqual({});
           return {
             content: [
               { type: "text", text: '{"ok":true}' },
@@ -137,7 +137,7 @@ describe("Codex App Server agent-message extraction", () => {
       type: "dhd_tool_call",
       phase: "started",
       tool: "dhd_observe",
-      arguments: { expectedPackageName: "com.example.app" },
+      arguments: {},
     });
     expect(events[1]).toMatchObject({
       type: "dhd_tool_call",

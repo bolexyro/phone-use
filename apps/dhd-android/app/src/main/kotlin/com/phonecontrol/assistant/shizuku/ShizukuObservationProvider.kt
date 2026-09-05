@@ -10,6 +10,7 @@ import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.util.LinkedHashMap
 import java.util.UUID
 
 sealed interface ObservationCaptureResult {
@@ -66,6 +67,21 @@ class ShizukuObservationProvider(
     private val context: Context,
     private val processRunner: ShizukuProcessRunner,
 ) {
+    /**
+     * Keep the compressed capture bytes beside their observation IDs so an
+     * action can define guard regions after observing the screen. The bytes
+     * stay provider-owned rather than becoming part of the domain snapshot.
+     */
+    private val screenshotLock = Any()
+    private val screenshots = object : LinkedHashMap<String, ByteArray>(
+        MAX_RETAINED_SCREENSHOTS + 1,
+        0.75f,
+        true,
+    ) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>?): Boolean =
+            size > MAX_RETAINED_SCREENSHOTS
+    }
+
     /**
      * Read the current focused window without taking a screenshot or creating
      * an observation baseline. This is only situational context; callers must
@@ -157,7 +173,15 @@ class ShizukuObservationProvider(
             screenshotFingerprint = sha256(screenshot),
             guardFingerprints = guardFingerprints,
         )
+        synchronized(screenshotLock) {
+            screenshots[snapshot.id] = screenshot.copyOf()
+        }
         return ObservationCaptureResult.Succeeded(snapshot, screenshot)
+    }
+
+    /** Return the raw capture for a previously issued observation, if retained. */
+    internal fun screenshotFor(snapshot: ObservationSnapshot): ByteArray? = synchronized(screenshotLock) {
+        screenshots[snapshot.id]?.copyOf()
     }
 
     private suspend fun readFocusedWindow(): FocusedWindow? = when (val result = readFocusedWindowResult()) {
@@ -192,7 +216,7 @@ class ShizukuObservationProvider(
         return options.outWidth to options.outHeight
     }
 
-    private fun fingerprintGuards(
+    internal fun fingerprintGuards(
         bytes: ByteArray,
         width: Int,
         height: Int,
@@ -237,6 +261,8 @@ class ShizukuObservationProvider(
     }
 
     private companion object {
+        private const val MAX_RETAINED_SCREENSHOTS = 64
+
         private fun foregroundFailureCode(detail: String): String = when {
             detail.contains("Shizuku is unavailable", ignoreCase = true) -> "SHIZUKU_UNAVAILABLE"
             detail.contains("permission is required", ignoreCase = true) -> "SHIZUKU_PERMISSION_REQUIRED"

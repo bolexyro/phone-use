@@ -9,6 +9,10 @@ export const POINTER_ARROW_FILL = "#2b8cdb";
 export const SCREENSHOT_MARKER_GUIDANCE =
   "Screenshots may contain a small blue arrow with a contrasting black or white outline and glow. This arrow is injected by the phone-control tool for coordinate calibration; it is not part of the Android app UI and is not a control. The arrow tip is the exact display-pixel coordinate. On the first screenshot it marks a calibration point. After a successful tap it marks the last executed tap. A coordinate-tap response may also include a compact before-tap evidence crop followed by the full current screenshot; screenshotEvidence gives the crop bounds and tap coordinate. The separate screenshotMarker metadata has only kind, x, y, and coordinateSpace; observationId, displayId, and screenshot dimensions remain in the surrounding observation. Use screenshotMarker and screenshotEvidence for their meaning and coordinates, and ignore the arrow when identifying app controls.";
 
+/** Shared prompt text for stale-action diagnostics across phone surfaces. */
+export const STALE_OBSERVATION_GUIDANCE =
+  "If an action is rejected with STALE_OBSERVATION, inputSent is false and reasons explain every detected difference. Reasons may include ROTATION_CHANGED, DISPLAY_CHANGED, DISPLAY_SIZE_CHANGED, PACKAGE_CHANGED, ACTIVITY_CHANGED, GUARD_REGION_CHANGED, or OBSERVATION_REPLACED. GUARD_REGION_CHANGED means a configured visual guard fingerprint changed; it does not mean that every screenshot pixel was compared. Refresh the observation before retrying.";
+
 /** Keep the extra before-action image small enough to avoid doubling vision cost. */
 export const ACTION_EVIDENCE_CROP_SIZE = 320;
 

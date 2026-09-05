@@ -1,6 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { PhoneControlError } from "./errors.js";
+import {
+  PhoneControlError,
+  type StaleObservationDiagnostics,
+  type StaleObservationReason,
+  type StaleObservationReasonCode
+} from "./errors.js";
 import type {
   Observation,
   ObservationBinding,
@@ -19,6 +24,8 @@ export interface ObservationComparison {
   changed: readonly string[];
 }
 
+type ObservationSize = { width: number; height: number };
+
 export interface ElementActionComparison extends ObservationComparison {
   target?: UiElement;
 }
@@ -32,6 +39,88 @@ function createOpaqueObservationId(): string {
 /** Fingerprint the exact PNG bytes shown to the agent and used for a visual action. */
 export function hashScreenshot(screenshot: Uint8Array): string {
   return createHash("sha256").update(screenshot).digest("hex");
+}
+
+/**
+ * Convert the internal comparison fields into concise, agent-facing reasons.
+ * The comparison remains the source of truth; this function only explains
+ * fields that were already marked as changed and never broadens the safety
+ * check.
+ */
+export function staleObservationReasons(
+  observation: Observation,
+  current: ObservationCapture,
+  changed: readonly string[]
+): readonly StaleObservationReason[] {
+  const binding = observation.binding;
+  const reasons: StaleObservationReason[] = [];
+  const has = (field: string): boolean => changed.includes(field);
+  const add = (
+    code: StaleObservationReasonCode,
+    approved: unknown,
+    currentValue: unknown,
+    field?: string
+  ): void => {
+    reasons.push({
+      code,
+      approved,
+      current: currentValue,
+      ...(field ? { field } : {})
+    });
+  };
+
+  if (has("serial")) add("DEVICE_CHANGED", binding.serial, current.serial);
+  if (has("displayId")) {
+    add("DISPLAY_CHANGED", binding.displayId ?? 0, current.displayId ?? 0);
+  }
+  if (has("mode")) add("MODE_CHANGED", binding.mode ?? "semantic", current.mode ?? binding.mode ?? "semantic");
+  if (has("packageName")) add("PACKAGE_CHANGED", binding.packageName, current.packageName);
+  if (has("activity")) add("ACTIVITY_CHANGED", binding.activity, current.activity);
+  if (has("display")) {
+    add(
+      "DISPLAY_SIZE_CHANGED",
+      { width: binding.display.width, height: binding.display.height } satisfies ObservationSize,
+      { width: current.display.width, height: current.display.height } satisfies ObservationSize,
+      "display"
+    );
+  }
+  if (has("rotation")) add("ROTATION_CHANGED", binding.rotation, current.rotation);
+  if (has("screenshotDimensions")) {
+    add(
+      "DISPLAY_SIZE_CHANGED",
+      { ...binding.screenshotDimensions } satisfies ObservationSize,
+      { ...current.screenshotDimensions } satisfies ObservationSize,
+      "screenshotDimensions"
+    );
+  }
+  if (has("screenshotHash")) {
+    add("SCREENSHOT_CHANGED", binding.screenshotHash, hashScreenshot(current.screenshot));
+  }
+  if (has("uiHash")) add("UI_TREE_CHANGED", binding.uiHash, current.uiHash);
+  if (has("target")) add("TARGET_CHANGED", undefined, undefined);
+  if (has("targetObscured")) add("TARGET_OBSCURED", undefined, undefined);
+
+  if (reasons.length === 0 && changed.length > 0) {
+    reasons.push({
+      code: "OBSERVATION_REPLACED",
+      field: changed.join(",")
+    });
+  }
+  return reasons;
+}
+
+export function staleObservationDiagnostics(
+  observation: Observation,
+  current: ObservationCapture,
+  changed: readonly string[],
+  currentObservationId?: string
+): StaleObservationDiagnostics {
+  return {
+    approvedObservationId: observation.observationId,
+    ...(currentObservationId ? { currentObservationId } : {}),
+    changed: [...changed],
+    reasons: staleObservationReasons(observation, current, changed)
+  };
 }
 
 function bindingFromCapture(capture: ObservationCapture): ObservationBinding {

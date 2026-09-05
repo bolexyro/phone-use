@@ -64,8 +64,8 @@ depending on the PATH inherited by the Codex process.
 
 Guard-region visual checks are an opt-in companion feature. They are hidden
 from the model by default. To expose the additional `guardRegions` fields on
-`dhd_observe`, `dhd_execute`, and `dhd_execute_sequence` across both the MCP
-and App Server tool surfaces, set this before starting the companion:
+`dhd_execute` and `dhd_execute_sequence` across both the MCP and App Server
+tool surfaces, set this before starting the companion:
 
 ```powershell
 $env:PHONE_ASSISTANT_ENABLE_GUARD_REGIONS = "true"
@@ -73,7 +73,18 @@ pnpm companion:dashboard
 ```
 
 Restart the companion after changing the flag. Leave it unset or set it to
-`false` for the normal structural-only observation contract.
+`false` for the normal structural-only observation contract. Guard regions are
+supplied with the action after the agent has inspected an observation; the
+phone compares each requested region with the preceding observation
+screenshot, whether that screenshot came from `dhd_observe` or the previous
+`dhd_execute`.
+
+An action rejected with `STALE_OBSERVATION` is returned with
+`inputSent: false`, `approvedObservationId`, `currentObservationId`, and a
+`reasons` array. `GUARD_REGION_CHANGED` refers only to a configured visual
+guard fingerprint; it does not claim that every screenshot pixel was
+compared. Other reason codes identify rotation, display identity or size,
+package, activity, and observation replacement.
 
 For the normal wireless path, start the local companion dashboard and pair by
 short code. DHD Settings → Companion connection shows the code. The dashboard
@@ -127,9 +138,10 @@ MCP server:
   next action. The returned observation ID is the action's preflight baseline.
 - `dhd_get_foreground_app` — read the current foreground package, activity, and
   display context without taking a screenshot or creating an observation ID.
-  This is read-only context; call `dhd_observe` before any phone action.
-- `dhd_open_app` — open one allowlisted app and return the actual post-action
-  observation.
+  This is read-only context; call `dhd_observe` before phone input. App launch
+  establishes its own pre-launch baseline.
+- `dhd_open_app` — open one allowlisted app without a caller-supplied
+  observation ID and return the actual post-action observation.
 - `dhd_execute` — execute one typed interaction and return the actual
   post-action observation. It handles tap, type, swipe, scroll, back, keypress,
   and wait. If the post-action capture fails, the result is unknown and the

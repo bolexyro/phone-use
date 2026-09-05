@@ -957,8 +957,11 @@ export function buildDhdDynamicTools(
   };
   const openAppMetadata = {
     type: "object",
-    properties: baseMetadataProperties,
-    required: ["purpose", "targetDescription", "observationId"],
+    properties: {
+      purpose: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+      targetDescription: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+    },
+    required: ["purpose", "targetDescription"],
     additionalProperties: false,
   };
   const actionObject = (
@@ -1030,17 +1033,9 @@ export function buildDhdDynamicTools(
   const action = createActionSchema(metadata);
   const sequenceAction = createActionSchema(sequenceMetadata);
   const observeProperties: Record<string, unknown> = {
-    expectedPackageName: { type: "string", minLength: 1 },
     purpose: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
     targetDescription: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
   };
-  if (enableGuardRegions) {
-    observeProperties.guardRegions = {
-      type: "array",
-      maxItems: DHD_MAX_GUARD_REGIONS,
-      items: guardRegion,
-    };
-  }
 
   return [
     dynamicTool(

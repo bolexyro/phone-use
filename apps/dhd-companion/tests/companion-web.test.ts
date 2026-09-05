@@ -55,7 +55,7 @@ describe("companion tool diagnostics", () => {
       phase: "started",
       callId: "call-image",
       tool: "dhd_observe",
-      arguments: { expectedPackageName: "com.example.app" },
+      arguments: {},
       timestamp: 1_000,
     });
     ingestCompanionToolCallEvent({
@@ -82,7 +82,7 @@ describe("companion tool diagnostics", () => {
     expect(state.toolCalls[0]).toMatchObject({
       id: "call-image",
       tool: "dhd_observe",
-      arguments: { expectedPackageName: "com.example.app" },
+      arguments: {},
       status: "success",
       durationMs: 125,
       response: {

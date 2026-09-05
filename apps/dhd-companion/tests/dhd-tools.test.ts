@@ -24,6 +24,11 @@ const metadata = {
   observationId: "obs-1"
 };
 
+const openAppMetadata = {
+  purpose: "Open the shopping app",
+  targetDescription: "Shopping app",
+};
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -226,6 +231,7 @@ describe("DHD phone tool contract", () => {
     const foregroundTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_get_foreground_app"));
     const observeTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_observe"));
     const openAppTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_open_app"));
+    const executeTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_execute"));
 
     expect(DHD_TOOL_NAMES).toEqual([
       "dhd_list_allowed_apps",
@@ -253,7 +259,10 @@ describe("DHD phone tool contract", () => {
     expect(record(foregroundTool.inputSchema).properties).toEqual({});
     expect(record(observeTool.inputSchema).properties).not.toHaveProperty("guardRegions");
     expect(String(openAppTool.description)).toContain("Full Access");
+    expect(String(openAppTool.description)).toContain("without requiring a caller-supplied observation ID");
     expect(String(observeTool.description)).toContain("not part of the Android app UI");
+    expect(String(executeTool.description)).toContain("GUARD_REGION_CHANGED");
+    expect(String(executeTool.description)).toContain("inputSent is false");
   });
 
   it("keeps app launch separate from typed execution", () => {
@@ -270,6 +279,9 @@ describe("DHD phone tool contract", () => {
     });
 
     expect(record(openApp.inputSchema).properties).toHaveProperty("packageName");
+    const openAppMetadata = record(record(openApp.inputSchema).properties).metadata;
+    expect(record(openAppMetadata).properties).not.toHaveProperty("observationId");
+    expect(record(openAppMetadata).required).toEqual(["purpose", "targetDescription"]);
     expect(actionTypes).toEqual(["tap", "type", "swipe", "scroll", "back", "keypress", "wait"]);
     expect(actionTypes).not.toContain("open_app");
     expect(actionTypes).not.toContain("click_coordinate");
@@ -292,7 +304,8 @@ describe("DHD phone tool contract", () => {
   });
 
   it("rejects removed action variants at the typed-action boundary", () => {
-    expect(dhdOpenAppInputSchema.safeParse({ packageName: "com.example.store", metadata }).success).toBe(true);
+    expect(dhdOpenAppInputSchema.safeParse({ packageName: "com.example.store", metadata: openAppMetadata }).success).toBe(true);
+    expect(dhdOpenAppInputSchema.safeParse({ packageName: "com.example.store", metadata }).success).toBe(false);
     expect(dhdExecuteActionSchema.safeParse({ type: "tap", x: 10, y: 20, metadata }).success).toBe(true);
     expect(dhdExecuteActionSchema.safeParse({
       type: "open_app",
@@ -317,9 +330,12 @@ describe("DHD phone tool contract", () => {
     expect(dhdObserveInputSchema.safeParse({
       guardRegions: [{ left: 10, top: 20, right: 100, bottom: 120 }]
     }).success).toBe(false);
+    expect(dhdObserveInputSchema.safeParse({
+      expectedPackageName: "com.example.store"
+    }).success).toBe(false);
   });
 
-  it("exposes guard regions only when the feature flag is enabled", () => {
+  it("exposes guard regions only on execution when the feature flag is enabled", () => {
     expect(isGuardRegionsEnabled({})).toBe(false);
     expect(isGuardRegionsEnabled({ [GUARD_REGIONS_FEATURE_FLAG]: "true" })).toBe(true);
 
@@ -339,11 +355,13 @@ describe("DHD phone tool contract", () => {
     const enabledSequenceMetadata = record(record(enabledSequenceVariant.properties).metadata);
 
     expect(record(disabledObserve.inputSchema).properties).not.toHaveProperty("guardRegions");
-    expect(record(enabledObserve.inputSchema).properties).toHaveProperty("guardRegions");
+    expect(record(disabledObserve.inputSchema).properties).not.toHaveProperty("expectedPackageName");
+    expect(record(enabledObserve.inputSchema).properties).not.toHaveProperty("guardRegions");
+    expect(record(enabledObserve.inputSchema).properties).not.toHaveProperty("expectedPackageName");
     expect(enabledMetadata.properties).toHaveProperty("guardRegions");
     expect(record(enabledOpenAppMetadata).properties).not.toHaveProperty("guardRegions");
     expect(enabledSequenceMetadata.properties).toHaveProperty("guardRegions");
-    expect(String(enabledObserve.description)).toContain("guardRegions");
+    expect(String(enabledObserve.description)).not.toContain("guardRegions");
     for (const name of DHD_TOOL_NAMES) {
       const tool = record(enabledTools.find((candidate) => candidate.name === name));
       expect(tool.description).toBe(dhdToolDescription(name, true));
@@ -351,7 +369,8 @@ describe("DHD phone tool contract", () => {
 
     const region = { left: 0, top: 0, right: 100, bottom: 100 };
     const enabledSchemas = createDhdToolSchemas(true);
-    expect(enabledSchemas.dhdObserveInputSchema.safeParse({ guardRegions: [region] }).success).toBe(true);
+    expect(enabledSchemas.dhdObserveInputSchema.safeParse({ guardRegions: [region] }).success).toBe(false);
+    expect(enabledSchemas.dhdObserveInputSchema.safeParse({ expectedPackageName: "com.example.store" }).success).toBe(false);
     expect(enabledSchemas.dhdExecuteActionSchema.safeParse({
       type: "tap",
       x: 10,
@@ -373,7 +392,7 @@ describe("DHD phone tool contract", () => {
     }).success).toBe(true);
     expect(enabledSchemas.dhdOpenAppInputSchema.safeParse({
       packageName: "com.example.store",
-      metadata: { ...metadata, guardRegions: [region] }
+      metadata: { ...openAppMetadata, guardRegions: [region] }
     }).success).toBe(false);
     expect(createDhdToolSchemas(false).dhdObserveInputSchema.safeParse({ guardRegions: [region] }).success).toBe(false);
     expect(createDhdToolSchemas(false).dhdExecuteSequenceInputSchema.safeParse({

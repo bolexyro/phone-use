@@ -2,7 +2,11 @@ package com.phonecontrol.assistant.shizuku
 
 import android.content.Context
 import com.phonecontrol.assistant.domain.GuardRegion
+import com.phonecontrol.assistant.domain.ObservationSize
 import com.phonecontrol.assistant.domain.ObservationSnapshot
+import com.phonecontrol.assistant.domain.StaleObservationDiagnostics
+import com.phonecontrol.assistant.domain.StaleObservationReason
+import com.phonecontrol.assistant.domain.StaleObservationReasonCode
 import com.phonecontrol.assistant.domain.BackAction
 import com.phonecontrol.assistant.domain.KeypressAction
 import com.phonecontrol.assistant.domain.KeypressKey
@@ -18,7 +22,11 @@ import com.phonecontrol.assistant.domain.WaitAction
 import kotlinx.coroutines.delay
 
 sealed interface TransportResult {
-    data class Rejected(val code: RejectionCode, val message: String) : TransportResult
+    data class Rejected(
+        val code: RejectionCode,
+        val message: String,
+        val details: StaleObservationDiagnostics? = null,
+    ) : TransportResult
     data class Unsupported(val message: String) : TransportResult
     data class Succeeded(
         val message: String,
@@ -86,6 +94,17 @@ class ShizukuActionTransport(
             return TransportResult.Rejected(
                 RejectionCode.STALE_OBSERVATION,
                 "The observation is stale; the action was not executed.",
+                staleObservationDiagnostics(
+                    approvedObservationId = action.metadata.observationId,
+                    currentObservationId = observation.id,
+                    reasons = listOf(
+                        StaleObservationReason(
+                            code = StaleObservationReasonCode.OBSERVATION_REPLACED,
+                            approved = action.metadata.observationId,
+                            current = observation.id,
+                        ),
+                    ),
+                ),
             )
         }
 
@@ -298,16 +317,17 @@ class ShizukuActionTransport(
         action: PhoneAction,
         observation: ObservationSnapshot,
     ): FreshCheck {
+        val guardRegions = if (enforceObservationFreshness) {
+            action.metadata.guardRegions
+        } else {
+            emptyList()
+        }
         val fresh = observationProvider.capture(
             // Capture the actual current screen. The structural comparison
             // below decides whether it is still the screen the agent observed;
             // the observer must not discard it just because the package changed.
             expectedPackageName = null,
-            guardRegions = if (enforceObservationFreshness) {
-                action.metadata.guardRegions
-            } else {
-                emptyList()
-            },
+            guardRegions = guardRegions,
         )
         val current = when (fresh) {
             is ObservationCaptureResult.Failed -> {
@@ -321,15 +341,44 @@ class ShizukuActionTransport(
 
             is ObservationCaptureResult.Succeeded -> fresh.snapshot
         }
-        if (enforceObservationFreshness && isObservationStale(observation, current, action.metadata.guardRegions)) {
+        if (enforceObservationFreshness) {
+            // Guard regions are chosen with the action, after the model has
+            // inspected the preceding observation. Recompute their baseline
+            // fingerprints from that retained screenshot instead of relying
+            // on the observation having been captured with guards already.
+            val baseline = baselineForGuards(observation, guardRegions)
+            if (!isObservationStale(baseline, current, guardRegions)) {
+                return FreshCheck.Ready(current, fresh.screenshot)
+            }
             return FreshCheck.Rejected(
                 TransportResult.Rejected(
                     RejectionCode.STALE_OBSERVATION,
                     "The approved screen changed before ${action.type.name.lowercase().replace('_', ' ')}; no input was sent.",
+                    staleObservationDiagnostics(
+                        approvedObservationId = observation.id,
+                        currentObservationId = current.id,
+                        reasons = observationStaleReasons(baseline, current, guardRegions),
+                    ),
                 ),
             )
         }
         return FreshCheck.Ready(current, fresh.screenshot)
+    }
+
+    private fun baselineForGuards(
+        observation: ObservationSnapshot,
+        guardRegions: List<GuardRegion>,
+    ): ObservationSnapshot {
+        if (guardRegions.isEmpty()) return observation
+        val screenshot = observationProvider.screenshotFor(observation) ?: return observation
+        return observation.copy(
+            guardFingerprints = observationProvider.fingerprintGuards(
+                screenshot,
+                observation.width,
+                observation.height,
+                guardRegions,
+            ),
+        )
     }
 
     private fun commandResult(
@@ -444,22 +493,85 @@ internal fun isObservationStale(
     current: ObservationSnapshot,
     guardRegions: List<GuardRegion>,
 ): Boolean {
-    if (
-        previous.packageName != current.packageName ||
-        previous.activityName != current.activityName ||
-        previous.displayId != current.displayId ||
-        previous.rotation != current.rotation ||
-        previous.width != current.width ||
-        previous.height != current.height
-    ) {
-        return true
+    return observationStaleReasons(previous, current, guardRegions).isNotEmpty()
+}
+
+/**
+ * Explain the same freshness comparison used by [isObservationStale]. The
+ * screenshot fingerprint is intentionally not compared here: visual changes
+ * are only safety-significant when they occur inside an explicitly supplied
+ * guard region.
+ */
+internal fun observationStaleReasons(
+    previous: ObservationSnapshot,
+    current: ObservationSnapshot,
+    guardRegions: List<GuardRegion>,
+): List<StaleObservationReason> {
+    val reasons = mutableListOf<StaleObservationReason>()
+    if (previous.packageName != current.packageName) {
+        reasons += StaleObservationReason(
+            code = StaleObservationReasonCode.PACKAGE_CHANGED,
+            approved = previous.packageName,
+            current = current.packageName,
+        )
     }
-    if (guardRegions.isEmpty()) {
-        return false
+    if (previous.activityName != current.activityName) {
+        reasons += StaleObservationReason(
+            code = StaleObservationReasonCode.ACTIVITY_CHANGED,
+            approved = previous.activityName,
+            current = current.activityName,
+        )
     }
-    return guardRegions.any { region ->
+    if (previous.displayId != current.displayId) {
+        reasons += StaleObservationReason(
+            code = StaleObservationReasonCode.DISPLAY_CHANGED,
+            approved = previous.displayId,
+            current = current.displayId,
+        )
+    }
+    if (previous.rotation != current.rotation) {
+        reasons += StaleObservationReason(
+            code = StaleObservationReasonCode.ROTATION_CHANGED,
+            approved = previous.rotation,
+            current = current.rotation,
+        )
+    }
+    if (previous.width != current.width || previous.height != current.height) {
+        reasons += StaleObservationReason(
+            code = StaleObservationReasonCode.DISPLAY_SIZE_CHANGED,
+            approved = ObservationSize(previous.width, previous.height),
+            current = ObservationSize(current.width, current.height),
+        )
+    }
+    guardRegions.forEach { region ->
         val before = previous.guardFingerprints[region]
         val after = current.guardFingerprints[region]
-        before == null || after == null || before != after
+        if (before == null || after == null || before != after) {
+            reasons += StaleObservationReason(
+                code = StaleObservationReasonCode.GUARD_REGION_CHANGED,
+                approved = before,
+                current = after,
+                guardRegion = region,
+            )
+        }
     }
+    return reasons
 }
+
+private fun staleObservationDiagnostics(
+    approvedObservationId: String,
+    currentObservationId: String?,
+    reasons: List<StaleObservationReason>,
+): StaleObservationDiagnostics = StaleObservationDiagnostics(
+    approvedObservationId = approvedObservationId,
+    currentObservationId = currentObservationId,
+    reasons = reasons.ifEmpty {
+        listOf(
+            StaleObservationReason(
+                code = StaleObservationReasonCode.OBSERVATION_REPLACED,
+                approved = approvedObservationId,
+                current = currentObservationId,
+            ),
+        )
+    },
+)

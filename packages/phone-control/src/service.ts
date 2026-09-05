@@ -13,7 +13,11 @@ import {
   asPhoneControlError,
   PhoneControlError
 } from "./errors.js";
-import { hashScreenshot, ObservationStore } from "./observation-store.js";
+import {
+  hashScreenshot,
+  ObservationStore,
+  staleObservationDiagnostics
+} from "./observation-store.js";
 import {
   assertAllowedForeground,
   assertAllowedTarget,
@@ -711,7 +715,14 @@ export class PhoneControlService {
         throw new PhoneControlError(
           "STALE_OBSERVATION",
           "The stable-surface observation changed before dispatch; refresh before acting.",
-          { observationId: reference.observationId, changed: comparison.changed }
+          {
+            observationId: reference.observationId,
+            ...staleObservationDiagnostics(
+              reference,
+              surface,
+              comparison.changed
+            )
+          }
         );
       }
       initialCaptureMs = elapsedMilliseconds(initialStarted);
@@ -1151,7 +1162,10 @@ export class PhoneControlService {
       throw new PhoneControlError(
         "STALE_OBSERVATION",
         "The screen changed between sequence steps; refresh before acting.",
-        { observationId: baseline.observationId, changed }
+        {
+          observationId: baseline.observationId,
+          ...staleObservationDiagnostics(baseline, current, changed)
+        }
       );
     };
 
@@ -1484,11 +1498,20 @@ export class PhoneControlService {
         ? this.#observations.compareCoordinateAction(observation, current)
         : this.#observations.compare(observation, current);
     if (!comparison.matches) {
+      const currentObservation = this.#observations.create(current);
       this.#observations.invalidate(observation.observationId);
       throw new PhoneControlError(
         "STALE_OBSERVATION",
         "The screen changed since the observation was captured; refresh before acting.",
-        { observationId: observation.observationId, changed: comparison.changed }
+        {
+          observationId: observation.observationId,
+          ...staleObservationDiagnostics(
+            observation,
+            current,
+            comparison.changed,
+            currentObservation.observationId
+          )
+        }
       );
     }
 

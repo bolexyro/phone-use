@@ -16,12 +16,15 @@ import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.KeypressAction
 import com.phonecontrol.assistant.domain.KeypressKey
 import com.phonecontrol.assistant.domain.OpenAppAction
+import com.phonecontrol.assistant.domain.ObservationSize
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.PhoneAction
 import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.ScrollAction
 import com.phonecontrol.assistant.domain.ScrollAmount
 import com.phonecontrol.assistant.domain.ScrollDirection
+import com.phonecontrol.assistant.domain.StaleObservationDiagnostics
+import com.phonecontrol.assistant.domain.StaleObservationReason
 import com.phonecontrol.assistant.domain.SwipeAction
 import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.domain.TypeAction
@@ -863,21 +866,14 @@ class DevBridgeServer(
         json: JSONObject,
         writer: BufferedWriter,
     ) {
-        val expectedPackage = json.optString("expectedPackageName").trim().ifBlank { null }
-        if (expectedPackage != null) {
-            require(PACKAGE_PATTERN.matches(expectedPackage)) {
-                "expectedPackageName is not a valid Android package name."
-            }
-        }
         val purpose = json.optString("purpose").trim().take(MAX_TEXT_CHARS)
             .ifBlank { "Observing current screen" }
         coordinator.recordPurpose(
             purpose = purpose,
-            targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { expectedPackage },
+            targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { null },
             toolName = DHD_OBSERVE_TOOL,
         )
-        val guardRegions = parseGuardRegions(json.optJSONArray("guardRegions"))
-        when (val captured = captureWithRetry(expectedPackage, guardRegions)) {
+        when (val captured = captureWithRetry(null, emptyList())) {
             is ObservationCaptureResult.Failed -> write(writer, errorResponse(requestId, captured.message))
             is ObservationCaptureResult.Succeeded -> {
                 remember(captured.snapshot)
@@ -924,10 +920,44 @@ class DevBridgeServer(
     ) {
         val actionJson = json.optJSONObject("action")
             ?: throw IllegalArgumentException("action must be an object.")
-        val action = parsePhoneAction(actionJson)
-        val observationId = action.metadata.observationId.trim()
-        val observation = synchronized(observations) {
+        val parsedAction = parsePhoneAction(actionJson)
+        val observationId = parsedAction.metadata.observationId.trim()
+        val suppliedObservation = synchronized(observations) {
             observationId.takeIf(String::isNotBlank)?.let { observations[it] }
+        }
+        val observation = if (suppliedObservation != null) {
+            suppliedObservation
+        } else if (parsedAction is OpenAppAction && observationId.isBlank()) {
+            // Launch is setup rather than an input against a model-selected
+            // screen. Establish the pre-launch baseline on the phone so the
+            // caller does not need to observe DHD just to open another app.
+            when (val captured = captureWithRetry(null, emptyList())) {
+                is ObservationCaptureResult.Failed -> {
+                    write(
+                        writer,
+                        JSONObject()
+                            .put("type", "completed")
+                            .put("requestId", requestId)
+                            .put("ok", false)
+                            .put("action", "open_app")
+                            .put("outcome", "failed")
+                            .put("executed", false)
+                            .put("code", "OBSERVATION_FAILED")
+                            .put(
+                                "message",
+                                "Could not establish a launch baseline; the app was not opened: ${captured.message}",
+                            ),
+                    )
+                    return
+                }
+
+                is ObservationCaptureResult.Succeeded -> {
+                    remember(captured.snapshot)
+                    captured.snapshot
+                }
+            }
+        } else {
+            null
         }
         if (observation == null) {
             write(
@@ -936,13 +966,20 @@ class DevBridgeServer(
                     .put("type", "completed")
                     .put("requestId", requestId)
                     .put("ok", false)
-                    .put("action", wireActionName(action))
+                    .put("action", wireActionName(parsedAction))
                     .put("outcome", "failed")
                     .put("executed", false)
                     .put("code", "OBSERVATION_MISSING")
                     .put("message", "The supplied observationId is missing or expired; observe the phone before retrying."),
             )
             return
+        }
+        val action = if (parsedAction is OpenAppAction && observationId.isBlank()) {
+            parsedAction.copy(
+                metadata = parsedAction.metadata.copy(observationId = observation.id),
+            )
+        } else {
+            parsedAction
         }
         val result = coordinator.executeAction(action, observation)
         writeActionResult(writer, requestId, wireActionName(action), result)
@@ -959,6 +996,7 @@ class DevBridgeServer(
                 observation,
                 result.beforeScreenshotOrNull(),
             )
+            result.staleDetailsOrNull()?.let { details -> addStaleDiagnostics(response, details) }
             write(writer, response)
             return
         }
@@ -1278,6 +1316,47 @@ class DevBridgeServer(
             .put("beforeScreenshotMimeType", "image/png")
     }
 
+    /** Attach machine-readable freshness diagnostics without changing the
+     * action's safe rejection semantics. */
+    private fun addStaleDiagnostics(
+        response: JSONObject,
+        details: StaleObservationDiagnostics,
+    ) {
+        response
+            .put("inputSent", false)
+            .put("approvedObservationId", details.approvedObservationId)
+        details.currentObservationId?.let { response.put("currentObservationId", it) }
+        response.put(
+            "reasons",
+            JSONArray(details.reasons.map(::staleReasonJson)),
+        )
+    }
+
+    private fun staleReasonJson(reason: StaleObservationReason): JSONObject = JSONObject()
+        .put("code", reason.code.name)
+        .put("approved", staleReasonValue(reason.approved))
+        .put("current", staleReasonValue(reason.current))
+        .also { json ->
+            reason.guardRegion?.let { region ->
+                json.put(
+                    "guardRegion",
+                    JSONObject()
+                        .put("left", region.left)
+                        .put("top", region.top)
+                        .put("right", region.right)
+                        .put("bottom", region.bottom),
+                )
+            }
+        }
+
+    private fun staleReasonValue(value: Any?): Any = when (value) {
+        null -> JSONObject.NULL
+        is ObservationSize -> JSONObject()
+            .put("width", value.width)
+            .put("height", value.height)
+        else -> value
+    }
+
     private fun writeObservation(
         writer: BufferedWriter,
         requestId: String,
@@ -1328,6 +1407,7 @@ class DevBridgeServer(
             step.code?.let { stepJson.put("code", it) }
             step.outcome?.let { stepJson.put("outcome", it) }
             step.executed?.let { stepJson.put("executed", it) }
+            step.details?.let { addStaleDiagnostics(stepJson, it) }
             steps.put(stepJson)
         }
         response.put("steps", steps)
@@ -1337,6 +1417,7 @@ class DevBridgeServer(
                 .put("code", failure.code ?: "SEQUENCE_FAILED")
                 .put("outcome", failure.outcome ?: "failed")
                 .put("executed", failure.executed ?: "unknown")
+            failure.details?.let { addStaleDiagnostics(response, it) }
         }
         result.finalObservation?.let { captured ->
             response
@@ -1487,6 +1568,7 @@ class DevBridgeServer(
                     is TransportResult.Rejected -> response
                         .put("code", transportResult.code.name)
                         .put("message", transportResult.message)
+                        .also { transportResult.details?.let { details -> addStaleDiagnostics(it, details) } }
                     is TransportResult.Unsupported -> response.put("message", transportResult.message)
                 }
             }
@@ -1494,6 +1576,7 @@ class DevBridgeServer(
             is ActionExecutionResult.PolicyRejected -> response
                 .put("code", "POLICY_REJECTED")
                 .put("message", result.message)
+                .also { result.details?.let { details -> addStaleDiagnostics(it, details) } }
             ActionExecutionResult.SessionNotRunning -> response
                 .put("code", "SESSION_NOT_RUNNING")
                 .put("message", "The phone session is no longer running.")
@@ -1705,6 +1788,12 @@ private fun ActionExecutionResult.beforeScreenshotOrNull(): ByteArray? = when (t
     is ActionExecutionResult.TransportFinished ->
         (result as? TransportResult.Succeeded)?.beforeScreenshot
     is ActionExecutionResult.PolicyRejected,
+    ActionExecutionResult.SessionNotRunning -> null
+}
+
+private fun ActionExecutionResult.staleDetailsOrNull(): StaleObservationDiagnostics? = when (this) {
+    is ActionExecutionResult.TransportFinished -> (result as? TransportResult.Rejected)?.details
+    is ActionExecutionResult.PolicyRejected -> details
     ActionExecutionResult.SessionNotRunning -> null
 }
 

@@ -8,6 +8,7 @@ import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.PhoneAction
 import com.phonecontrol.assistant.domain.ScrollAction
 import com.phonecontrol.assistant.domain.SwipeAction
+import com.phonecontrol.assistant.domain.StaleObservationDiagnostics
 import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.domain.TypeAction
 import com.phonecontrol.assistant.domain.WaitAction
@@ -24,6 +25,7 @@ internal data class SequenceStepResult(
     val code: String? = null,
     val outcome: String? = null,
     val executed: Boolean? = null,
+    val details: StaleObservationDiagnostics? = null,
 ) {
     enum class Status {
         SUCCESS,
@@ -146,6 +148,7 @@ internal class SequenceExecutor(
             code = code,
             outcome = "failed",
             executed = false,
+            details = result.staleDetailsOrNull(),
         )
     }
 
@@ -174,6 +177,12 @@ internal class SequenceExecutor(
             is WaitAction -> action.copy(metadata = metadata)
         }
     }
+}
+
+private fun ActionExecutionResult.staleDetailsOrNull(): StaleObservationDiagnostics? = when (this) {
+    is ActionExecutionResult.TransportFinished -> (result as? TransportResult.Rejected)?.details
+    is ActionExecutionResult.PolicyRejected -> details
+    ActionExecutionResult.SessionNotRunning -> null
 }
 
 private fun ActionExecutionResult.beforeScreenshotOrNull(): ByteArray? = when (this) {

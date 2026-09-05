@@ -5,6 +5,7 @@ import com.phonecontrol.assistant.domain.ActivityEventKind
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.PhoneAction
 import com.phonecontrol.assistant.domain.ReasoningEffort
+import com.phonecontrol.assistant.domain.StaleObservationDiagnostics
 import com.phonecontrol.assistant.domain.userFacingActivityLabel
 import com.phonecontrol.assistant.data.ConversationStore
 import com.phonecontrol.assistant.data.RunStatus
@@ -58,7 +59,10 @@ sealed interface SessionState {
 
 sealed interface ActionExecutionResult {
     data object SessionNotRunning : ActionExecutionResult
-    data class PolicyRejected(val message: String) : ActionExecutionResult
+    data class PolicyRejected(
+        val message: String,
+        val details: StaleObservationDiagnostics? = null,
+    ) : ActionExecutionResult
     data class TransportFinished(val result: TransportResult) : ActionExecutionResult
 }
 
@@ -507,7 +511,7 @@ class SessionCoordinator(
                     observationId = action.metadata.observationId,
                     targetDescription = action.metadata.targetDescription,
                 )
-                return ActionExecutionResult.PolicyRejected(decision.message)
+                return ActionExecutionResult.PolicyRejected(decision.message, decision.details)
             }
         }
 

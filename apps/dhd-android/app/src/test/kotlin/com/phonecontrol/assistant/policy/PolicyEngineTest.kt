@@ -6,6 +6,7 @@ import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.OpenAppAction
 import com.phonecontrol.assistant.domain.TapAction
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -56,7 +57,13 @@ class PolicyEngineTest {
         )
 
         assertTrue(decision is PolicyDecision.Denied)
-        assertEquals(DenialCode.STALE_OBSERVATION, (decision as PolicyDecision.Denied).code)
+        val denied = decision as PolicyDecision.Denied
+        assertEquals(DenialCode.STALE_OBSERVATION, denied.code)
+        val details = denied.details
+        assertNotNull(details)
+        assertEquals("obs-old", details?.approvedObservationId)
+        assertEquals("obs-1", details?.currentObservationId)
+        assertEquals("OBSERVATION_REPLACED", details?.reasons?.single()?.code?.name)
     }
 
     @Test

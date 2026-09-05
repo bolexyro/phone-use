@@ -28,6 +28,7 @@ import type {
 } from "@dhd/phone-control";
 import {
   SCREENSHOT_MARKER_GUIDANCE,
+  STALE_OBSERVATION_GUIDANCE,
   ScreenshotMarkerPresenter,
   annotateScreenshotPng,
   cropScreenshotPng,
@@ -602,7 +603,7 @@ export function registerPhoneControlTools(
   server.registerTool(
     "phone_execute",
     {
-      description: `Execute exactly one typed phone action against a current observation. ${SCREENSHOT_MARKER_GUIDANCE}`,
+      description: `Execute exactly one typed phone action against a current observation. ${STALE_OBSERVATION_GUIDANCE} ${SCREENSHOT_MARKER_GUIDANCE}`,
       inputSchema: phoneExecuteInputSchema.shape
     },
     async (input) => {
@@ -640,7 +641,7 @@ export function registerPhoneControlTools(
     "phone_execute_sequence",
     {
       description:
-        `Execute up to ${MAX_SEQUENCE_ACTIONS} typed semantic actions in one MCP call. Choose executionMode for each workflow: use stable_surface whenever every action is a click uniquely resolvable from one surface and earlier clicks cannot change the position or meaning of later targets; examples such as keypads and button grids are illustrative, not exhaustive. Use validated when later actions depend on intermediate UI changes or when uncertain. The default validated mode reuses each authorized post-action UI capture for the next immediate step, rechecks foreground, rematches targets, and captures one final screenshot. stable_surface dispatches a bounded typed tap batch and performs one final observation. Coordinates and state-dependent actions are never accepted in stable_surface mode. ${SCREENSHOT_MARKER_GUIDANCE}`,
+        `Execute up to ${MAX_SEQUENCE_ACTIONS} typed semantic actions in one MCP call. Choose executionMode for each workflow: use stable_surface whenever every action is a click uniquely resolvable from one surface and earlier clicks cannot change the position or meaning of later targets; examples such as keypads and button grids are illustrative, not exhaustive. Use validated when later actions depend on intermediate UI changes or when uncertain. The default validated mode reuses each authorized post-action UI capture for the next immediate step, rechecks foreground, rematches targets, and captures one final screenshot. stable_surface dispatches a bounded typed tap batch and performs one final observation. Coordinates and state-dependent actions are never accepted in stable_surface mode. ${STALE_OBSERVATION_GUIDANCE} ${SCREENSHOT_MARKER_GUIDANCE}`,
       inputSchema: phoneExecuteSequenceInputSchema.shape
     },
     async (input) => {

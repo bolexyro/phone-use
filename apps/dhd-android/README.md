@@ -25,7 +25,9 @@ notifications, request handoff, and observation/action execution.
   the DHD assistant timeline.
 - Typed action models for `open_app`, `tap`, `type`, `swipe`, `scroll`,
   `keypress`, `back` and `wait`.
-  Each action carries a purpose, target description, and observation ID.
+  Input actions carry a purpose, target description, and observation ID;
+  `open_app` establishes its launch baseline internally and returns a fresh
+  observation for the next input action.
   The DHD companion can also submit up to 16 non-`open_app` typed actions as
   one observation-safe sequence; the phone advances only through verified
   post-action observations.
@@ -44,6 +46,12 @@ typed execution path: the companion starts a Codex App Server turn, while the
 configured MCP adapter sends allowlist, foreground-context, observation,
 single-action, and sequence requests back to this app over NDJSON. The legacy
 `demo_run` request remains available for the open -> observe -> tap smoke test.
+
+When an action is refused because its observation is stale, the bridge response
+sets `inputSent: false` and includes the approved/current observation IDs plus
+one reason for each detected delta. `GUARD_REGION_CHANGED` identifies a
+configured guard fingerprint difference; rotation, display identity/size,
+package, activity, and observation replacement have separate reason codes.
 
 DHD keeps one local assistant conversation. The stored Codex thread is reused
 when a new request arrives within three hours of the last activity. After three

@@ -66,7 +66,9 @@ function createActionMetadataSchema(
 
 export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegionsEnabled()) {
   const actionMetadataSchema = createActionMetadataSchema(enableGuardRegions);
-  const openAppMetadataSchema = createActionMetadataSchema(false);
+  // App launch is setup, not an input against a model-supplied screen. The
+  // phone establishes its own pre-launch baseline before executing it.
+  const openAppMetadataSchema = createActionMetadataSchema(false, false);
   const sequenceActionMetadataSchema = createActionMetadataSchema(
     enableGuardRegions,
     false
@@ -216,12 +218,8 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
 
   const dhdObserveInputSchema = z
     .object({
-      expectedPackageName: packageNameSchema.optional(),
       purpose: z.string().min(1).max(DHD_MAX_TEXT_CHARS).optional(),
       targetDescription: z.string().min(1).max(DHD_MAX_TEXT_CHARS).optional(),
-      ...(enableGuardRegions
-        ? { guardRegions: z.array(guardRegionSchema).max(DHD_MAX_GUARD_REGIONS).optional().default([]) }
-        : {})
     })
     .strict();
 
@@ -647,17 +645,11 @@ export async function invokeDhdTool(
     case "dhd_observe":
       return safely(() => {
         const parsed = parseInput(schemas.dhdObserveInputSchema, input);
-        const parsedGuardRegions = (parsed as Record<string, unknown>).guardRegions;
-        const guardRegions = Array.isArray(parsedGuardRegions) && parsedGuardRegions.length > 0
-          ? parsedGuardRegions
-          : undefined;
         return requestBridge({
           type: "observe",
           requestId: randomUUID(),
-          ...(parsed.expectedPackageName ? { expectedPackageName: parsed.expectedPackageName } : {}),
           ...(parsed.purpose ? { purpose: parsed.purpose } : {}),
-          ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {}),
-          ...(guardRegions ? { guardRegions } : {})
+          ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {})
         });
       }, undefined, options);
     case "dhd_open_app":

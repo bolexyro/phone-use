@@ -509,7 +509,14 @@ describe("phone-control service safety", () => {
       })
     ).rejects.toMatchObject({
       code: "STALE_OBSERVATION",
-      details: { changed: ["screenshotHash"] }
+      details: {
+        changed: ["screenshotHash"],
+        approvedObservationId: observationId,
+        currentObservationId: expect.any(String),
+        reasons: [
+          expect.objectContaining({ code: "SCREENSHOT_CHANGED" })
+        ]
+      }
     });
     expect(adb.taps).toHaveLength(0);
     expect(adb.calls.dumpUiAutomatorXml).toBe(0);
@@ -664,7 +671,14 @@ describe("phone-control service safety", () => {
       })
     ).rejects.toMatchObject({
       code: "STALE_OBSERVATION",
-      details: { changed: ["screenshotHash"] }
+      details: {
+        changed: ["screenshotHash"],
+        approvedObservationId: observationId,
+        currentObservationId: expect.any(String),
+        reasons: [
+          expect.objectContaining({ code: "SCREENSHOT_CHANGED" })
+        ]
+      }
     });
     expect(adb.taps).toHaveLength(0);
   });

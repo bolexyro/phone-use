@@ -19,6 +19,8 @@ Use `mode: "visual"` with `phone_observe_app` (or `phone_open_app`) to make this
 
 Agent-facing visual responses include a small calibration marker on the first screenshot and a last-tap marker after successful clicks. A successful coordinate click also returns a compact annotated crop from the exact pre-tap observation, followed by the full fresh current screenshot. `screenshotEvidence.crop` maps the crop back to display coordinates; the annotated images are presentation copies and never change the screenshot bytes or hashes used for freshness validation.
 
+If an action is blocked with `STALE_OBSERVATION`, the response keeps `inputSent: false` and reports `approvedObservationId`, `currentObservationId`, and a `reasons` array. Reasons distinguish package/activity, rotation, display identity or size, observation replacement, and `GUARD_REGION_CHANGED`; the latter means a configured visual guard fingerprint changed, not that the entire screenshot was compared.
+
 When more than one virtual display session is active, visual observation requires an explicit `displayId`. Coordinate screenshots must have the exact requested display dimensions; there is no implicit scaling or rotation transform.
 
 ## Windows setup
