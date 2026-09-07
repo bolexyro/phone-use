@@ -30,6 +30,7 @@ class DhdAdbPairingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var statusJob: Job? = null
     private var pairingActive = false
+    private var foregroundNotificationId = DhdAdbPairingNotification.SEARCHING_NOTIFICATION_ID
 
     private val controller: DhdAdbController
         get() = (application as PhoneControlApplication).developerModeController
@@ -40,7 +41,10 @@ class DhdAdbPairingService : Service() {
         // A foreground service must have a notification immediately. The
         // first notification deliberately has no input action: it tells the
         // user that DHD is listening for Android's pairing service.
-        startForegroundCompat(DhdAdbPairingNotification.searchingNotification(this))
+        startForegroundCompat(
+            DhdAdbPairingNotification.searchingNotification(this),
+            DhdAdbPairingNotification.SEARCHING_NOTIFICATION_ID,
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -49,7 +53,10 @@ class DhdAdbPairingService : Service() {
                 pairingActive = true
                 observeController()
                 controller.preparePairing()
-                updateNotification(DhdAdbPairingNotification.searchingNotification(this))
+                startForegroundCompat(
+                    DhdAdbPairingNotification.searchingNotification(this),
+                    DhdAdbPairingNotification.SEARCHING_NOTIFICATION_ID,
+                )
             }
 
             ACTION_SUBMIT_CODE -> {
@@ -110,23 +117,26 @@ class DhdAdbPairingService : Service() {
                     -> updateNotification(DhdAdbPairingNotification.workingNotification(this@DhdAdbPairingService))
 
                     DeveloperConnectionState.PAIRING_REQUIRED,
-                    -> Unit
+                    DeveloperConnectionState.PAIRING_SEARCHING,
+                    -> updateNotification(DhdAdbPairingNotification.searchingNotification(this@DhdAdbPairingService))
+
+                    DeveloperConnectionState.PAIRING_SERVICE_FOUND ->
+                        promoteToFoundNotification()
 
                     DeveloperConnectionState.WIRELESS_DEBUGGING_OFF ->
-                        updateNotification(
-                            DhdAdbPairingNotification.searchingNotification(
-                                this@DhdAdbPairingService,
-                                status.message,
-                            ),
-                        )
+                        updateNotification(DhdAdbPairingNotification.searchingNotification(this@DhdAdbPairingService))
 
                     DeveloperConnectionState.ERROR ->
-                        updateNotification(
-                            DhdAdbPairingNotification.pairingServiceFoundNotification(
-                                this@DhdAdbPairingService,
-                                status.message,
-                            ),
-                        )
+                        if (foregroundNotificationId == DhdAdbPairingNotification.FOUND_NOTIFICATION_ID) {
+                            updateNotification(
+                                DhdAdbPairingNotification.pairingServiceFoundNotification(
+                                    this@DhdAdbPairingService,
+                                    status.message,
+                                ),
+                            )
+                        } else {
+                            updateNotification(DhdAdbPairingNotification.searchingNotification(this@DhdAdbPairingService))
+                        }
 
                     DeveloperConnectionState.UNSUPPORTED -> {
                         pairingActive = false
@@ -139,25 +149,38 @@ class DhdAdbPairingService : Service() {
 
     private fun updateNotification(notification: Notification) {
         NotificationManagerCompat.from(this).notify(
-            DhdAdbPairingNotification.NOTIFICATION_ID,
+            foregroundNotificationId,
             notification,
         )
     }
 
-    private fun startForegroundCompat(notification: Notification) {
+    private fun promoteToFoundNotification() {
+        startForegroundCompat(
+            DhdAdbPairingNotification.pairingServiceFoundNotification(this),
+            DhdAdbPairingNotification.FOUND_NOTIFICATION_ID,
+        )
+    }
+
+    private fun startForegroundCompat(notification: Notification, notificationId: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
-                DhdAdbPairingNotification.NOTIFICATION_ID,
+                notificationId,
                 notification,
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         } else {
-            startForeground(DhdAdbPairingNotification.NOTIFICATION_ID, notification)
+            startForeground(notificationId, notification)
+        }
+        val previousNotificationId = foregroundNotificationId
+        foregroundNotificationId = notificationId
+        if (previousNotificationId != notificationId) {
+            NotificationManagerCompat.from(this).cancel(previousNotificationId)
         }
     }
 
     private fun stopPairingService() {
         stopForeground(STOP_FOREGROUND_REMOVE)
+        DhdAdbPairingNotification.cancelAll(this)
         stopSelf()
     }
 
@@ -174,12 +197,15 @@ class DhdAdbPairingService : Service() {
 /** Builds the Shizuku-style notification used only for the one-time pairing step. */
 internal object DhdAdbPairingNotification {
     const val REMOTE_INPUT_RESULT_KEY = "dhd_adb_pairing_code"
-    const val NOTIFICATION_ID = 4207
+    const val SEARCHING_NOTIFICATION_ID = 4207
+    const val FOUND_NOTIFICATION_ID = 4211
+    const val NOTIFICATION_ID = SEARCHING_NOTIFICATION_ID
 
     private const val CHANNEL_ID = "dhd_adb_pairing"
     private const val RESULT_NOTIFICATION_ID = 4208
     private const val REQUEST_SUBMIT_CODE = 4209
     private const val REQUEST_OPEN_APP = 4210
+    private const val REQUEST_STOP_SEARCHING = 4212
 
     fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -214,13 +240,21 @@ internal object DhdAdbPairingNotification {
         return true
     }
 
-    fun searchingNotification(context: Context, message: String = DEFAULT_SEARCHING_MESSAGE): Notification {
+    fun searchingNotification(context: Context): Notification {
         createChannel(context)
         return baseBuilder(
             context = context,
             title = "Searching for pairing service",
-            message = message,
-        ).build()
+            message = null,
+        )
+            .addAction(
+                NotificationCompat.Action.Builder(
+                    android.R.drawable.ic_menu_close_clear_cancel,
+                    "Stop searching",
+                    stopSearchingIntent(context),
+                ).build(),
+            )
+            .build()
     }
 
     fun pairingServiceFoundNotification(
@@ -284,27 +318,27 @@ internal object DhdAdbPairingNotification {
     }
 
     fun cancel(context: Context) {
-        NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
+        cancelAll(context)
     }
 
-    fun showSearching(context: Context, message: String = DEFAULT_SEARCHING_MESSAGE) {
-        NotificationManagerCompat.from(context).notify(
-            NOTIFICATION_ID,
-            searchingNotification(context, message),
-        )
+    fun cancelAll(context: Context) {
+        NotificationManagerCompat.from(context).apply {
+            cancel(SEARCHING_NOTIFICATION_ID)
+            cancel(FOUND_NOTIFICATION_ID)
+        }
     }
 
-    fun showPairingServiceFound(context: Context, message: String = DEFAULT_FOUND_MESSAGE) {
+    fun showSearching(context: Context) {
         NotificationManagerCompat.from(context).notify(
-            NOTIFICATION_ID,
-            pairingServiceFoundNotification(context, message),
+            SEARCHING_NOTIFICATION_ID,
+            searchingNotification(context),
         )
     }
 
     private fun baseBuilder(
         context: Context,
         title: String,
-        message: String,
+        message: String?,
     ): NotificationCompat.Builder {
         val openAppIntent = PendingIntent.getActivity(
             context,
@@ -315,13 +349,28 @@ internal object DhdAdbPairingNotification {
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
-            .setContentText(message)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
             .setContentIntent(openAppIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .also { builder ->
+                if (!message.isNullOrBlank()) {
+                    builder
+                        .setContentText(message)
+                        .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                }
+            }
     }
+
+    private fun stopSearchingIntent(context: Context): PendingIntent =
+        PendingIntent.getForegroundService(
+            context,
+            REQUEST_STOP_SEARCHING,
+            Intent(context, DhdAdbPairingService::class.java).setAction(
+                DhdAdbPairingService.ACTION_STOP,
+            ),
+            immutablePendingIntentFlags(),
+        )
 
     private fun mutablePendingIntentFlags(): Int =
         PendingIntent.FLAG_UPDATE_CURRENT or
@@ -339,8 +388,6 @@ internal object DhdAdbPairingNotification {
                 0
             }
 
-    private const val DEFAULT_SEARCHING_MESSAGE =
-        "Open Wireless debugging → Pair device with pairing code. DHD is listening for the pairing service."
     private const val DEFAULT_FOUND_MESSAGE =
-        "The Wireless Debugging pairing service was found. Enter the six-digit code shown by Android."
+        "Enter the pairing code shown by Android."
 }

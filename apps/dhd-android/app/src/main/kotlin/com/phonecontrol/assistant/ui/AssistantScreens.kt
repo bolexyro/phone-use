@@ -783,6 +783,8 @@ private fun RunningStatusIndicator(
     val elapsedSeconds = rememberElapsedSeconds(startedAtEpochMs)
     val developerConnectionNeedsAction = developerStatus.state in setOf(
         DeveloperConnectionState.PAIRING_REQUIRED,
+        DeveloperConnectionState.PAIRING_SEARCHING,
+        DeveloperConnectionState.PAIRING_SERVICE_FOUND,
         DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
         DeveloperConnectionState.UNSUPPORTED,
         DeveloperConnectionState.ERROR,
@@ -958,6 +960,8 @@ private fun DeveloperConnectionRecoveryCard(
         icon = R.drawable.ic_shield,
         title = when (status.state) {
             DeveloperConnectionState.PAIRING_REQUIRED -> "Pair DHD once"
+            DeveloperConnectionState.PAIRING_SEARCHING -> "Searching for pairing service"
+            DeveloperConnectionState.PAIRING_SERVICE_FOUND -> "Pairing service found"
             DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> "Wireless Debugging is off"
             DeveloperConnectionState.UNSUPPORTED -> "Android version unsupported"
             else -> "DHD phone connection unavailable"
@@ -2222,7 +2226,6 @@ fun SettingsScreen(
     visibleReasoningEfforts: List<ReasoningEffort>,
     onSetReasoningEffortVisibility: (ReasoningEffort, Boolean) -> Unit,
     onOpenPairing: () -> Unit,
-    onOpenDeveloperOptions: () -> Unit,
     onOpenApprovedApps: () -> Unit,
     onOpenCompanion: () -> Unit,
     onBack: () -> Unit,
@@ -2572,12 +2575,7 @@ fun SettingsScreen(
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
                                 .clickable(enabled = developerStatus.state != DeveloperConnectionState.UNSUPPORTED) {
-                                    when {
-                                        developerStatus.state == DeveloperConnectionState.PAIRING_REQUIRED ||
-                                            (!developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR) -> onOpenPairing()
-                                        developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF ||
-                                            (developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR) -> onOpenDeveloperOptions()
-                                    }
+                                    onOpenPairing()
                                 }
                                 .padding(horizontal = 16.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -2607,6 +2605,8 @@ fun SettingsScreen(
                                         DeveloperConnectionState.CONNECTING,
                                         DeveloperConnectionState.CHECKING -> "Connecting automatically…"
                                         DeveloperConnectionState.PAIRING_REQUIRED -> "Pair DHD once"
+                                        DeveloperConnectionState.PAIRING_SEARCHING -> "Listening for the pairing service…"
+                                        DeveloperConnectionState.PAIRING_SERVICE_FOUND -> "Check the DHD notification"
                                         DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> developerStatus.message
                                         DeveloperConnectionState.UNSUPPORTED -> "Android 11+ required"
                                         DeveloperConnectionState.ERROR -> developerStatus.message
@@ -2617,33 +2617,35 @@ fun SettingsScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            if (developerStatus.state == DeveloperConnectionState.PAIRING_REQUIRED ||
-                                (!developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR)
-                            ) {
-                                TextButton(
-                                    onClick = onOpenPairing,
-                                    contentPadding = PaddingValues(horizontal = 8.dp),
-                                ) {
-                                    Text("Pair", maxLines = 1)
-                                }
-                            } else if (developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF ||
-                                (developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR)
-                            ) {
-                                TextButton(
-                                    onClick = onOpenDeveloperOptions,
-                                    contentPadding = PaddingValues(horizontal = 8.dp),
-                                ) {
-                                    Text("Turn on", maxLines = 1)
-                                }
-                            } else {
-                                Text(
-                                    text = if (developerStatus.privilegedApiReady) "Active" else "Action needed",
-                                    color = if (developerStatus.privilegedApiReady) colors.textSecondary else colors.accentBlue,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.padding(start = 8.dp),
-                                )
-                            }
+                            Text(
+                                text = when (developerStatus.state) {
+                                    DeveloperConnectionState.READY -> "Active"
+                                    DeveloperConnectionState.CONNECTING,
+                                    DeveloperConnectionState.CHECKING -> "Connecting"
+                                    DeveloperConnectionState.PAIRING_REQUIRED -> "Needs pairing"
+                                    DeveloperConnectionState.PAIRING_SEARCHING -> "Searching"
+                                    DeveloperConnectionState.PAIRING_SERVICE_FOUND -> "Found"
+                                    DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> "Turn on"
+                                    DeveloperConnectionState.UNSUPPORTED -> "Unavailable"
+                                    DeveloperConnectionState.ERROR -> "Needs attention"
+                                },
+                                color = when (developerStatus.state) {
+                                    DeveloperConnectionState.READY -> colors.accentGreen
+                                    DeveloperConnectionState.PAIRING_SEARCHING,
+                                    DeveloperConnectionState.PAIRING_SERVICE_FOUND,
+                                    DeveloperConnectionState.CONNECTING,
+                                    DeveloperConnectionState.CHECKING,
+                                    DeveloperConnectionState.PAIRING_REQUIRED -> colors.accentBlue
+                                    DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
+                                    DeveloperConnectionState.ERROR -> colors.warningAmber
+                                    DeveloperConnectionState.UNSUPPORTED -> colors.textSecondary
+                                },
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(start = 8.dp),
+                            )
                         }
                     }
                 }
@@ -2699,19 +2701,28 @@ fun SettingsScreen(
 
 @Composable
 fun PairingScreen(
+    status: DeveloperModeStatus,
     onStartPairingNotification: () -> Boolean,
     onOpenDeveloperOptions: () -> Unit,
     onBack: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
     var notificationUnavailable by rememberSaveable { mutableStateOf(false) }
+    var automaticStartAttempted by rememberSaveable { mutableStateOf(false) }
 
     fun startPairingNotification() {
         notificationUnavailable = !onStartPairingNotification()
     }
 
-    LaunchedEffect(Unit) {
-        startPairingNotification()
+    LaunchedEffect(status.state, status.paired) {
+        val needsPairing = !status.paired && status.state in setOf(
+            DeveloperConnectionState.PAIRING_REQUIRED,
+            DeveloperConnectionState.ERROR,
+        )
+        if (!automaticStartAttempted && needsPairing) {
+            automaticStartAttempted = true
+            startPairingNotification()
+        }
     }
 
     Scaffold(
@@ -2786,6 +2797,10 @@ fun PairingScreen(
                 }
             }
 
+            item {
+                PairingStatusCard(status = status)
+            }
+
             if (notificationUnavailable) {
                 item {
                     Surface(
@@ -2796,16 +2811,27 @@ fun PairingScreen(
                     ) {
                         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
                             Text(
-                                text = "DHD notifications are disabled. Enable notifications, then retry pairing so Android can show the code entry field.",
+                                text = "Allow DHD notifications so Android can show the pairing code field.",
                                 color = colors.textSecondary,
                                 fontSize = 13.sp,
                                 lineHeight = 19.sp,
                             )
-                            OutlinedButton(
+                            Button(
                                 onClick = { startPairingNotification() },
                                 modifier = Modifier.padding(top = 8.dp),
-                                shape = RoundedCornerShape(10.dp),
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = colors.accentBlue,
+                                    contentColor = Color.White,
+                                ),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                             ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_refresh),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
                                 Text("Retry pairing notification")
                             }
                         }
@@ -2831,6 +2857,77 @@ fun PairingScreen(
                 PairingInstruction(
                     number = 3,
                     text = "Go back to DHD. Pairing will finish automatically.",
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairingStatusCard(status: DeveloperModeStatus) {
+    val colors = LocalAssistantColors.current
+    val statusColor = when (status.state) {
+        DeveloperConnectionState.READY -> colors.accentGreen
+        DeveloperConnectionState.PAIRING_SEARCHING,
+        DeveloperConnectionState.PAIRING_SERVICE_FOUND,
+        DeveloperConnectionState.PAIRING_REQUIRED,
+        DeveloperConnectionState.CONNECTING,
+        DeveloperConnectionState.CHECKING -> colors.accentBlue
+        DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
+        DeveloperConnectionState.ERROR -> colors.warningAmber
+        DeveloperConnectionState.UNSUPPORTED -> colors.textSecondary
+    }
+    val statusTitle = when (status.state) {
+        DeveloperConnectionState.READY -> "Active"
+        DeveloperConnectionState.PAIRING_SEARCHING -> "Searching for pairing service"
+        DeveloperConnectionState.PAIRING_SERVICE_FOUND -> "Pairing service found"
+        DeveloperConnectionState.PAIRING_REQUIRED -> if (status.paired) {
+            "Maintenance service needs a restart"
+        } else {
+            "DHD needs pairing"
+        }
+        DeveloperConnectionState.CONNECTING -> "Connecting"
+        DeveloperConnectionState.CHECKING -> "Checking connection"
+        DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> "Wireless Debugging is off"
+        DeveloperConnectionState.ERROR -> "Pairing needs attention"
+        DeveloperConnectionState.UNSUPPORTED -> "Android version unsupported"
+    }
+    val statusDetail = when (status.state) {
+        DeveloperConnectionState.READY -> "DHD can use phone controls. Wireless Debugging can be off."
+        DeveloperConnectionState.PAIRING_SEARCHING -> "DHD is listening for Android's pairing service."
+        DeveloperConnectionState.PAIRING_SERVICE_FOUND -> "Enter the code in the DHD notification."
+        else -> status.message
+    }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = statusColor.copy(alpha = if (colors.isDark) 0.18f else 0.10f),
+        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .size(12.dp)
+                    .background(statusColor, CircleShape),
+            )
+            Column(modifier = Modifier.padding(start = 12.dp)) {
+                Text(
+                    text = statusTitle,
+                    color = colors.textPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = statusDetail,
+                    color = colors.textSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    modifier = Modifier.padding(top = 3.dp),
                 )
             }
         }
@@ -2875,11 +2972,22 @@ private fun PairingInstruction(
                 lineHeight = 21.sp,
             )
             if (actionLabel != null && onAction != null) {
-                OutlinedButton(
+                Button(
                     onClick = onAction,
                     modifier = Modifier.padding(top = 10.dp),
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.accentBlue,
+                        contentColor = Color.White,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                 ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_settings),
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
                     Text(actionLabel)
                 }
             }

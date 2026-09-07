@@ -27,6 +27,8 @@ enum class DeveloperConnectionState {
     UNSUPPORTED,
     WIRELESS_DEBUGGING_OFF,
     PAIRING_REQUIRED,
+    PAIRING_SEARCHING,
+    PAIRING_SERVICE_FOUND,
     CONNECTING,
     READY,
     ERROR,
@@ -108,6 +110,8 @@ class DhdAdbController(context: Context) {
         when (_status.value.state) {
             DeveloperConnectionState.CONNECTING,
             DeveloperConnectionState.CHECKING,
+            DeveloperConnectionState.PAIRING_SEARCHING,
+            DeveloperConnectionState.PAIRING_SERVICE_FOUND,
             DeveloperConnectionState.UNSUPPORTED,
             -> Unit
             DeveloperConnectionState.READY,
@@ -174,11 +178,11 @@ class DhdAdbController(context: Context) {
         endpoint = null
         pairingEndpoint = null
         publish(
-            DeveloperConnectionState.PAIRING_REQUIRED,
+            DeveloperConnectionState.PAIRING_SEARCHING,
             paired = isPaired(),
             message = PAIRING_SEARCHING_MESSAGE,
         )
-        DhdAdbPairingNotification.showSearching(appContext, PAIRING_SEARCHING_MESSAGE)
+        DhdAdbPairingNotification.showSearching(appContext)
         beginPairingDiscovery(pairingCode = null)
     }
 
@@ -502,10 +506,6 @@ class DhdAdbController(context: Context) {
                 delay(PAIRING_DISCOVERY_TIMEOUT_MS)
                 if (!completed.compareAndSet(false, true)) return@launch
                 mdns.stop()
-                DhdAdbPairingNotification.showPairingServiceFound(
-                    appContext,
-                    "The pairing service was not found. Open Wireless debugging → Pair device with pairing code, then try again.",
-                )
                 publish(
                     DeveloperConnectionState.ERROR,
                     paired = isPaired(),
@@ -523,9 +523,8 @@ class DhdAdbController(context: Context) {
                 mdns.stop()
                 pairingEndpoint = discovered
                 if (pairingCode == null) {
-                    DhdAdbPairingNotification.showPairingServiceFound(appContext)
                     publish(
-                        DeveloperConnectionState.PAIRING_REQUIRED,
+                        DeveloperConnectionState.PAIRING_SERVICE_FOUND,
                         paired = isPaired(),
                         message = PAIRING_SERVICE_FOUND_MESSAGE,
                     )
@@ -539,9 +538,7 @@ class DhdAdbController(context: Context) {
                 mdns.stop()
                 val message = "Could not search for Wireless Debugging: ${rootMessage(error)}"
                 if (pairingCode == null) {
-                    DhdAdbPairingNotification.showSearching(appContext, message)
-                } else {
-                    DhdAdbPairingNotification.showPairingServiceFound(appContext, message)
+                    DhdAdbPairingNotification.showSearching(appContext)
                 }
                 publish(
                     DeveloperConnectionState.ERROR,

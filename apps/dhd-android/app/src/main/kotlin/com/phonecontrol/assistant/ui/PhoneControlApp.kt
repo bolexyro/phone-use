@@ -340,7 +340,6 @@ fun PhoneControlApp(
                             visibleReasoningEfforts = visibleReasoningEfforts,
                             onSetReasoningEffortVisibility = setReasoningEffortVisibility,
                             onOpenPairing = { navController.navigate(AppRoutes.PAIRING) },
-                            onOpenDeveloperOptions = { openDeveloperOptions(context) },
                             onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
                             onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
                             onBack = { navController.popBackStack() },
@@ -349,6 +348,7 @@ fun PhoneControlApp(
 
                     composable(AppRoutes.PAIRING) {
                         PairingScreen(
+                            status = developerStatus,
                             onStartPairingNotification = { developerModeController.startPairingNotification() },
                             onOpenDeveloperOptions = { openDeveloperOptions(context) },
                             onBack = { navController.popBackStack() },
