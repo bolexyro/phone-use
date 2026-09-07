@@ -99,7 +99,7 @@ class DhdAdbPairingService : Service() {
                     DeveloperConnectionState.READY -> {
                         DhdAdbPairingNotification.showResult(
                             this@DhdAdbPairingService,
-                            "DHD paired. Wireless Debugging will reconnect automatically.",
+                            "DHD paired. Wireless Debugging can be turned off until DHD needs a restart.",
                         )
                         pairingActive = false
                         stopPairingService()

@@ -1,0 +1,8 @@
+DHD includes a small adaptation of the detached app_process bootstrap pattern
+from RikkaApps/Shizuku's ServiceStarter. Shizuku is licensed under Apache
+License 2.0. The upstream source is available at:
+
+https://github.com/RikkaApps/Shizuku/blob/master/starter/src/main/java/moe/shizuku/starter/ServiceStarter.java
+
+The DHD maintenance daemon and its command protocol are original DHD code and
+are not part of Shizuku.

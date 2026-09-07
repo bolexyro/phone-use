@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -41,10 +42,10 @@ data class DeveloperModeStatus(
 }
 
 /**
- * Owns DHD's direct connection to this phone's Wireless Debugging ADB
- * endpoint. It never enables Wireless Debugging itself; the user explicitly
- * turns that maintenance switch on, and DHD connects as soon as Android
- * advertises the local endpoint.
+ * Owns DHD's one-time Wireless Debugging bootstrap and its long-lived local
+ * shell-UID maintenance connection. It never enables Wireless Debugging
+ * itself; the user explicitly turns that maintenance switch on when Android
+ * has restarted the maintenance process or pairing is needed.
  */
 class DhdAdbController(context: Context) {
     private val appContext = context.applicationContext
@@ -52,11 +53,15 @@ class DhdAdbController(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mdns = DhdAdbMdns(appContext)
     private val commandMutex = Mutex()
+    private val maintenanceBootstrap = DhdMaintenanceBootstrap(appContext, preferences)
     private val key by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { DhdAdbKey.from(appContext) }
     private val _status = MutableStateFlow(DeveloperModeStatus())
     private val started = AtomicBoolean(false)
     private var discoveryTimeoutJob: Job? = null
     private var pairingJob: Job? = null
+    private var maintenanceProbeJob: Job? = null
+    private var maintenanceMonitorJob: Job? = null
+    private var maintenanceRecoveryJob: Job? = null
     private var endpoint: DhdAdbEndpoint? = null
     private var pairingEndpoint: DhdAdbEndpoint? = null
 
@@ -73,7 +78,7 @@ class DhdAdbController(context: Context) {
             return
         }
         if (isPaired()) {
-            beginConnectDiscovery()
+            beginMaintenanceProbe()
         } else {
             publish(
                 DeveloperConnectionState.PAIRING_REQUIRED,
@@ -87,6 +92,9 @@ class DhdAdbController(context: Context) {
         if (!started.compareAndSet(true, false)) return
         discoveryTimeoutJob?.cancel()
         pairingJob?.cancel()
+        maintenanceProbeJob?.cancel()
+        maintenanceMonitorJob?.cancel()
+        maintenanceRecoveryJob?.cancel()
         mdns.stop()
         endpoint = null
         pairingEndpoint = null
@@ -98,22 +106,22 @@ class DhdAdbController(context: Context) {
     fun refresh() {
         if (!started.get() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         when (_status.value.state) {
-            DeveloperConnectionState.READY,
             DeveloperConnectionState.CONNECTING,
             DeveloperConnectionState.CHECKING,
             DeveloperConnectionState.UNSUPPORTED,
             -> Unit
-            DeveloperConnectionState.PAIRING_REQUIRED -> publish(
+            DeveloperConnectionState.READY,
+            DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
+            DeveloperConnectionState.ERROR,
+            -> if (isPaired()) beginMaintenanceProbe() else publish(
                 DeveloperConnectionState.PAIRING_REQUIRED,
                 paired = false,
                 message = PAIRING_REQUIRED_MESSAGE,
             )
-            DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
-            DeveloperConnectionState.ERROR,
-            -> if (isPaired()) beginConnectDiscovery() else publish(
+            DeveloperConnectionState.PAIRING_REQUIRED -> publish(
                 DeveloperConnectionState.PAIRING_REQUIRED,
-                paired = false,
-                message = PAIRING_REQUIRED_MESSAGE,
+                paired = isPaired(),
+                message = if (isPaired()) MAINTENANCE_RESTART_MESSAGE else PAIRING_REQUIRED_MESSAGE,
             )
         }
     }
@@ -159,6 +167,9 @@ class DhdAdbController(context: Context) {
         if (!started.get()) start()
         discoveryTimeoutJob?.cancel()
         pairingJob?.cancel()
+        maintenanceProbeJob?.cancel()
+        maintenanceMonitorJob?.cancel()
+        maintenanceRecoveryJob?.cancel()
         mdns.stop()
         endpoint = null
         pairingEndpoint = null
@@ -179,7 +190,7 @@ class DhdAdbController(context: Context) {
         endpoint = null
         pairingEndpoint = null
         if (isPaired()) {
-            beginConnectDiscovery()
+            beginMaintenanceProbe()
         } else {
             publish(
                 DeveloperConnectionState.PAIRING_REQUIRED,
@@ -234,49 +245,116 @@ class DhdAdbController(context: Context) {
 
     internal suspend fun execute(command: List<String>, binaryOutput: Boolean = false): PhoneProcessResult =
         commandMutex.withLock {
-            val currentEndpoint = endpoint
-                ?: return@withLock unavailableResult()
-            val shellCommand = buildDhdAdbShellCommand(command)
+            if (!started.get() || !isPaired()) return@withLock unavailableResult()
             try {
-                DhdAdbClient(
-                    host = currentEndpoint.host,
-                    port = currentEndpoint.port,
-                    key = key,
-                ).use { client ->
-                    client.connect()
-                    val result = if (binaryOutput) {
-                        client.execOut(shellCommand)
-                    } else {
-                        client.shellV2(shellCommand)
-                    }
-                    PhoneProcessResult(
-                        exitCode = result.exitCode,
-                        stdout = result.stdout,
-                        stderr = result.stderr,
-                    )
+                val result = maintenanceBootstrap.client().execute(command, binaryOutput)
+                if (result.exitCode == null && !result.timedOut) {
+                    handleMaintenanceUnavailable(result.stderr)
                 }
+                result
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                endpoint = null
-                publish(
-                    DeveloperConnectionState.CONNECTING,
-                    paired = isPaired(),
-                    message = "Wireless Debugging disconnected; reconnecting automatically…",
-                )
-                beginConnectDiscovery()
+                handleMaintenanceUnavailable(rootMessage(error))
                 PhoneProcessResult(
                     exitCode = null,
                     stdout = ByteArray(0),
                     stderr = if (error is SocketTimeoutException) {
-                        "The Wireless Debugging command timed out."
+                        "The DHD maintenance command timed out."
                     } else {
-                        "DHD could not execute the local ADB command: ${rootMessage(error)}"
+                        "DHD maintenance service is unavailable: ${rootMessage(error)}"
                     },
                     timedOut = error is SocketTimeoutException,
                 )
             }
         }
+
+    private fun beginMaintenanceProbe() {
+        if (!started.get() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R || !isPaired()) return
+        maintenanceProbeJob?.cancel()
+        maintenanceProbeJob = scope.launch {
+            if (maintenanceBootstrap.client().isReady()) {
+                publishReady()
+            } else {
+                scheduleMaintenanceRecovery()
+            }
+        }
+    }
+
+    private fun startMaintenanceMonitor() {
+        maintenanceMonitorJob?.cancel()
+        maintenanceMonitorJob = scope.launch {
+            while (isActive && started.get()) {
+                delay(MAINTENANCE_HEALTH_INTERVAL_MS)
+                if (!maintenanceBootstrap.client().isReady()) {
+                    handleMaintenanceUnavailable("DHD's maintenance service stopped.")
+                    return@launch
+                }
+            }
+        }
+    }
+
+    private fun publishReady() {
+        if (!started.get()) return
+        publish(
+            DeveloperConnectionState.READY,
+            paired = true,
+            message = "DHD maintenance service is running. Wireless Debugging can be turned off until DHD needs a restart.",
+        )
+        startMaintenanceMonitor()
+    }
+
+    private fun handleMaintenanceUnavailable(detail: String) {
+        if (!started.get() || !isPaired()) return
+        maintenanceMonitorJob?.cancel()
+        publish(
+            DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
+            paired = true,
+            message = "$detail Turn on Wireless debugging in Developer options to restart it. Pairing is already saved.",
+        )
+        scheduleMaintenanceRecovery()
+    }
+
+    private fun scheduleMaintenanceRecovery() {
+        if (!started.get() || !isPaired() || maintenanceRecoveryJob?.isActive == true) return
+        publish(
+            DeveloperConnectionState.CONNECTING,
+            paired = true,
+            message = "Restarting DHD's maintenance service…",
+        )
+        maintenanceRecoveryJob = scope.launch {
+            val recovered = commandMutex.withLock {
+                val currentEndpoint = endpoint ?: return@withLock false
+                try {
+                    bootstrapMaintenance(currentEndpoint)
+                    true
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    Log.w(TAG, "Maintenance service recovery failed", error)
+                    false
+                }
+            }
+            if (!started.get()) return@launch
+            if (recovered) {
+                publishReady()
+            } else {
+                endpoint = null
+                beginConnectDiscovery()
+            }
+        }
+    }
+
+    private suspend fun bootstrapMaintenance(discovered: DhdAdbEndpoint) {
+        DhdAdbClient(
+            host = discovered.host,
+            port = discovered.port,
+            key = key,
+        ).use { adb ->
+            adb.connect()
+            maintenanceBootstrap.ensureStarted(adb)
+        }
+    }
 
     private fun beginConnectDiscovery() {
         if (!started.get() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
@@ -308,6 +386,7 @@ class DhdAdbController(context: Context) {
             onResolved = { discovered ->
                 if (!completed.compareAndSet(false, true)) return@start
                 discoveryTimeoutJob?.cancel()
+                mdns.stop()
                 endpoint = discovered
                 scope.launch { verifyConnection(discovered) }
             },
@@ -335,24 +414,33 @@ class DhdAdbController(context: Context) {
             paired = isPaired(),
             message = "Connecting to DHD's local ADB service…",
         )
+        var adbConnected = false
         try {
-            DhdAdbClient(discovered.host, discovered.port, key).use { it.connect() }
-            publish(
-                DeveloperConnectionState.READY,
-                paired = true,
-                message = "DHD is connected. Typed phone actions are ready.",
-            )
+            DhdAdbClient(discovered.host, discovered.port, key).use { adb ->
+                adb.connect()
+                adbConnected = true
+                maintenanceBootstrap.ensureStarted(adb)
+            }
+            publishReady()
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            mdns.stop()
-            endpoint = null
-            preferences.edit().putBoolean(KEY_PAIRED, false).apply()
-            publish(
-                DeveloperConnectionState.PAIRING_REQUIRED,
-                paired = false,
-                message = "DHD is not authorized by Wireless Debugging. Pair DHD once, then it will reconnect automatically.",
-            )
+            if (adbConnected) {
+                publish(
+                    DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
+                    paired = true,
+                    message = "DHD's maintenance service could not start. Turn on Wireless debugging in Developer options to retry; pairing is still saved.",
+                )
+            } else {
+                mdns.stop()
+                endpoint = null
+                preferences.edit().putBoolean(KEY_PAIRED, false).apply()
+                publish(
+                    DeveloperConnectionState.PAIRING_REQUIRED,
+                    paired = false,
+                    message = "DHD is not authorized by Wireless Debugging. Pair DHD once, then it will reconnect automatically.",
+                )
+            }
         }
     }
 
@@ -510,14 +598,17 @@ class DhdAdbController(context: Context) {
         const val KEY_PAIRED = "paired"
         const val CONNECT_DISCOVERY_TIMEOUT_MS = 7_000L
         const val PAIRING_DISCOVERY_TIMEOUT_MS = 30_000L
+        const val MAINTENANCE_HEALTH_INTERVAL_MS = 15_000L
         const val WIRELESS_DEBUGGING_MESSAGE =
-            "Turn on Wireless debugging in Developer options. DHD will connect automatically when it appears."
+            "Turn on Wireless debugging once to start DHD's maintenance service. Pairing is already saved."
         const val PAIRING_SEARCHING_MESSAGE =
             "Open Wireless debugging → Pair device with pairing code. DHD is listening for the pairing service."
         const val PAIRING_SERVICE_FOUND_MESSAGE =
             "The Wireless Debugging pairing service was found. Enter the six-digit code shown by Android."
         const val PAIRING_REQUIRED_MESSAGE =
-            "Pair DHD once from Wireless debugging. After that, turning Wireless debugging on is enough."
+            "Pair DHD once from Wireless debugging. After that, turn Wireless debugging on only when DHD needs a restart."
+        const val MAINTENANCE_RESTART_MESSAGE =
+            "DHD's maintenance service is not running. Turn on Wireless debugging in Developer options to restart it. Pairing is already saved."
         val PAIRING_CODE_REGEX = Regex("\\d{6}")
     }
 }

@@ -2237,63 +2237,81 @@ fun SettingsScreen(
     var isPairDialogOpen by rememberSaveable { mutableStateOf(false) }
     var pairingCode by rememberSaveable { mutableStateOf("") }
     var pairingNotificationUnavailable by rememberSaveable { mutableStateOf(false) }
+    val needsMaintenanceRestart = developerStatus.paired &&
+        developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF
 
     if (isPairDialogOpen) {
         AlertDialog(
             onDismissRequest = { isPairDialogOpen = false },
-            title = { Text("Pair DHD with Wireless Debugging") },
+            title = {
+                Text(if (needsMaintenanceRestart) "Restart DHD phone access" else "Pair DHD with Wireless Debugging")
+            },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        "You only do this once. The easiest way is to start the DHD notification, choose “Pair device with pairing code” in Android, then enter the six-digit code from the notification.",
-                        color = colors.textSecondary,
-                    )
-                    OutlinedButton(
-                        onClick = {
-                            if (onStartPairingNotification()) {
-                                pairingNotificationUnavailable = false
-                                isPairDialogOpen = false
-                            } else {
-                                pairingNotificationUnavailable = true
-                            }
-                        },
-                    ) {
-                        Text("Start pairing in notification")
-                    }
-                    if (pairingNotificationUnavailable) {
+                    if (needsMaintenanceRestart) {
                         Text(
-                            "DHD notifications are disabled. Use the code box below, or enable DHD notifications in Android settings.",
+                            "DHD is already paired. Its maintenance service stopped, usually because Wireless Debugging was turned off or the phone restarted. Turn Wireless Debugging on temporarily; DHD will restart automatically. You do not need to pair again.",
                             color = colors.textSecondary,
                         )
+                        OutlinedButton(onClick = onOpenDeveloperOptions) {
+                            Text("Open Wireless Debugging settings")
+                        }
+                    } else {
+                        Text(
+                            "You only do this once. The easiest way is to start the DHD notification, choose “Pair device with pairing code” in Android, then enter the six-digit code from the notification.",
+                            color = colors.textSecondary,
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                if (onStartPairingNotification()) {
+                                    pairingNotificationUnavailable = false
+                                    isPairDialogOpen = false
+                                } else {
+                                    pairingNotificationUnavailable = true
+                                }
+                            },
+                        ) {
+                            Text("Start pairing in notification")
+                        }
+                        if (pairingNotificationUnavailable) {
+                            Text(
+                                "DHD notifications are disabled. Use the code box below, or enable DHD notifications in Android settings.",
+                                color = colors.textSecondary,
+                            )
+                        }
+                        Text(
+                            "If your phone hides notification input, use this in-app fallback:",
+                            color = colors.textSecondary,
+                        )
+                        OutlinedButton(onClick = onOpenDeveloperOptions) {
+                            Text("Open Developer options")
+                        }
+                        OutlinedTextField(
+                            value = pairingCode,
+                            onValueChange = { value ->
+                                if (value.length <= 6 && value.all(Char::isDigit)) pairingCode = value
+                            },
+                            label = { Text("Pairing code") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        )
                     }
-                    Text(
-                        "If your phone hides notification input, use this in-app fallback:",
-                        color = colors.textSecondary,
-                    )
-                    OutlinedButton(onClick = onOpenDeveloperOptions) {
-                        Text("Open Developer options")
-                    }
-                    OutlinedTextField(
-                        value = pairingCode,
-                        onValueChange = { value ->
-                            if (value.length <= 6 && value.all(Char::isDigit)) pairingCode = value
-                        },
-                        label = { Text("Pairing code") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    )
                 }
             },
             confirmButton = {
-                TextButton(
-                    enabled = pairingCode.length == 6,
-                    onClick = {
-                        isPairDialogOpen = false
-                        pairingNotificationUnavailable = false
-                        onPairDhd(pairingCode)
-                    },
-                ) {
-                    Text("Pair")
+                if (needsMaintenanceRestart) {
+                    TextButton(onClick = { isPairDialogOpen = false }) { Text("Done") }
+                } else {
+                    TextButton(
+                        enabled = pairingCode.length == 6,
+                        onClick = {
+                            isPairDialogOpen = false
+                            pairingNotificationUnavailable = false
+                            onPairDhd(pairingCode)
+                        },
+                    ) {
+                        Text("Pair")
+                    }
                 }
             },
             dismissButton = {
@@ -2669,11 +2687,11 @@ fun SettingsScreen(
                                 )
                                 Text(
                                     text = when (developerStatus.state) {
-                                        DeveloperConnectionState.READY -> "Connected through Wireless Debugging"
+                                        DeveloperConnectionState.READY -> "Maintenance service active; Wireless Debugging can be off"
                                         DeveloperConnectionState.CONNECTING,
                                         DeveloperConnectionState.CHECKING -> "Connecting automatically…"
                                         DeveloperConnectionState.PAIRING_REQUIRED -> "Pair DHD once"
-                                        DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> "Turn on Wireless debugging"
+                                        DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> developerStatus.message
                                         DeveloperConnectionState.UNSUPPORTED -> "Android 11+ required"
                                         DeveloperConnectionState.ERROR -> developerStatus.message
                                     },
@@ -2683,13 +2701,22 @@ fun SettingsScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            Text(
-                                text = if (developerStatus.privilegedApiReady) "Active" else "Action needed",
-                                color = if (developerStatus.privilegedApiReady) colors.textSecondary else colors.accentBlue,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.padding(start = 8.dp),
-                            )
+                            if (developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF) {
+                                TextButton(
+                                    onClick = onOpenDeveloperOptions,
+                                    contentPadding = PaddingValues(horizontal = 8.dp),
+                                ) {
+                                    Text("Turn on", maxLines = 1)
+                                }
+                            } else {
+                                Text(
+                                    text = if (developerStatus.privilegedApiReady) "Active" else "Action needed",
+                                    color = if (developerStatus.privilegedApiReady) colors.textSecondary else colors.accentBlue,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(start = 8.dp),
+                                )
+                            }
                         }
                     }
                 }
