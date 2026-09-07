@@ -2221,8 +2221,7 @@ fun SettingsScreen(
     onSelectThemeMode: (ThemeMode) -> Unit,
     visibleReasoningEfforts: List<ReasoningEffort>,
     onSetReasoningEffortVisibility: (ReasoningEffort, Boolean) -> Unit,
-    onPairDhd: (String) -> Unit,
-    onStartPairingNotification: () -> Boolean,
+    onOpenPairing: () -> Unit,
     onOpenDeveloperOptions: () -> Unit,
     onOpenApprovedApps: () -> Unit,
     onOpenCompanion: () -> Unit,
@@ -2234,94 +2233,6 @@ fun SettingsScreen(
     val lanAddresses = remember { bridgeServer.lanIpv4Addresses() }
     var isAppearanceMenuOpen by remember { mutableStateOf(false) }
     var isReasoningMenuOpen by remember { mutableStateOf(false) }
-    var isPairDialogOpen by rememberSaveable { mutableStateOf(false) }
-    var pairingCode by rememberSaveable { mutableStateOf("") }
-    var pairingNotificationUnavailable by rememberSaveable { mutableStateOf(false) }
-    val needsMaintenanceRestart = developerStatus.paired &&
-        developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF
-
-    if (isPairDialogOpen) {
-        AlertDialog(
-            onDismissRequest = { isPairDialogOpen = false },
-            title = {
-                Text(if (needsMaintenanceRestart) "Restart DHD phone access" else "Pair DHD with Wireless Debugging")
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (needsMaintenanceRestart) {
-                        Text(
-                            "DHD is already paired. Its maintenance service stopped, usually because Wireless Debugging was turned off or the phone restarted. Turn Wireless Debugging on temporarily; DHD will restart automatically. You do not need to pair again.",
-                            color = colors.textSecondary,
-                        )
-                        OutlinedButton(onClick = onOpenDeveloperOptions) {
-                            Text("Open Wireless Debugging settings")
-                        }
-                    } else {
-                        Text(
-                            "You only do this once. The easiest way is to start the DHD notification, choose “Pair device with pairing code” in Android, then enter the six-digit code from the notification.",
-                            color = colors.textSecondary,
-                        )
-                        OutlinedButton(
-                            onClick = {
-                                if (onStartPairingNotification()) {
-                                    pairingNotificationUnavailable = false
-                                    isPairDialogOpen = false
-                                } else {
-                                    pairingNotificationUnavailable = true
-                                }
-                            },
-                        ) {
-                            Text("Start pairing in notification")
-                        }
-                        if (pairingNotificationUnavailable) {
-                            Text(
-                                "DHD notifications are disabled. Use the code box below, or enable DHD notifications in Android settings.",
-                                color = colors.textSecondary,
-                            )
-                        }
-                        Text(
-                            "If your phone hides notification input, use this in-app fallback:",
-                            color = colors.textSecondary,
-                        )
-                        OutlinedButton(onClick = onOpenDeveloperOptions) {
-                            Text("Open Developer options")
-                        }
-                        OutlinedTextField(
-                            value = pairingCode,
-                            onValueChange = { value ->
-                                if (value.length <= 6 && value.all(Char::isDigit)) pairingCode = value
-                            },
-                            label = { Text("Pairing code") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                if (needsMaintenanceRestart) {
-                    TextButton(onClick = { isPairDialogOpen = false }) { Text("Done") }
-                } else {
-                    TextButton(
-                        enabled = pairingCode.length == 6,
-                        onClick = {
-                            isPairDialogOpen = false
-                            pairingNotificationUnavailable = false
-                            onPairDhd(pairingCode)
-                        },
-                    ) {
-                        Text("Pair")
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    isPairDialogOpen = false
-                    pairingNotificationUnavailable = false
-                }) { Text("Cancel") }
-            },
-        )
-    }
 
     Scaffold(
         containerColor = colors.background,
@@ -2661,7 +2572,12 @@ fun SettingsScreen(
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
                                 .clickable(enabled = developerStatus.state != DeveloperConnectionState.UNSUPPORTED) {
-                                    if (!developerStatus.privilegedApiReady) isPairDialogOpen = true
+                                    when {
+                                        developerStatus.state == DeveloperConnectionState.PAIRING_REQUIRED ||
+                                            (!developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR) -> onOpenPairing()
+                                        developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF ||
+                                            (developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR) -> onOpenDeveloperOptions()
+                                    }
                                 }
                                 .padding(horizontal = 16.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -2701,7 +2617,18 @@ fun SettingsScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            if (developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF) {
+                            if (developerStatus.state == DeveloperConnectionState.PAIRING_REQUIRED ||
+                                (!developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR)
+                            ) {
+                                TextButton(
+                                    onClick = onOpenPairing,
+                                    contentPadding = PaddingValues(horizontal = 8.dp),
+                                ) {
+                                    Text("Pair", maxLines = 1)
+                                }
+                            } else if (developerStatus.state == DeveloperConnectionState.WIRELESS_DEBUGGING_OFF ||
+                                (developerStatus.paired && developerStatus.state == DeveloperConnectionState.ERROR)
+                            ) {
                                 TextButton(
                                     onClick = onOpenDeveloperOptions,
                                     contentPadding = PaddingValues(horizontal = 8.dp),
@@ -2764,6 +2691,196 @@ fun SettingsScreen(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PairingScreen(
+    onStartPairingNotification: () -> Boolean,
+    onOpenDeveloperOptions: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    var notificationUnavailable by rememberSaveable { mutableStateOf(false) }
+
+    fun startPairingNotification() {
+        notificationUnavailable = !onStartPairingNotification()
+    }
+
+    LaunchedEffect(Unit) {
+        startPairingNotification()
+    }
+
+    Scaffold(
+        containerColor = colors.background,
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = colors.background,
+                    titleContentColor = colors.textPrimary,
+                    navigationIconContentColor = colors.textPrimary,
+                    actionIconContentColor = colors.textPrimary,
+                ),
+                title = { Text("Pairing", fontWeight = FontWeight.SemiBold, fontSize = 17.sp) },
+                navigationIcon = {
+                    Surface(
+                        shape = CircleShape,
+                        color = colors.composerBackground,
+                        border = BorderStroke(1.dp, colors.borderColor),
+                        modifier = Modifier
+                            .padding(start = 12.dp)
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .clickable { onBack() },
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_arrow_back),
+                                contentDescription = "Back",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                },
+            )
+        },
+    ) { paddingValues ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+            contentPadding = PaddingValues(top = 14.dp, bottom = 24.dp),
+        ) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = colors.settingsCard,
+                    border = BorderStroke(1.dp, colors.borderColor),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_info),
+                            contentDescription = null,
+                            tint = colors.accentBlue,
+                            modifier = Modifier.size(24.dp),
+                        )
+                        Text(
+                            text = "A notification from DHD will help you complete the pairing.",
+                            color = colors.textPrimary,
+                            fontSize = 15.sp,
+                            lineHeight = 21.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(start = 14.dp),
+                        )
+                    }
+                }
+            }
+
+            if (notificationUnavailable) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = colors.surfaceCard,
+                        border = BorderStroke(1.dp, colors.borderColor),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                            Text(
+                                text = "DHD notifications are disabled. Enable notifications, then retry pairing so Android can show the code entry field.",
+                                color = colors.textSecondary,
+                                fontSize = 13.sp,
+                                lineHeight = 19.sp,
+                            )
+                            OutlinedButton(
+                                onClick = { startPairingNotification() },
+                                modifier = Modifier.padding(top = 8.dp),
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text("Retry pairing notification")
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                PairingInstruction(
+                    number = 1,
+                    text = "Enter Developer options → Wireless debugging. Tap “Pair device with pairing code”; Android will show a six-digit code.",
+                    actionLabel = "Developer options",
+                    onAction = onOpenDeveloperOptions,
+                )
+            }
+            item {
+                PairingInstruction(
+                    number = 2,
+                    text = "Enter the code in the DHD notification to complete the pairing.",
+                )
+            }
+            item {
+                PairingInstruction(
+                    number = 3,
+                    text = "Go back to DHD. Pairing will finish automatically.",
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairingInstruction(
+    number: Int,
+    text: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    val colors = LocalAssistantColors.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = colors.accentBlue.copy(alpha = 0.18f),
+            modifier = Modifier.size(30.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = number.toString(),
+                    color = colors.accentBlue,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 14.dp),
+        ) {
+            Text(
+                text = text,
+                color = colors.textPrimary,
+                fontSize = 14.sp,
+                lineHeight = 21.sp,
+            )
+            if (actionLabel != null && onAction != null) {
+                OutlinedButton(
+                    onClick = onAction,
+                    modifier = Modifier.padding(top = 10.dp),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text(actionLabel)
                 }
             }
         }

@@ -152,6 +152,7 @@ private fun visibleReasoningEffortsFromStorage(value: String?): List<ReasoningEf
 object AppRoutes {
     const val MAIN = "main"
     const val SETTINGS = "settings"
+    const val PAIRING = "pairing"
     const val APPROVED_APPS = "approved_apps"
     const val COMPANION = "companion"
 }
@@ -338,15 +339,18 @@ fun PhoneControlApp(
                             onSelectThemeMode = setThemeMode,
                             visibleReasoningEfforts = visibleReasoningEfforts,
                             onSetReasoningEffortVisibility = setReasoningEffortVisibility,
-                            onPairDhd = { pairingCode -> developerModeController.pair(pairingCode) },
-                            onStartPairingNotification = {
-                                developerModeController.startPairingNotification().also { started ->
-                                    if (started) openDeveloperOptions(context)
-                                }
-                            },
+                            onOpenPairing = { navController.navigate(AppRoutes.PAIRING) },
                             onOpenDeveloperOptions = { openDeveloperOptions(context) },
                             onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
                             onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(AppRoutes.PAIRING) {
+                        PairingScreen(
+                            onStartPairingNotification = { developerModeController.startPairingNotification() },
+                            onOpenDeveloperOptions = { openDeveloperOptions(context) },
                             onBack = { navController.popBackStack() },
                         )
                     }
