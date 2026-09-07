@@ -12,8 +12,10 @@ import {
   type PhoneAssistantToolResult,
 } from "./dhd-tools.js";
 import {
+  emitCompanionTokenUsageEvent,
   emitCompanionToolCallEvent,
   type CompanionJsonValue,
+  type CompanionTokenUsageEvent,
   type CompanionToolCallEvent,
 } from "./companion-events.js";
 import {
@@ -201,6 +203,8 @@ export class CodexAppServerClient {
   private activeTurnId: string | null = null;
   private activeTiming: PhaseTimer | null = null;
   private userMessageLogged = false;
+  private activeModel = resolveCodexModel();
+  private activeServiceTier = DEFAULT_CODEX_SERVICE_TIER;
 
   /** True while this client still owns an in-flight App Server turn. */
   get isTurnInFlight(): boolean {
@@ -275,9 +279,13 @@ export class CodexAppServerClient {
     try {
       await this.start(logger);
 
+      const model = resolveCodexModel();
+      const serviceTier = serviceTierForFastMode(fastMode);
+      this.activeModel = model;
+      this.activeServiceTier = serviceTier;
       const threadParams: Record<string, unknown> = {
         dynamicTools: buildDhdDynamicTools(),
-        model: resolveCodexModel(),
+        model,
         cwd: this.runtimeCwd,
       };
 
@@ -352,9 +360,9 @@ export class CodexAppServerClient {
         logger.log("turn/start:start", `threadId=${threadId}`);
         const turnStartResponse = await this.request("turn/start", {
           threadId,
-          model: resolveCodexModel(),
+          model,
           effort: normalizeCodexEffort(reasoningEffort),
-          serviceTier: serviceTierForFastMode(fastMode),
+          serviceTier,
           cwd: this.runtimeCwd,
           input: [{ type: "text", text: phoneRequest }],
         });
@@ -555,6 +563,15 @@ export class CodexAppServerClient {
       return;
     }
 
+    const tokenUsageEvent = extractCompanionTokenUsageEvent(message);
+    if (tokenUsageEvent) {
+      emitCompanionTokenUsageEvent({
+        ...tokenUsageEvent,
+        model: this.activeModel,
+        serviceTier: this.activeServiceTier,
+      });
+    }
+
     if (message.method === "thread/started") {
       const threadId = extractThreadId(message.params);
       if (threadId) this.loadedThreadIds.add(threadId);
@@ -580,6 +597,7 @@ export class CodexAppServerClient {
     const completion = this.turnCompletion;
     if (!completion || !message.method) return;
     logServerNotification(message);
+    if (message.method === "thread/tokenUsage/updated") return;
     if (message.method === "turn/started") {
       this.activeTurnId = extractTurnId(message.params) || this.activeTurnId;
       this.activeTiming?.log(
@@ -1832,6 +1850,66 @@ function extractTurnId(value: unknown): string | null {
   const turn = extractRecord(record.turn);
   if (turn && typeof turn.id === "string" && turn.id) return turn.id;
   return typeof record.id === "string" && record.id ? record.id : null;
+}
+
+function readTokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+export function extractCompanionTokenUsageEvent(
+  value: unknown,
+  timestamp = Date.now(),
+): CompanionTokenUsageEvent | null {
+  const message = extractRecord(value);
+  if (message?.method !== "thread/tokenUsage/updated") return null;
+
+  const params = extractRecord(message.params);
+  const tokenUsage = extractRecord(params?.tokenUsage);
+  const last = extractRecord(tokenUsage?.last);
+  const threadId = typeof params?.threadId === "string" ? params.threadId : "";
+  const turnId = typeof params?.turnId === "string" ? params.turnId : "";
+  if (!threadId || !turnId || !last) return null;
+
+  const inputTokens = readTokenCount(last.inputTokens);
+  const outputTokens = readTokenCount(last.outputTokens);
+  const cachedInputTokens = readTokenCount(last.cachedInputTokens);
+  const reasoningOutputTokens = readTokenCount(last.reasoningOutputTokens);
+  const totalTokens = readTokenCount(last.totalTokens);
+  if (
+    inputTokens === null ||
+    outputTokens === null ||
+    cachedInputTokens === null ||
+    reasoningOutputTokens === null ||
+    totalTokens === null
+  ) {
+    return null;
+  }
+
+  const rawContextWindow = tokenUsage?.modelContextWindow;
+  const modelContextWindow =
+    rawContextWindow === undefined || rawContextWindow === null
+      ? null
+      : readTokenCount(rawContextWindow);
+  if (rawContextWindow !== undefined && rawContextWindow !== null && modelContextWindow === null) {
+    return null;
+  }
+
+  return {
+    type: "dhd_token_usage",
+    threadId,
+    turnId,
+    usage: {
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      reasoningOutputTokens,
+      totalTokens,
+    },
+    modelContextWindow,
+    timestamp,
+  };
 }
 
 function extractText(value: unknown): string {

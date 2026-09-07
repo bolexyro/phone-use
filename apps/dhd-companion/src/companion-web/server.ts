@@ -9,8 +9,10 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 import {
+  isCompanionTokenUsageEvent,
   isCompanionToolCallEvent,
   type CompanionJsonValue,
+  type CompanionTokenUsageEvent,
   type CompanionToolCallEvent,
 } from "../companion-events.js";
 import {
@@ -31,7 +33,8 @@ import type {
   CompanionProcessStatus,
   PhoneSnapshot,
   CompanionToolCall,
-  CompanionToolCallResponse
+  CompanionToolCallResponse,
+  CompanionTokenUsageSnapshot
 } from "./api.js";
 
 interface ConnectionConfig {
@@ -67,6 +70,7 @@ let phone: PhoneSnapshot | undefined;
 let lastError: string | undefined;
 let logEntries: CompanionLogEntry[] = [];
 let toolCalls: CompanionToolCall[] = [];
+let tokenUsage: CompanionTokenUsageSnapshot | undefined;
 const toolImages = new Map<string, { bytes: Buffer; mimeType: string }>();
 const sseClients = new Set<http.ServerResponse>();
 
@@ -144,7 +148,8 @@ function snapshot(): CompanionState {
     ...(phone ? { phone } : {}),
     ...(lastError ? { lastError } : {}),
     logs: [...logEntries],
-    toolCalls: [...toolCalls]
+    toolCalls: [...toolCalls],
+    ...(tokenUsage ? { tokenUsage } : {})
   };
 }
 
@@ -348,6 +353,20 @@ export function ingestCompanionToolCallEvent(value: unknown): void {
   publishState();
 }
 
+export function ingestCompanionTokenUsageEvent(value: unknown): void {
+  if (!isCompanionTokenUsageEvent(value)) return;
+  const event: CompanionTokenUsageEvent = value;
+  tokenUsage = {
+    turnId: event.turnId,
+    updatedAt: event.timestamp,
+    ...event.usage,
+    modelContextWindow: event.modelContextWindow,
+    ...(event.model ? { model: event.model } : {}),
+    ...(event.serviceTier ? { serviceTier: event.serviceTier } : {})
+  };
+  publishState();
+}
+
 function childOutput(child: ChildProcess, source: "companion" | "bridge"): void {
   for (const stream of [child.stdout, child.stderr]) {
     if (!stream) continue;
@@ -421,7 +440,10 @@ function startWorker(): CompanionState {
   });
 
   worker = child;
-  child.on("message", ingestCompanionToolCallEvent);
+  child.on("message", (message) => {
+    ingestCompanionToolCallEvent(message);
+    ingestCompanionTokenUsageEvent(message);
+  });
   childOutput(child, "companion");
   child.once("error", (error) => {
     if (worker !== child) return;

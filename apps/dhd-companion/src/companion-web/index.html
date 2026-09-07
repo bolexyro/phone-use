@@ -153,6 +153,7 @@
                 </div>
               </div>
             </div>
+
           </div>
         </section>
 
@@ -265,6 +266,62 @@
                 <span class="log-count font-mono" id="tool-count">0 calls</span>
               </div>
               <div class="console-controls">
+                <div class="token-usage-popover" id="token-usage-popover">
+                  <button
+                    id="token-usage-trigger"
+                    class="token-usage-trigger"
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls="token-usage-details"
+                    title="Hover or click to inspect the latest model usage"
+                  >
+                    <span class="token-usage-trigger-label">Tokens</span>
+                    <span id="token-usage-trigger-total" class="token-usage-trigger-total font-mono">—</span>
+                    <span id="token-usage-state" class="state-badge font-mono">NO DATA</span>
+                    <svg class="token-usage-trigger-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                  </button>
+                  <div id="token-usage-details" class="token-usage-popover-card" role="dialog" aria-label="Model token usage" aria-hidden="true">
+                    <div class="token-usage-popover-header">
+                      <span class="section-tag">Model Token Usage</span>
+                      <span class="token-usage-popover-hint font-mono">Latest model update</span>
+                    </div>
+                    <div class="token-usage-grid">
+                      <div class="token-usage-stat">
+                        <span class="token-usage-key">Input</span>
+                        <strong id="token-usage-input" class="token-usage-value font-mono">—</strong>
+                      </div>
+                      <div class="token-usage-stat">
+                        <span class="token-usage-key">Output</span>
+                        <strong id="token-usage-output" class="token-usage-value font-mono">—</strong>
+                      </div>
+                      <div class="token-usage-stat">
+                        <span class="token-usage-key">Cached input</span>
+                        <strong id="token-usage-cached-input" class="token-usage-value font-mono">—</strong>
+                      </div>
+                      <div class="token-usage-stat">
+                        <span class="token-usage-key">Reasoning output</span>
+                        <strong id="token-usage-reasoning-output" class="token-usage-value font-mono">—</strong>
+                      </div>
+                      <div class="token-usage-stat">
+                        <span class="token-usage-key">Total</span>
+                        <strong id="token-usage-total" class="token-usage-value font-mono">—</strong>
+                      </div>
+                    </div>
+                    <div class="token-usage-explainer font-mono">
+                      Input is the full context for this model update. Cached input is included in input; reasoning output is included in output; total = input + output.
+                    </div>
+                    <div class="data-row token-context-row">
+                      <span class="data-key">Context window</span>
+                      <span id="token-usage-context-window" class="data-val font-mono">—</span>
+                    </div>
+                    <div class="data-row token-cost-row">
+                      <span class="data-key">Estimated API cost</span>
+                      <strong id="token-estimated-cost" class="data-val token-cost-value font-mono">—</strong>
+                    </div>
+                    <div id="token-pricing-breakdown" class="token-pricing-breakdown font-mono">No pricing estimate available yet.</div>
+                    <div id="token-usage-meta" class="token-usage-meta font-mono">No App Server token usage reported yet.</div>
+                  </div>
+                </div>
                 <button id="clear-tool-calls" class="action-btn secondary small" type="button">
                   <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                   <span>Clear calls</span>

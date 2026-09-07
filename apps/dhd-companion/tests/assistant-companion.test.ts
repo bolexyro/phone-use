@@ -1,12 +1,62 @@
 import { describe, expect, it } from "vitest";
 
-import type { CompanionToolCallEvent } from "../src/companion-events.js";
+import type {
+  CompanionTokenUsageEvent,
+  CompanionToolCallEvent
+} from "../src/companion-events.js";
 import {
   CodexAppServerClient,
+  extractCompanionTokenUsageEvent,
   handleDynamicToolCall,
 } from "../src/assistant-companion.js";
 
 describe("Codex App Server agent-message extraction", () => {
+  it("extracts the latest per-turn token usage without cumulative thread totals", () => {
+    const event = extractCompanionTokenUsageEvent(
+      {
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "thread-usage",
+          turnId: "turn-usage",
+          tokenUsage: {
+            last: {
+              inputTokens: 1200,
+              cachedInputTokens: 800,
+              outputTokens: 240,
+              reasoningOutputTokens: 90,
+              totalTokens: 1440,
+            },
+            total: {
+              inputTokens: 9000,
+              cachedInputTokens: 6400,
+              outputTokens: 1200,
+              reasoningOutputTokens: 500,
+              totalTokens: 10200,
+            },
+            modelContextWindow: 258400,
+          },
+        },
+      },
+      1234,
+    );
+
+    expect(event).toEqual<CompanionTokenUsageEvent>({
+      type: "dhd_token_usage",
+      threadId: "thread-usage",
+      turnId: "turn-usage",
+      usage: {
+        inputTokens: 1200,
+        cachedInputTokens: 800,
+        outputTokens: 240,
+        reasoningOutputTokens: 90,
+        totalTokens: 1440,
+      },
+      modelContextWindow: 258400,
+      timestamp: 1234,
+    });
+    expect(event).not.toHaveProperty("threadTokenUsage");
+  });
+
   it("uses the final answer instead of concatenating commentary from the same turn", async () => {
     const client = new CodexAppServerClient();
     const streamed: Array<{ itemId: string; text: string }> = [];

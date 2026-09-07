@@ -131,6 +131,20 @@ const elements = {
   phoneRequest: byId<HTMLPreElement>("phone-request"),
   processState: byId<HTMLSpanElement>("process-state"),
   tokenState: byId<HTMLSpanElement>("token-state"),
+  tokenUsagePopover: byId<HTMLDivElement>("token-usage-popover"),
+  tokenUsageTrigger: byId<HTMLButtonElement>("token-usage-trigger"),
+  tokenUsageTriggerTotal: byId<HTMLSpanElement>("token-usage-trigger-total"),
+  tokenUsageDetails: byId<HTMLDivElement>("token-usage-details"),
+  tokenUsageState: byId<HTMLSpanElement>("token-usage-state"),
+  tokenUsageInput: byId<HTMLElement>("token-usage-input"),
+  tokenUsageOutput: byId<HTMLElement>("token-usage-output"),
+  tokenUsageCachedInput: byId<HTMLElement>("token-usage-cached-input"),
+  tokenUsageReasoningOutput: byId<HTMLElement>("token-usage-reasoning-output"),
+  tokenUsageTotal: byId<HTMLElement>("token-usage-total"),
+  tokenUsageContextWindow: byId<HTMLSpanElement>("token-usage-context-window"),
+  tokenEstimatedCost: byId<HTMLElement>("token-estimated-cost"),
+  tokenPricingBreakdown: byId<HTMLDivElement>("token-pricing-breakdown"),
+  tokenUsageMeta: byId<HTMLDivElement>("token-usage-meta"),
   lastError: byId<HTMLDivElement>("last-error"),
   sessionBadge: byId<HTMLSpanElement>("session-badge"),
   logCount: byId<HTMLSpanElement>("log-count"),
@@ -167,6 +181,79 @@ const elements = {
 };
 
 let toastTimer: number | undefined;
+const tokenFormatter = new Intl.NumberFormat();
+const usdFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 6,
+});
+
+interface TokenPricing {
+  inputPerMillion: number;
+  cachedInputPerMillion: number;
+  outputPerMillion: number;
+  longContextThreshold?: number;
+  longContextInputMultiplier?: number;
+  longContextOutputMultiplier?: number;
+}
+
+const DEFAULT_TOKEN_PRICING_MODEL = "gpt-5.6-luna";
+const TOKEN_PRICING: Record<string, TokenPricing> = {
+  "gpt-6-astra": {
+    inputPerMillion: 10,
+    cachedInputPerMillion: 1,
+    outputPerMillion: 50,
+    longContextThreshold: 272_000,
+    longContextInputMultiplier: 2,
+    longContextOutputMultiplier: 1.5,
+  },
+  "gpt-5.6-sol": {
+    inputPerMillion: 4,
+    cachedInputPerMillion: 0.4,
+    outputPerMillion: 20,
+    longContextThreshold: 272_000,
+    longContextInputMultiplier: 2,
+    longContextOutputMultiplier: 1.5,
+  },
+  "gpt-5.6-terra": {
+    inputPerMillion: 2,
+    cachedInputPerMillion: 0.2,
+    outputPerMillion: 12,
+    longContextThreshold: 272_000,
+    longContextInputMultiplier: 2,
+    longContextOutputMultiplier: 1.5,
+  },
+  "gpt-5.6-luna": {
+    inputPerMillion: 0.2,
+    cachedInputPerMillion: 0.02,
+    outputPerMillion: 1.2,
+    longContextThreshold: 272_000,
+    longContextInputMultiplier: 2,
+    longContextOutputMultiplier: 1.5,
+  },
+  "gpt-5.5": {
+    inputPerMillion: 5,
+    cachedInputPerMillion: 0.5,
+    outputPerMillion: 30,
+    longContextThreshold: 272_000,
+    longContextInputMultiplier: 2,
+    longContextOutputMultiplier: 1.5,
+  },
+  "gpt-5.4": {
+    inputPerMillion: 2.5,
+    cachedInputPerMillion: 0.25,
+    outputPerMillion: 15,
+    longContextThreshold: 272_000,
+    longContextInputMultiplier: 2,
+    longContextOutputMultiplier: 1.5,
+  },
+  "gpt-5.4-mini": {
+    inputPerMillion: 0.75,
+    cachedInputPerMillion: 0.075,
+    outputPerMillion: 4.5,
+  },
+};
 
 const TOAST_ICONS = {
   success: `<svg class="toast-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6L9 17l-5-5"/></svg>`,
@@ -647,6 +734,107 @@ function renderToolCalls(calls: CompanionToolCall[]): void {
   }
 }
 
+function formatTokenCount(value: number | null | undefined): string {
+  return value === null || value === undefined ? "—" : tokenFormatter.format(value);
+}
+
+function formatUsd(value: number): string {
+  return value === 0 ? "$0.00" : usdFormatter.format(value);
+}
+
+interface TokenCostEstimate {
+  model: string;
+  totalCost: number;
+  uncachedInputCost: number;
+  cachedInputCost: number;
+  outputCost: number;
+  inputRatePerMillion: number;
+  cachedInputRatePerMillion: number;
+  outputRatePerMillion: number;
+  rateLabel: string;
+}
+
+function estimateTokenCost(
+  usage: NonNullable<CompanionState["tokenUsage"]>,
+): TokenCostEstimate | null {
+  const model = usage.model?.trim() || DEFAULT_TOKEN_PRICING_MODEL;
+  const pricing = TOKEN_PRICING[model];
+  if (!pricing) return null;
+
+  const cachedInputTokens = Math.min(usage.inputTokens, usage.cachedInputTokens);
+  const uncachedInputTokens = Math.max(0, usage.inputTokens - cachedInputTokens);
+  const usesLongContextRate =
+    pricing.longContextThreshold !== undefined &&
+    usage.inputTokens > pricing.longContextThreshold;
+  const serviceTierMultiplier = usage.serviceTier === "priority" ? 2 : 1;
+  const inputMultiplier = serviceTierMultiplier * (
+    usesLongContextRate ? pricing.longContextInputMultiplier ?? 1 : 1
+  );
+  const outputMultiplier = serviceTierMultiplier * (
+    usesLongContextRate ? pricing.longContextOutputMultiplier ?? 1 : 1
+  );
+  const uncachedInputCost =
+    (uncachedInputTokens / 1_000_000) * pricing.inputPerMillion * inputMultiplier;
+  const cachedInputCost =
+    (cachedInputTokens / 1_000_000) * pricing.cachedInputPerMillion * inputMultiplier;
+  const outputCost =
+    (usage.outputTokens / 1_000_000) * pricing.outputPerMillion * outputMultiplier;
+
+  const rateNotes = [
+    usage.serviceTier === "priority" ? "Priority 2x" : "Standard",
+    usesLongContextRate ? "long-context rate" : "",
+  ].filter(Boolean);
+
+  return {
+    model,
+    totalCost: uncachedInputCost + cachedInputCost + outputCost,
+    uncachedInputCost,
+    cachedInputCost,
+    outputCost,
+    inputRatePerMillion: pricing.inputPerMillion * inputMultiplier,
+    cachedInputRatePerMillion: pricing.cachedInputPerMillion * inputMultiplier,
+    outputRatePerMillion: pricing.outputPerMillion * outputMultiplier,
+    rateLabel: rateNotes.join(" · "),
+  };
+}
+
+function renderTokenUsage(
+  usage: CompanionState["tokenUsage"],
+  isPhoneActive: boolean,
+): void {
+  const hasUsage = Boolean(usage);
+  const status = !usage ? "NO DATA" : isPhoneActive ? "LIVE" : "LAST";
+  elements.tokenUsageTriggerTotal.textContent = formatTokenCount(usage?.totalTokens);
+  elements.tokenUsageState.textContent = status;
+  elements.tokenUsageState.className = `state-badge font-mono ${usage && isPhoneActive ? "running" : ""}`;
+  elements.tokenUsageInput.textContent = formatTokenCount(usage?.inputTokens);
+  elements.tokenUsageOutput.textContent = formatTokenCount(usage?.outputTokens);
+  elements.tokenUsageCachedInput.textContent = formatTokenCount(usage?.cachedInputTokens);
+  elements.tokenUsageReasoningOutput.textContent = formatTokenCount(usage?.reasoningOutputTokens);
+  elements.tokenUsageTotal.textContent = formatTokenCount(usage?.totalTokens);
+  elements.tokenUsageContextWindow.textContent = formatTokenCount(usage?.modelContextWindow);
+  const estimate = usage ? estimateTokenCost(usage) : null;
+  elements.tokenEstimatedCost.textContent = estimate ? formatUsd(estimate.totalCost) : "—";
+  elements.tokenPricingBreakdown.textContent = !usage
+    ? "No pricing estimate available yet."
+    : !estimate
+      ? "No API rate card is configured for " + (usage.model ?? "the active model") + "."
+      : estimate.model + " · " + estimate.rateLabel +
+        " · rates " + formatUsd(estimate.inputRatePerMillion) + "/M input, " +
+        formatUsd(estimate.cachedInputRatePerMillion) + "/M cached, " +
+        formatUsd(estimate.outputRatePerMillion) + "/M output" +
+        ": " + formatTokenCount(Math.max(0, usage.inputTokens - Math.min(usage.inputTokens, usage.cachedInputTokens))) +
+        " uncached input " + formatUsd(estimate.uncachedInputCost) +
+        " + " + formatTokenCount(Math.min(usage.inputTokens, usage.cachedInputTokens)) +
+        " cached input " + formatUsd(estimate.cachedInputCost) +
+        " + " + formatTokenCount(usage.outputTokens) +
+        " output " + formatUsd(estimate.outputCost) +
+        " · cache writes not included";
+  elements.tokenUsageMeta.textContent = hasUsage && usage
+    ? `turn ${usage.turnId.slice(0, 8)}  ·  updated ${formatTime(usage.updatedAt)}`
+    : "No App Server token usage reported yet.";
+}
+
 function render(next: CompanionState): void {
   const targetStr = `${next.settings.host}:${next.settings.port}`;
   if (elements.headerTarget) elements.headerTarget.textContent = targetStr;
@@ -718,6 +906,7 @@ function render(next: CompanionState): void {
   elements.pairingCode.placeholder = "ABCD-2345";
   renderLogs(next.logs);
   renderToolCalls(next.toolCalls);
+  renderTokenUsage(next.tokenUsage, isPhoneActive);
 }
 
 function hideToast(): void {
@@ -757,6 +946,53 @@ async function refreshState(): Promise<void> {
     void api.checkConnection().then(() => api.getState().then(render)).catch(() => {});
   }
 }
+
+function setTokenUsagePopoverOpen(open: boolean): void {
+  elements.tokenUsagePopover.classList.toggle("is-open", open);
+  elements.tokenUsageTrigger.setAttribute("aria-expanded", String(open));
+  elements.tokenUsageDetails.setAttribute("aria-hidden", String(!open));
+}
+
+elements.tokenUsageTrigger.addEventListener("click", () => {
+  setTokenUsagePopoverOpen(!elements.tokenUsagePopover.classList.contains("is-open"));
+});
+
+elements.tokenUsagePopover.addEventListener("mouseenter", () => {
+  elements.tokenUsageDetails.setAttribute("aria-hidden", "false");
+});
+
+elements.tokenUsagePopover.addEventListener("mouseleave", () => {
+  if (!elements.tokenUsagePopover.classList.contains("is-open")) {
+    elements.tokenUsageDetails.setAttribute("aria-hidden", "true");
+  }
+});
+
+elements.tokenUsagePopover.addEventListener("focusin", () => {
+  elements.tokenUsageDetails.setAttribute("aria-hidden", "false");
+});
+
+elements.tokenUsagePopover.addEventListener("focusout", (event) => {
+  const nextFocusedElement = event.relatedTarget as Node | null;
+  if (!nextFocusedElement || !elements.tokenUsagePopover.contains(nextFocusedElement)) {
+    if (!elements.tokenUsagePopover.classList.contains("is-open")) {
+      elements.tokenUsageDetails.setAttribute("aria-hidden", "true");
+    }
+  }
+});
+
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (target instanceof Node && !elements.tokenUsagePopover.contains(target)) {
+    setTokenUsagePopoverOpen(false);
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && elements.tokenUsagePopover.classList.contains("is-open")) {
+    setTokenUsagePopoverOpen(false);
+    elements.tokenUsageTrigger.focus();
+  }
+});
 
 // Tab Switching
 document.querySelectorAll<HTMLButtonElement>(".tab-btn").forEach((btn) => {

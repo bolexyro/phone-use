@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createCompanionWebServer,
+  ingestCompanionTokenUsageEvent,
   ingestCompanionToolCallEvent,
 } from "../src/companion-web/server.js";
 import type { CompanionState } from "../src/companion-web/api.js";
@@ -225,5 +226,37 @@ describe("companion tool diagnostics", () => {
     expect(state.toolCalls).toHaveLength(50);
     expect(state.toolCalls[0].id).toBe("call-1");
     expect((await fetch(`${baseUrl}/api/tool-calls/call-0/images/0`)).status).toBe(404);
+  });
+
+  it("exposes the latest per-turn token usage without cumulative thread totals", async () => {
+    const { baseUrl } = await openWebServer();
+
+    ingestCompanionTokenUsageEvent({
+      type: "dhd_token_usage",
+      threadId: "thread-usage",
+      turnId: "turn-usage",
+      usage: {
+        inputTokens: 1200,
+        cachedInputTokens: 800,
+        outputTokens: 240,
+        reasoningOutputTokens: 90,
+        totalTokens: 1440,
+      },
+      modelContextWindow: 258400,
+      timestamp: 3_000,
+    });
+
+    const state = await readState(baseUrl);
+    expect(state.tokenUsage).toEqual({
+      turnId: "turn-usage",
+      updatedAt: 3_000,
+      inputTokens: 1200,
+      cachedInputTokens: 800,
+      outputTokens: 240,
+      reasoningOutputTokens: 90,
+      totalTokens: 1440,
+      modelContextWindow: 258400,
+    });
+    expect(state.tokenUsage).not.toHaveProperty("threadTokenUsage");
   });
 });
