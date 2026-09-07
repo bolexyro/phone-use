@@ -5,8 +5,8 @@ import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.policy.PolicyEngine
-import com.phonecontrol.assistant.shizuku.PhoneActionTransport
-import com.phonecontrol.assistant.shizuku.TransportResult
+import com.phonecontrol.assistant.execution.PhoneActionTransport
+import com.phonecontrol.assistant.execution.TransportResult
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull

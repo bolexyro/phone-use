@@ -1,4 +1,4 @@
-package com.phonecontrol.assistant.shizuku
+package com.phonecontrol.assistant.execution
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -8,6 +8,7 @@ import android.util.DisplayMetrics
 import android.view.Display
 import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot
+import com.phonecontrol.assistant.execution.PhoneProcessRunner
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.LinkedHashMap
@@ -55,7 +56,7 @@ private val FOCUS_REGEX = Regex(
 )
 
 /**
- * Captures the physical display using the Shizuku shell and records the
+ * Captures the physical display using the selected DHD phone shell and records the
  * package/fingerprint binding needed by the policy layer.
  *
  * This is intentionally a small v0 observer. It does not claim that every
@@ -63,9 +64,9 @@ private val FOCUS_REGEX = Regex(
  * failure is returned to the caller, which decides whether an action may run or
  * whether an already-dispatched action has an unknown outcome.
  */
-class ShizukuObservationProvider(
+class PhoneObservationProvider(
     private val context: Context,
-    private val processRunner: ShizukuProcessRunner,
+    private val processRunner: PhoneProcessRunner,
 ) {
     /**
      * Keep the compressed capture bytes beside their observation IDs so an
@@ -132,12 +133,12 @@ class ShizukuObservationProvider(
         val screenshotResult = processRunner.run(listOf("screencap", "-p"))
         if (screenshotResult.timedOut || screenshotResult.exitCode != 0) {
             return ObservationCaptureResult.Failed(
-                "Shizuku screencap failed: ${screenshotResult.stderr.ifBlank { "exit ${screenshotResult.exitCode}" }}",
+                "DHD screenshot capture failed: ${screenshotResult.stderr.ifBlank { "exit ${screenshotResult.exitCode}" }}",
             )
         }
         val screenshot = screenshotResult.stdout
         val bounds = decodeBounds(screenshot)
-            ?: return ObservationCaptureResult.Failed("Shizuku returned an invalid PNG screenshot.")
+            ?: return ObservationCaptureResult.Failed("DHD returned an invalid PNG screenshot.")
         if (bounds.first <= 0 || bounds.second <= 0) {
             return ObservationCaptureResult.Failed("The screenshot has no usable display dimensions.")
         }
@@ -198,7 +199,7 @@ class ShizukuObservationProvider(
             val detail = result.stderr.ifBlank { "exit ${result.exitCode}" }
             return FocusedWindowReadResult.Failed(
                 code = foregroundFailureCode(detail),
-                message = "Could not read the current foreground app through Shizuku: $detail",
+                message = "Could not read the current foreground app through DHD: $detail",
             )
         }
         val text = result.stdout.toString(Charsets.UTF_8)
@@ -264,8 +265,8 @@ class ShizukuObservationProvider(
         private const val MAX_RETAINED_SCREENSHOTS = 64
 
         private fun foregroundFailureCode(detail: String): String = when {
-            detail.contains("Shizuku is unavailable", ignoreCase = true) -> "SHIZUKU_UNAVAILABLE"
-            detail.contains("permission is required", ignoreCase = true) -> "SHIZUKU_PERMISSION_REQUIRED"
+            detail.contains("Wireless Debugging", ignoreCase = true) ||
+                detail.contains("DHD could not execute", ignoreCase = true) -> "DEVELOPER_MODE_UNAVAILABLE"
             else -> "FOREGROUND_UNAVAILABLE"
         }
 

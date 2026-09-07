@@ -33,11 +33,12 @@ notifications, request handoff, and observation/action execution.
   post-action observations.
 - Phone-authoritative `PolicyEngine` for app allowlisting and confirmation
   categories: send, purchase, transfer, delete and submit.
-- Official Shizuku API lifecycle and capability detection, plus a typed
+- DHD-owned Android 11+ Wireless Debugging ADB lifecycle, one-time pairing,
+  encrypted device identity storage, automatic reconnect, and a typed
   transport for `am start`, `input tap`, `input text`, `input swipe`, and
   `input keyevent`. The app builds those argv arrays itself; no raw
   provider/model shell command is accepted. Before an input action, the phone
-  captures a current shell screenshot for foreground binding and coordinate
+  captures a current ADB screenshot for foreground binding and coordinate
   bounds. Structural observation fields are compared before input.
 
 Run now creates a phone-owned request that the desktop Codex companion can
@@ -89,16 +90,20 @@ Docker's layer cache.
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Install and start the [Shizuku app](https://github.com/RikkaApps/Shizuku),
-start its service using the device-supported wireless-debugging or ADB path,
-launch DHD, and open Settings. The app reports binder
-availability and permission state and can request the Shizuku API permission.
+On Android 11 and newer, DHD connects directly to the phone's Wireless
+Debugging ADB service. DHD cannot silently enable that protected setting. Do
+this once:
 
-The typed open -> observe -> tap path has been physically smoke-tested on a
-Samsung S23 with Shizuku using the Coordinate Benchmark package. A Shizuku
-service being detected is not evidence that all input types work on a
-particular One UI/device build; the benchmark smoke path should be rerun after
-transport changes.
+1. Open Android Developer options and turn on **Wireless debugging**.
+2. In DHD, open **Settings → DHD phone access → Pair DHD once**.
+3. In Android Wireless debugging, choose **Pair device with pairing code**.
+4. Enter Android's six-digit code in DHD and tap **Pair**.
+
+After pairing, DHD reconnects by itself whenever Wireless debugging is turned
+on. You do not need a second app or a separate **Start** button. If Android
+stops DHD's process, open DHD once so its controller can restart; it will then
+continue reconnecting automatically. The direct path still needs a physical
+Samsung S23/One UI smoke test before it is considered device-validated.
 
 ## Dummy desktop bridge (open -> observe -> tap)
 
@@ -134,7 +139,7 @@ pnpm companion:bridge-demo -- --package com.phonecontrol.coordinatebenchmark --x
 
 Optional flags are `--host`, `--port`, `--token`, `--purpose`, and `--target`.
 For wireless use, prefer `PHONE_ASSISTANT_BRIDGE_TOKEN` so the token is not
-stored in shell history. The phone is still the authority: it checks Shizuku state, the per-app allowlist,
+stored in shell history. The phone is still the authority: it checks DHD's Wireless Debugging connection, the per-app allowlist,
 foreground binding, and coordinate bounds
 before it sends `input tap`. Use the Coordinate Benchmark app for repeatable
 tests; it is the only package enabled in the current physical smoke setup.
@@ -155,7 +160,7 @@ Phone typed request
         -> authenticated phone link
         -> this app's SessionCoordinator and PolicyEngine
         -> screenshot context and foreground/bounds validation
-        -> Shizuku transport
+        -> DHD-owned Wireless Debugging ADB transport
 ```
 
 The desktop side uses the Codex CLI's existing authentication and subscription

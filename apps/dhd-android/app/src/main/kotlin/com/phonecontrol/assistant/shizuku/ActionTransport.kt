@@ -1,6 +1,8 @@
-package com.phonecontrol.assistant.shizuku
+package com.phonecontrol.assistant.execution
 
 import android.content.Context
+import com.phonecontrol.assistant.execution.PhoneProcessResult
+import com.phonecontrol.assistant.execution.PhoneProcessRunner
 import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSize
 import com.phonecontrol.assistant.domain.ObservationSnapshot
@@ -40,8 +42,7 @@ sealed interface TransportResult {
 }
 
 enum class RejectionCode {
-    SHIZUKU_UNAVAILABLE,
-    SHIZUKU_PERMISSION_REQUIRED,
+    DEVELOPER_MODE_UNAVAILABLE,
     OBSERVATION_MISSING,
     OBSERVATION_FAILED,
     STALE_OBSERVATION,
@@ -55,12 +56,13 @@ interface PhoneActionTransport {
     suspend fun execute(action: PhoneAction, observation: ObservationSnapshot?): TransportResult
 }
 
-/** Shizuku-backed executor for the typed v0 action set. */
-class ShizukuActionTransport(
-    private val controller: ShizukuController,
+/** Executor for the typed v0 action set over DHD's selected phone bridge. */
+class TypedPhoneActionTransport(
     private val context: Context,
-    private val observationProvider: ShizukuObservationProvider,
-    private val processRunner: ShizukuProcessRunner,
+    private val observationProvider: PhoneObservationProvider,
+    private val processRunner: PhoneProcessRunner,
+    private val executionReadyProvider: () -> Boolean,
+    private val executionUnavailableMessageProvider: () -> String,
     /**
      * Structural observation freshness is always enabled in production. An
      * action's guard regions opt into the stricter visual comparison.
@@ -71,17 +73,10 @@ class ShizukuActionTransport(
         action: PhoneAction,
         observation: ObservationSnapshot?,
     ): TransportResult {
-        val status = controller.status.value
-        if (!status.binderAvailable) {
+        if (!executionReadyProvider()) {
             return TransportResult.Rejected(
-                RejectionCode.SHIZUKU_UNAVAILABLE,
-                "Shizuku is unavailable; the action was not executed.",
-            )
-        }
-        if (!status.permissionGranted) {
-            return TransportResult.Rejected(
-                RejectionCode.SHIZUKU_PERMISSION_REQUIRED,
-                "Shizuku permission is required; the action was not executed.",
+                RejectionCode.DEVELOPER_MODE_UNAVAILABLE,
+                "${executionUnavailableMessageProvider()} The action was not executed.",
             )
         }
         if (observation == null) {
@@ -382,14 +377,14 @@ class ShizukuActionTransport(
     }
 
     private fun commandResult(
-        result: ShizukuProcessResult,
+        result: PhoneProcessResult,
         successMessage: String,
     ): TransportResult {
         if (result.timedOut || result.exitCode == null || result.exitCode != 0) {
             val detail = result.stderr.ifBlank { "exit ${result.exitCode}" }
             return TransportResult.Rejected(
                 RejectionCode.COMMAND_FAILED,
-                "Shizuku command failed: $detail",
+                "Phone command failed: $detail",
             )
         }
         return TransportResult.Succeeded(successMessage)
@@ -419,9 +414,8 @@ class ShizukuActionTransport(
         require(text.none { it.code < 0x20 || it.code == 0x7f }) {
             "Android input text does not accept control characters."
         }
-        // `input text` uses `%s` as its documented space escape. The argv is
-        // passed directly through Shizuku, so shell quoting is neither needed
-        // nor permitted here.
+        // `input text` uses `%s` as its documented space escape. The typed
+        // argv is quoted by the local ADB runner after this validation.
         return text.replace(" ", "%s")
     }
 

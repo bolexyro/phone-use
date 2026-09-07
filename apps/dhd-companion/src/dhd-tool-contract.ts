@@ -58,9 +58,9 @@ const GUARD_REGIONS_GUIDANCE =
 
 const DHD_TOOL_DESCRIPTIONS: Record<DhdToolName, string> = {
   dhd_list_allowed_apps:
-    "Reports the phone's current app-access mode. In restricted mode, the response includes the explicitly allowed package names. With Full Access, the default response confirms that any launchable app may be used without enumerating every app. Set includeAll=true only when the complete launchable-app list is needed.",
+    "Reports the phone's current app-access mode. In restricted mode, the response includes the explicitly allowed package names. With Full Access, the default response confirms that any launchable app may be used without enumerating every app. Set includeAll=true to list every launchable app available under the current access mode: the complete phone catalog with Full Access, or the complete allowlist in restricted mode.",
   dhd_browse_app:
-    "Searches the phone's launchable app catalog by app name or package name and returns matching app labels and package names. Use this to identify a specific package for dhd_open_app. In restricted mode, results are limited to the explicit allowlist. This tool does not launch or interact with an app.",
+    "Searches the phone's launchable app catalog by app names or package names and returns each match's app label, package name, and whether DHD can use it. Full Access makes every match usable; restricted mode makes only explicitly allowlisted packages usable. Use this to identify a specific package for dhd_open_app. This tool does not launch or interact with an app.",
   dhd_get_foreground_app:
     "Reports the Android package, activity, and display context currently in the foreground. This tool is read-only: it does not capture a screenshot, create an observation ID, or authorize an action. Use dhd_observe before sending phone input; dhd_open_app establishes its own launch baseline.",
   dhd_observe:

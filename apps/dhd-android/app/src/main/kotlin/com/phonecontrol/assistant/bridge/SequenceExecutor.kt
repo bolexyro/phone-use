@@ -13,8 +13,8 @@ import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.domain.TypeAction
 import com.phonecontrol.assistant.domain.WaitAction
 import com.phonecontrol.assistant.session.ActionExecutionResult
-import com.phonecontrol.assistant.shizuku.ObservationCaptureResult
-import com.phonecontrol.assistant.shizuku.TransportResult
+import com.phonecontrol.assistant.execution.ObservationCaptureResult
+import com.phonecontrol.assistant.execution.TransportResult
 
 internal data class SequenceStepResult(
     val index: Int,

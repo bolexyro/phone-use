@@ -1,10 +1,10 @@
-package com.phonecontrol.assistant.shizuku
+package com.phonecontrol.assistant.execution
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-class ShizukuObservationProviderTest {
+class PhoneObservationProviderTest {
     @Test
     fun `parses current focus package and expands relative activity`() {
         val focused = parseFocusedWindow(

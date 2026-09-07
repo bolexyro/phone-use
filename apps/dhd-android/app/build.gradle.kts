@@ -8,6 +8,7 @@ plugins {
 android {
     namespace = "com.phonecontrol.assistant"
     compileSdk = 35
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.dhd.assistant"
@@ -15,6 +16,20 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     compileOptions {
@@ -28,10 +43,12 @@ android {
 
     buildFeatures {
         compose = true
+        prefab = true
     }
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        resources.excludes += "/META-INF/versions/**"
     }
 }
 
@@ -53,8 +70,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
+    implementation("io.github.vvb2060.ndk:boringssl:20250114")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.80")
+    implementation("org.conscrypt:conscrypt-android:2.5.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

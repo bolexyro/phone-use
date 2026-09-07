@@ -8,9 +8,10 @@ The desktop side of the pivot has two small local processes:
    The companion uses the same phone-tool dispatcher directly, so a normal
    companion turn does not depend on a second MCP stdio process.
 
-The Android app remains the authority for Shizuku, app allowlisting,
-confirmation boundaries, and stop/pause state. A request is kept queued on the
-phone until Shizuku is ready; the companion's normal poll is also the heartbeat
+The Android app remains the authority for its DHD-owned Wireless Debugging ADB
+connection, app allowlisting, confirmation boundaries, and stop/pause state. A
+request is kept queued on the phone until the developer-mode connection is
+ready; the companion's normal poll is also the heartbeat
 used by the existing desktop-companion recovery card. The companion claims a
 request before starting a turn and releases it if the desktop side fails, so a
 temporary disconnect does not silently lose the user's request. A completed
@@ -38,7 +39,7 @@ phone-tool dispatcher (shared with companion:tools)
 Phone Control Assistant (NDJSON bridge)
         |
         v
-SessionCoordinator -> PolicyEngine -> Shizuku typed argv
+SessionCoordinator -> PolicyEngine -> DHD-owned Wireless Debugging ADB typed argv
 ```
 
 ## Configure Codex

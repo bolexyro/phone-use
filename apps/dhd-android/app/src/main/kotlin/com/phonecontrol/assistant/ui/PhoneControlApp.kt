@@ -2,6 +2,8 @@ package com.phonecontrol.assistant.ui
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -36,8 +38,6 @@ import com.phonecontrol.assistant.PhoneControlApplication
 import com.phonecontrol.assistant.apps.InstalledAppsRepository
 import com.phonecontrol.assistant.data.DHD_CONVERSATION_ID
 import com.phonecontrol.assistant.domain.ReasoningEffort
-
-private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
 data class AssistantColorScheme(
     val isDark: Boolean,
@@ -240,8 +240,8 @@ fun PhoneControlApp(
     val coordinator = application.sessionCoordinator
     val conversationStore = application.conversationStore
     val permissions = application.appPermissionRepository
-    val shizukuController = application.shizukuController
-    val shizukuStatus by shizukuController.status.collectAsState()
+    val developerModeController = application.developerModeController
+    val developerStatus by developerModeController.status.collectAsState()
     val companionConnected by application.devBridgeServer.companionConnected.collectAsState()
     val apps = remember { InstalledAppsRepository(context).listLaunchableUserApps() }
 
@@ -319,16 +319,10 @@ fun PhoneControlApp(
                             onStartFresh = {
                                 conversationStore.deleteConversation(DHD_CONVERSATION_ID)
                             },
-                            shizukuStatus = shizukuStatus,
+                            developerStatus = developerStatus,
                             companionConnected = companionConnected,
-                            onOpenShizuku = {
-                                val shizukuIntent = context.packageManager
-                                    .getLaunchIntentForPackage(SHIZUKU_PACKAGE)
-                                if (shizukuIntent != null) {
-                                    context.startActivity(shizukuIntent)
-                                } else {
-                                    navController.navigate(AppRoutes.SETTINGS)
-                                }
+                            onOpenDeveloperOptions = {
+                                openDeveloperOptions(context)
                             },
                             onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
                         )
@@ -338,13 +332,19 @@ fun PhoneControlApp(
                         SettingsScreen(
                             apps = apps,
                             permissions = permissions,
-                            shizukuStatus = shizukuStatus,
+                            developerStatus = developerStatus,
                             bridgeServer = application.devBridgeServer,
                             themeMode = themeMode,
                             onSelectThemeMode = setThemeMode,
                             visibleReasoningEfforts = visibleReasoningEfforts,
                             onSetReasoningEffortVisibility = setReasoningEffortVisibility,
-                            onRequestShizukuPermission = { shizukuController.requestPermission() },
+                            onPairDhd = { pairingCode -> developerModeController.pair(pairingCode) },
+                            onStartPairingNotification = {
+                                developerModeController.startPairingNotification().also { started ->
+                                    if (started) openDeveloperOptions(context)
+                                }
+                            },
+                            onOpenDeveloperOptions = { openDeveloperOptions(context) },
                             onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
                             onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
                             onBack = { navController.popBackStack() },
@@ -368,5 +368,16 @@ fun PhoneControlApp(
                 }
             }
         }
+    }
+}
+
+private fun openDeveloperOptions(context: Context) {
+    runCatching {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(":settings:fragment_args_key", "toggle_adb_wireless")
+            },
+        )
     }
 }

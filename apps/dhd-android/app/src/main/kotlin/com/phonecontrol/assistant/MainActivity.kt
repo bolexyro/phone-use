@@ -49,7 +49,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         (application as? PhoneControlApplication)?.let { app ->
-            app.shizukuController.refresh()
+            app.developerModeController.refresh()
             app.devBridgeServer.requestCodexWarmup()
         }
     }

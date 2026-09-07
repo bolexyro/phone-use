@@ -68,7 +68,34 @@ class DevBridgeServerTest {
     }
 
     @Test
-    fun `browse response contains only app labels and package names`() {
+    fun `restricted access returns all requested launchable apps in the allowlist`() {
+        val response = buildAllowedAppsResponse(
+            requestId = "request-5",
+            fullAccess = false,
+            allowedPackages = setOf("com.example.alfred"),
+            includeAll = true,
+            apps = listOf(
+                InstalledUserApp(packageName = "com.example.alfred", label = "Alfred"),
+            ),
+        )
+
+        assertFalse(response.getBoolean("fullAccess"))
+        assertEquals("allowlist", response.getString("accessMode"))
+        assertFalse(response.getBoolean("canListAllApps"))
+        assertEquals(1, response.getInt("count"))
+        assertEquals(
+            "[{\"appLabel\":\"Alfred\",\"packageName\":\"com.example.alfred\"}]",
+            response.getJSONArray("apps").toString(),
+        )
+        assertEquals(
+            "Restricted access is enabled. Returned all launchable apps in the allowlist.",
+            response.getString("message"),
+        )
+        assertFalse(response.has("allowedPackages"))
+    }
+
+    @Test
+    fun `browse response includes whether each app can be used`() {
         val response = buildBrowseAppsResponse(
             requestId = "request-4",
             query = "alfred",
@@ -81,6 +108,27 @@ class DevBridgeServerTest {
         assertEquals("alfred", response.getString("query"))
         assertEquals("Alfred", response.getJSONArray("apps").getJSONObject(0).getString("appLabel"))
         assertEquals("com.example.alfred", response.getJSONArray("apps").getJSONObject(0).getString("packageName"))
+        assertTrue(response.getJSONArray("apps").getJSONObject(0).getBoolean("canUse"))
         assertFalse(response.has("icon"))
+    }
+
+    @Test
+    fun `restricted browse returns matching apps with per-app access`() {
+        val response = buildBrowseAppsResponse(
+            requestId = "request-6",
+            query = "app",
+            fullAccess = false,
+            allowedPackages = setOf("com.example.allowed"),
+            apps = listOf(
+                InstalledUserApp(packageName = "com.example.allowed", label = "Allowed App"),
+                InstalledUserApp(packageName = "com.example.blocked", label = "Blocked App"),
+            ),
+            truncated = false,
+        )
+
+        val apps = response.getJSONArray("apps")
+        assertEquals(2, apps.length())
+        assertTrue(apps.getJSONObject(0).getBoolean("canUse"))
+        assertFalse(apps.getJSONObject(1).getBoolean("canUse"))
     }
 }

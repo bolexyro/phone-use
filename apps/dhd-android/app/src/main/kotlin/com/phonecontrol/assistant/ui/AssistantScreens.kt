@@ -71,6 +71,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -141,7 +142,8 @@ import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.userFacingActivityLabel
 import com.phonecontrol.assistant.session.SessionCoordinator
 import com.phonecontrol.assistant.session.SessionState
-import com.phonecontrol.assistant.shizuku.ShizukuStatus
+import com.phonecontrol.assistant.developer.DeveloperConnectionState
+import com.phonecontrol.assistant.developer.DeveloperModeStatus
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import java.text.DateFormat
@@ -166,9 +168,9 @@ fun AssistantScreen(
     onSteerRequest: (String) -> Boolean,
     onOpenSettings: () -> Unit,
     onStartFresh: () -> Unit,
-    shizukuStatus: ShizukuStatus,
+    developerStatus: DeveloperModeStatus,
     companionConnected: Boolean,
-    onOpenShizuku: () -> Unit,
+    onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
@@ -329,10 +331,10 @@ fun AssistantScreen(
                         ConversationTimeline(
                             timeline = recentTimeline,
                             state = state,
-                            shizukuStatus = shizukuStatus,
+                            developerStatus = developerStatus,
                             companionConnected = companionConnected,
                             onOpenSettings = onOpenSettings,
-                            onOpenShizuku = onOpenShizuku,
+                            onOpenDeveloperOptions = onOpenDeveloperOptions,
                             onOpenCompanion = onOpenCompanion,
                             onStopSession = onStopSession,
                             modifier = Modifier.fillMaxSize(),
@@ -449,7 +451,7 @@ fun AssistantScreen(
             text = {
                 Text(
                     "This clears the DHD conversation timeline and rotates its stored Codex thread " +
-                        "binding. App permissions and Shizuku configuration remain unchanged.",
+                        "binding. App permissions and DHD's local phone connection remain unchanged.",
                     fontSize = 14.sp,
                     lineHeight = 20.sp,
                 )
@@ -617,10 +619,10 @@ private fun TimelineItem.Activity.isDhdActionActivity(): Boolean =
 private fun ConversationTimeline(
     timeline: List<TimelineItem>,
     state: SessionState,
-    shizukuStatus: ShizukuStatus,
+    developerStatus: DeveloperModeStatus,
     companionConnected: Boolean,
     onOpenSettings: () -> Unit,
-    onOpenShizuku: () -> Unit,
+    onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
     modifier: Modifier = Modifier,
@@ -669,10 +671,10 @@ private fun ConversationTimeline(
                 TaskGroupCard(
                     group = group,
                     state = state,
-                    shizukuStatus = shizukuStatus,
+                    developerStatus = developerStatus,
                     companionConnected = companionConnected,
                     onOpenSettings = onOpenSettings,
-                    onOpenShizuku = onOpenShizuku,
+                    onOpenDeveloperOptions = onOpenDeveloperOptions,
                     onOpenCompanion = onOpenCompanion,
                     onStopSession = onStopSession,
                     active = state.isActive() && state.sessionIdOrNullForUi() == group.id,
@@ -687,10 +689,10 @@ private fun ConversationTimeline(
 private fun TaskGroupCard(
     group: TaskGroup,
     state: SessionState,
-    shizukuStatus: ShizukuStatus,
+    developerStatus: DeveloperModeStatus,
     companionConnected: Boolean,
     onOpenSettings: () -> Unit,
-    onOpenShizuku: () -> Unit,
+    onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
     active: Boolean,
@@ -723,10 +725,10 @@ private fun TaskGroupCard(
                 is SessionState.Running -> RunningStatusIndicator(
                     currentPurpose = state.currentPurpose,
                     startedAtEpochMs = state.startedAtEpochMs,
-                    shizukuStatus = shizukuStatus,
+                    developerStatus = developerStatus,
                     companionConnected = companionConnected,
                     onOpenSettings = onOpenSettings,
-                    onOpenShizuku = onOpenShizuku,
+                    onOpenDeveloperOptions = onOpenDeveloperOptions,
                     onOpenCompanion = onOpenCompanion,
                     onStopSession = onStopSession,
                 )
@@ -771,20 +773,25 @@ private fun TaskGroupCard(
 private fun RunningStatusIndicator(
     currentPurpose: String,
     startedAtEpochMs: Long,
-    shizukuStatus: ShizukuStatus,
+    developerStatus: DeveloperModeStatus,
     companionConnected: Boolean,
     onOpenSettings: () -> Unit,
-    onOpenShizuku: () -> Unit,
+    onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
 ) {
     val elapsedSeconds = rememberElapsedSeconds(startedAtEpochMs)
-    val shizukuCheckFinished = !shizukuStatus.message.startsWith("Checking", ignoreCase = true)
-    if (shizukuCheckFinished && !shizukuStatus.privilegedApiReady) {
-        ShizukuRecoveryCard(
-            status = shizukuStatus,
+    val developerConnectionNeedsAction = developerStatus.state in setOf(
+        DeveloperConnectionState.PAIRING_REQUIRED,
+        DeveloperConnectionState.WIRELESS_DEBUGGING_OFF,
+        DeveloperConnectionState.UNSUPPORTED,
+        DeveloperConnectionState.ERROR,
+    )
+    if (developerConnectionNeedsAction) {
+        DeveloperConnectionRecoveryCard(
+            status = developerStatus,
             onOpenSettings = onOpenSettings,
-            onOpenShizuku = onOpenShizuku,
+            onOpenDeveloperOptions = onOpenDeveloperOptions,
         )
         return
     }
@@ -941,19 +948,24 @@ private fun CompanionRecoveryCard(
 }
 
 @Composable
-private fun ShizukuRecoveryCard(
-    status: ShizukuStatus,
+private fun DeveloperConnectionRecoveryCard(
+    status: DeveloperModeStatus,
     onOpenSettings: () -> Unit,
-    onOpenShizuku: () -> Unit,
+    onOpenDeveloperOptions: () -> Unit,
 ) {
     val colors = LocalAssistantColors.current
     RecoveryCard(
         icon = R.drawable.ic_shield,
-        title = if (status.binderAvailable) "Shizuku permission needed" else "Shizuku isn’t running",
+        title = when (status.state) {
+            DeveloperConnectionState.PAIRING_REQUIRED -> "Pair DHD once"
+            DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> "Wireless Debugging is off"
+            DeveloperConnectionState.UNSUPPORTED -> "Android version unsupported"
+            else -> "DHD phone connection unavailable"
+        },
         detail = "DHD is paused before the next phone action. ${status.message}",
         accent = colors.warningAmber,
-        actionLabel = "Open Shizuku",
-        onAction = onOpenShizuku,
+        actionLabel = "Open Developer options",
+        onAction = onOpenDeveloperOptions,
         secondaryActionLabel = "DHD settings",
         onSecondaryAction = onOpenSettings,
     )
@@ -2203,13 +2215,15 @@ private fun ActionOrSendButton(
 fun SettingsScreen(
     apps: List<InstalledUserApp>,
     permissions: AppPermissionRepository,
-    shizukuStatus: ShizukuStatus,
+    developerStatus: DeveloperModeStatus,
     bridgeServer: DevBridgeServer,
     themeMode: ThemeMode,
     onSelectThemeMode: (ThemeMode) -> Unit,
     visibleReasoningEfforts: List<ReasoningEffort>,
     onSetReasoningEffortVisibility: (ReasoningEffort, Boolean) -> Unit,
-    onRequestShizukuPermission: () -> Unit,
+    onPairDhd: (String) -> Unit,
+    onStartPairingNotification: () -> Boolean,
+    onOpenDeveloperOptions: () -> Unit,
     onOpenApprovedApps: () -> Unit,
     onOpenCompanion: () -> Unit,
     onBack: () -> Unit,
@@ -2220,6 +2234,76 @@ fun SettingsScreen(
     val lanAddresses = remember { bridgeServer.lanIpv4Addresses() }
     var isAppearanceMenuOpen by remember { mutableStateOf(false) }
     var isReasoningMenuOpen by remember { mutableStateOf(false) }
+    var isPairDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var pairingCode by rememberSaveable { mutableStateOf("") }
+    var pairingNotificationUnavailable by rememberSaveable { mutableStateOf(false) }
+
+    if (isPairDialogOpen) {
+        AlertDialog(
+            onDismissRequest = { isPairDialogOpen = false },
+            title = { Text("Pair DHD with Wireless Debugging") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "You only do this once. The easiest way is to start the DHD notification, choose “Pair device with pairing code” in Android, then enter the six-digit code from the notification.",
+                        color = colors.textSecondary,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            if (onStartPairingNotification()) {
+                                pairingNotificationUnavailable = false
+                                isPairDialogOpen = false
+                            } else {
+                                pairingNotificationUnavailable = true
+                            }
+                        },
+                    ) {
+                        Text("Start pairing in notification")
+                    }
+                    if (pairingNotificationUnavailable) {
+                        Text(
+                            "DHD notifications are disabled. Use the code box below, or enable DHD notifications in Android settings.",
+                            color = colors.textSecondary,
+                        )
+                    }
+                    Text(
+                        "If your phone hides notification input, use this in-app fallback:",
+                        color = colors.textSecondary,
+                    )
+                    OutlinedButton(onClick = onOpenDeveloperOptions) {
+                        Text("Open Developer options")
+                    }
+                    OutlinedTextField(
+                        value = pairingCode,
+                        onValueChange = { value ->
+                            if (value.length <= 6 && value.all(Char::isDigit)) pairingCode = value
+                        },
+                        label = { Text("Pairing code") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = pairingCode.length == 6,
+                    onClick = {
+                        isPairDialogOpen = false
+                        pairingNotificationUnavailable = false
+                        onPairDhd(pairingCode)
+                    },
+                ) {
+                    Text("Pair")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    isPairDialogOpen = false
+                    pairingNotificationUnavailable = false
+                }) { Text("Cancel") }
+            },
+        )
+    }
 
     Scaffold(
         containerColor = colors.background,
@@ -2553,20 +2637,20 @@ fun SettingsScreen(
 
                         HorizontalDivider(thickness = 2.dp, color = colors.cardDivider)
 
-                        // Shizuku Service Row (with terminal/service icon)
+                        // DHD local phone connection row
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
-                                .clickable(enabled = shizukuStatus.binderAvailable && !shizukuStatus.permissionGranted) {
-                                    onRequestShizukuPermission()
+                                .clickable(enabled = developerStatus.state != DeveloperConnectionState.UNSUPPORTED) {
+                                    if (!developerStatus.privilegedApiReady) isPairDialogOpen = true
                                 }
                                 .padding(horizontal = 16.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_terminal),
-                                contentDescription = "Shizuku",
+                                contentDescription = "Wireless Debugging",
                                 tint = colors.textPrimary,
                                 modifier = Modifier.size(22.dp),
                             )
@@ -2576,7 +2660,7 @@ fun SettingsScreen(
                                     .padding(start = 14.dp),
                             ) {
                                 Text(
-                                    text = "Shizuku service",
+                                    text = "DHD phone access",
                                     fontWeight = FontWeight.Medium,
                                     color = colors.textPrimary,
                                     fontSize = 15.sp,
@@ -2584,12 +2668,14 @@ fun SettingsScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = if (shizukuStatus.permissionGranted) {
-                                        "Shizuku is ready"
-                                    } else if (shizukuStatus.binderAvailable) {
-                                        "Permission required"
-                                    } else {
-                                        "Service unavailable"
+                                    text = when (developerStatus.state) {
+                                        DeveloperConnectionState.READY -> "Connected through Wireless Debugging"
+                                        DeveloperConnectionState.CONNECTING,
+                                        DeveloperConnectionState.CHECKING -> "Connecting automatically…"
+                                        DeveloperConnectionState.PAIRING_REQUIRED -> "Pair DHD once"
+                                        DeveloperConnectionState.WIRELESS_DEBUGGING_OFF -> "Turn on Wireless debugging"
+                                        DeveloperConnectionState.UNSUPPORTED -> "Android 11+ required"
+                                        DeveloperConnectionState.ERROR -> developerStatus.message
                                     },
                                     fontSize = 12.sp,
                                     color = colors.textSecondary,
@@ -2598,8 +2684,8 @@ fun SettingsScreen(
                                 )
                             }
                             Text(
-                                text = if (shizukuStatus.permissionGranted) "Active" else "Action needed",
-                                color = if (shizukuStatus.permissionGranted) colors.textSecondary else colors.accentBlue,
+                                text = if (developerStatus.privilegedApiReady) "Active" else "Action needed",
+                                color = if (developerStatus.privilegedApiReady) colors.textSecondary else colors.accentBlue,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
                                 modifier = Modifier.padding(start = 8.dp),

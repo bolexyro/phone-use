@@ -33,10 +33,10 @@ import com.phonecontrol.assistant.session.ActionExecutionResult
 import com.phonecontrol.assistant.session.AssistantForegroundService
 import com.phonecontrol.assistant.session.SessionCoordinator
 import com.phonecontrol.assistant.session.SessionState
-import com.phonecontrol.assistant.shizuku.ForegroundAppResult
-import com.phonecontrol.assistant.shizuku.ObservationCaptureResult
-import com.phonecontrol.assistant.shizuku.ShizukuObservationProvider
-import com.phonecontrol.assistant.shizuku.TransportResult
+import com.phonecontrol.assistant.execution.ForegroundAppResult
+import com.phonecontrol.assistant.execution.ObservationCaptureResult
+import com.phonecontrol.assistant.execution.PhoneObservationProvider
+import com.phonecontrol.assistant.execution.TransportResult
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
@@ -85,7 +85,7 @@ import org.json.JSONObject
 class DevBridgeServer(
     private val context: Context,
     private val coordinator: SessionCoordinator,
-    private val observationProvider: ShizukuObservationProvider,
+    private val observationProvider: PhoneObservationProvider,
     private val allowedPackagesProvider: () -> Set<String>,
     private val port: Int = DEFAULT_PORT,
     private val fullAccessProvider: () -> Boolean = { false },
@@ -790,29 +790,28 @@ class DevBridgeServer(
     ) {
         val fullAccess = fullAccessProvider()
         val includeAll = json.optBoolean("includeAll", false)
+        val allowedPackages = if (fullAccess) emptySet() else allowedPackagesProvider()
         coordinator.recordPurpose(
-            purpose = if (includeAll) "Listing all launchable apps" else "Listing allowed apps",
+            purpose = when {
+                includeAll && fullAccess -> "Listing all launchable apps"
+                includeAll -> "Listing all allowed launchable apps"
+                else -> "Listing allowed apps"
+            },
             toolName = DHD_LIST_ALLOWED_APPS_TOOL,
         )
-        if (includeAll && !fullAccess) {
-            write(
-                writer,
-                errorResponse(requestId, "Full Access is required to enumerate all launchable apps.")
-                    .put("code", "FULL_ACCESS_REQUIRED")
-                    .put("fullAccess", false)
-                    .put("accessMode", "allowlist")
-                    .put("canListAllApps", false),
-            )
-            return
-        }
         write(
             writer,
             buildAllowedAppsResponse(
                 requestId = requestId,
                 fullAccess = fullAccess,
                 includeAll = includeAll,
-                allowedPackages = if (fullAccess) emptySet() else allowedPackagesProvider(),
-                apps = if (includeAll) installedAppsRepository.listLaunchableApps() else emptyList(),
+                allowedPackages = allowedPackages,
+                apps = if (includeAll) {
+                    installedAppsRepository.listLaunchableApps()
+                        .filter { fullAccess || it.packageName in allowedPackages }
+                } else {
+                    emptyList()
+                },
             ),
         )
     }
@@ -842,7 +841,6 @@ class DevBridgeServer(
         val allowedPackages = if (fullAccess) emptySet() else allowedPackagesProvider()
         val candidates = installedAppsRepository.listLaunchableApps()
             .asSequence()
-            .filter { fullAccess || it.packageName in allowedPackages }
             .filter {
                 it.label.contains(query, ignoreCase = true) ||
                     it.packageName.contains(query, ignoreCase = true)
@@ -855,6 +853,7 @@ class DevBridgeServer(
                 requestId = requestId,
                 query = query,
                 fullAccess = fullAccess,
+                allowedPackages = allowedPackages,
                 apps = returnedApps,
                 truncated = candidates.size > returnedApps.size,
             ),
@@ -1636,10 +1635,10 @@ class DevBridgeServer(
         .put("message", message)
 
     private fun observationFailureCode(message: String): String =
-        if (message.contains("Shizuku", ignoreCase = true) &&
-            message.contains("unavailable", ignoreCase = true)
+        if (message.contains("Wireless Debugging", ignoreCase = true) ||
+            message.contains("DHD could not execute", ignoreCase = true)
         ) {
-            "SHIZUKU_UNAVAILABLE"
+            "DEVELOPER_MODE_UNAVAILABLE"
         } else {
             "OBSERVATION_FAILED"
         }
@@ -1743,11 +1742,18 @@ internal fun buildAllowedAppsResponse(
         .put("accessMode", if (fullAccess) "full_access" else "allowlist")
         .put("canListAllApps", fullAccess)
 
-    if (fullAccess && includeAll) {
+    if (includeAll) {
         response
             .put("apps", JSONArray(apps.map(::buildAppResponse)))
             .put("count", apps.size)
-            .put("message", "Full Access is enabled. Returned all launchable apps on the phone.")
+            .put(
+                "message",
+                if (fullAccess) {
+                    "Full Access is enabled. Returned all launchable apps on the phone."
+                } else {
+                    "Restricted access is enabled. Returned all launchable apps in the allowlist."
+                },
+            )
     } else if (fullAccess) {
         response.put("message", "Full Access is enabled. You can use any launchable app on the phone.")
     } else {
@@ -1764,6 +1770,7 @@ internal fun buildBrowseAppsResponse(
     requestId: String,
     query: String,
     fullAccess: Boolean,
+    allowedPackages: Set<String> = emptySet(),
     apps: List<InstalledUserApp>,
     truncated: Boolean,
 ): JSONObject = JSONObject()
@@ -1773,13 +1780,27 @@ internal fun buildBrowseAppsResponse(
     .put("query", query)
     .put("fullAccess", fullAccess)
     .put("accessMode", if (fullAccess) "full_access" else "allowlist")
-    .put("apps", JSONArray(apps.map(::buildAppResponse)))
+    .put(
+        "apps",
+        JSONArray(
+            apps.map { app ->
+                buildAppResponse(
+                    app = app,
+                    canUse = fullAccess || app.packageName in allowedPackages,
+                )
+            },
+        ),
+    )
     .put("count", apps.size)
     .put("truncated", truncated)
 
-private fun buildAppResponse(app: InstalledUserApp): JSONObject = JSONObject()
-    .put("appLabel", app.label)
-    .put("packageName", app.packageName)
+private fun buildAppResponse(app: InstalledUserApp, canUse: Boolean? = null): JSONObject {
+    val response = JSONObject()
+        .put("appLabel", app.label)
+        .put("packageName", app.packageName)
+    if (canUse != null) response.put("canUse", canUse)
+    return response
+}
 
 private fun ActionExecutionResult.isSuccessful(): Boolean = this is ActionExecutionResult.TransportFinished &&
     this.result is TransportResult.Succeeded

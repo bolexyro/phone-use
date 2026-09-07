@@ -12,8 +12,8 @@ import com.phonecontrol.assistant.data.RunStatus
 import com.phonecontrol.assistant.policy.PolicyContext
 import com.phonecontrol.assistant.policy.PolicyDecision
 import com.phonecontrol.assistant.policy.PolicyEngine
-import com.phonecontrol.assistant.shizuku.PhoneActionTransport
-import com.phonecontrol.assistant.shizuku.TransportResult
+import com.phonecontrol.assistant.execution.PhoneActionTransport
+import com.phonecontrol.assistant.execution.TransportResult
 import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -151,8 +151,8 @@ class SessionCoordinator(
     /** Return the active phone request until a desktop companion claims it. */
     fun pendingRequest(): PendingRequest? = synchronized(lock) {
         val running = _state.value as? SessionState.Running ?: return@synchronized null
-        // Keep the request on the phone while Shizuku (the current phone
-        // execution prerequisite) is unavailable. The companion must not
+        // Keep the request on the phone while the local developer-mode
+        // execution prerequisite is unavailable. The companion must not
         // start an LLM turn that cannot safely reach the phone.
         if (!phoneActionsReadyProvider()) return@synchronized null
         if (claimedRequestSessionId == running.sessionId) return@synchronized null

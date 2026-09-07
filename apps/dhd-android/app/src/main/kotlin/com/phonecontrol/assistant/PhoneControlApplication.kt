@@ -4,21 +4,21 @@ import android.app.Application
 import com.phonecontrol.assistant.apps.AppPermissionRepository
 import com.phonecontrol.assistant.bridge.DevBridgeServer
 import com.phonecontrol.assistant.data.ConversationStore
+import com.phonecontrol.assistant.developer.DhdAdbController
+import com.phonecontrol.assistant.developer.DhdAdbProcessRunner
 import com.phonecontrol.assistant.policy.PolicyEngine
 import com.phonecontrol.assistant.session.SessionCoordinator
-import com.phonecontrol.assistant.shizuku.ShizukuActionTransport
-import com.phonecontrol.assistant.shizuku.ShizukuController
-import com.phonecontrol.assistant.shizuku.ShizukuObservationProvider
-import com.phonecontrol.assistant.shizuku.ShizukuProcessRunner
+import com.phonecontrol.assistant.execution.PhoneObservationProvider
+import com.phonecontrol.assistant.execution.TypedPhoneActionTransport
 
 class PhoneControlApplication : Application() {
     lateinit var appPermissionRepository: AppPermissionRepository
         private set
-    lateinit var shizukuController: ShizukuController
+    lateinit var developerModeController: DhdAdbController
         private set
-    lateinit var shizukuProcessRunner: ShizukuProcessRunner
+    lateinit var processRunner: DhdAdbProcessRunner
         private set
-    lateinit var observationProvider: ShizukuObservationProvider
+    lateinit var observationProvider: PhoneObservationProvider
         private set
     lateinit var sessionCoordinator: SessionCoordinator
         private set
@@ -30,24 +30,25 @@ class PhoneControlApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         appPermissionRepository = AppPermissionRepository(this)
-        shizukuController = ShizukuController().also { it.start() }
-        shizukuProcessRunner = ShizukuProcessRunner(shizukuController)
-        observationProvider = ShizukuObservationProvider(this, shizukuProcessRunner)
+        developerModeController = DhdAdbController(this).also { it.start() }
+        processRunner = DhdAdbProcessRunner(developerModeController)
+        observationProvider = PhoneObservationProvider(this, processRunner)
         conversationStore = ConversationStore(this)
         sessionCoordinator = SessionCoordinator(
             enabledPackagesProvider = { appPermissionRepository.enabledPackages() },
             // Structural observation checks are always enabled; guard-region
             // fingerprints add the optional stricter visual check per action.
             policyEngine = PolicyEngine(enforceObservationFreshness = true),
-            transport = ShizukuActionTransport(
-                controller = shizukuController,
+            transport = TypedPhoneActionTransport(
                 context = this,
                 observationProvider = observationProvider,
-                processRunner = shizukuProcessRunner,
+                processRunner = processRunner,
+                executionReadyProvider = { developerModeController.status.value.privilegedApiReady },
+                executionUnavailableMessageProvider = { developerModeController.status.value.message },
                 enforceObservationFreshness = true,
             ),
             conversationStore = conversationStore,
-            phoneActionsReadyProvider = { shizukuController.status.value.privilegedApiReady },
+            phoneActionsReadyProvider = { developerModeController.status.value.privilegedApiReady },
             fullAccessProvider = { appPermissionRepository.isFullAccessEnabled() },
         )
         // The bridge accepts paired LAN connections for the development

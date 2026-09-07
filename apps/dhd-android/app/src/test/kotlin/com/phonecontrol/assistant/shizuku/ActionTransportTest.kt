@@ -1,4 +1,4 @@
-package com.phonecontrol.assistant.shizuku
+package com.phonecontrol.assistant.execution
 
 import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot

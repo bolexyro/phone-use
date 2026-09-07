@@ -7,8 +7,8 @@ import com.phonecontrol.assistant.domain.KeypressKey
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.session.ActionExecutionResult
-import com.phonecontrol.assistant.shizuku.ObservationCaptureResult
-import com.phonecontrol.assistant.shizuku.TransportResult
+import com.phonecontrol.assistant.execution.ObservationCaptureResult
+import com.phonecontrol.assistant.execution.TransportResult
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -90,7 +90,7 @@ class SequenceExecutorTest {
                 executions += 1
                 ActionExecutionResult.TransportFinished(
                     TransportResult.Rejected(
-                        code = com.phonecontrol.assistant.shizuku.RejectionCode.STALE_OBSERVATION,
+                        code = com.phonecontrol.assistant.execution.RejectionCode.STALE_OBSERVATION,
                         message = "stale",
                     ),
                 )
