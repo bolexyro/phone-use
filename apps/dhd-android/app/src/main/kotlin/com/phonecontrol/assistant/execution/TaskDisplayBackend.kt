@@ -11,23 +11,33 @@ data class TaskDisplaySpec(
     val width: Int = DEFAULT_WIDTH,
     val height: Int = DEFAULT_HEIGHT,
     val densityDpi: Int = DEFAULT_DENSITY_DPI,
+    /**
+     * Density exposed to apps on the task display. This is separate from
+     * [densityDpi], which is the base density used when the display buffer is
+     * created; the pixel geometry used for coordinates and streaming is fixed.
+     */
+    val appDensityDpi: Int = DEFAULT_APP_DENSITY_DPI,
 ) {
     init {
         require(width > 0) { "Task display width must be positive." }
         require(height > 0) { "Task display height must be positive." }
         require(densityDpi > 0) { "Task display density must be positive." }
+        require(appDensityDpi in 120..640) {
+            "Task app density must be between 120 and 640 dpi."
+        }
     }
 
     private companion object {
         const val DEFAULT_WIDTH = 720
         const val DEFAULT_HEIGHT = 1560
-        // Match the S23's compatibility density. If a task display uses a
-        // lower density than the device's app compatibility density, Android
-        // letterboxes legacy/compat-mode apps inside the display (the live
-        // stream then contains a scaled app with the display background around
-        // it). Keeping the task density aligned makes the app window fill the
-        // fixed 720x1560 task buffer.
+        // Keep the base display density aligned with the S23's compatibility
+        // density. The app-visible override below changes the dp viewport
+        // without changing the encoded 720x1560 pixel buffer.
         const val DEFAULT_DENSITY_DPI = 420
+        // The S23's 720px-wide virtual display is only about 274dp at 420dpi.
+        // A per-display 320dpi override gives apps a roughly 360dp-wide
+        // viewport without changing the display's pixel geometry.
+        const val DEFAULT_APP_DENSITY_DPI = 320
     }
 }
 

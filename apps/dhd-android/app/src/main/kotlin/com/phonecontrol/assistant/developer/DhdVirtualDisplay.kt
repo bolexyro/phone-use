@@ -15,19 +15,22 @@ private val DHD_PACKAGE_PATTERN = Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]
 /** Fixed geometry for one agent-owned virtual display. */
 data class DhdVirtualDisplaySpec(
     val width: Int = 720,
-    val height: Int = 1280,
-    // Keep the shell-side default consistent with TaskDisplaySpec. Chowdeck
-    // advertises a 420dpi compatibility configuration on the S23; using 320
-    // here causes Android to render its window at 320/420 scale and leave the
-    // virtual-display background exposed around the live app.
+    val height: Int = 1560,
+    // This is the physical density of the virtual display. Keep it at 420 so
+    // the encoded frame and coordinate space stay stable.
     val densityDpi: Int = 420,
     val frameRate: Int = 30,
     val bitRate: Int = 2_000_000,
+    // Apps on the task display receive this density through a per-display
+    // window-manager override, giving them a wider dp viewport while
+    // preserving the base 720x1560 pixel buffer.
+    val appDensityDpi: Int = 320,
 ) {
     init {
         require(width in 320..2_160) { "Virtual display width is outside the supported range." }
         require(height in 320..3_840) { "Virtual display height is outside the supported range." }
         require(densityDpi in 120..640) { "Virtual display density is outside the supported range." }
+        require(appDensityDpi in 120..640) { "App density is outside the supported range." }
         require(frameRate in 1..60) { "Virtual display frame rate is outside the supported range." }
         require(bitRate in 128_000..20_000_000) { "Virtual display bit rate is outside the supported range." }
     }
@@ -46,12 +49,15 @@ data class DhdVirtualDisplaySession(
     val streamPort: Int,
     val streamToken: String,
     val codecMime: String = DhdVirtualDisplayProtocol.CODEC_AVC,
+    val appDensityDpi: Int = densityDpi,
 ) {
     init {
         require(sessionKey.isNotBlank()) { "Virtual display session key must not be blank." }
         require(packageName.matches(DHD_PACKAGE_PATTERN)) { "Virtual display package name is invalid." }
         require(displayId > 0) { "Virtual display sessions may never target the default display." }
-        require(width > 0 && height > 0 && densityDpi > 0) { "Virtual display geometry is invalid." }
+        require(width > 0 && height > 0 && densityDpi > 0 && appDensityDpi > 0) {
+            "Virtual display geometry is invalid."
+        }
         require(streamPort in 1024..65535) { "Virtual display stream port is invalid." }
         require(streamToken.isNotBlank()) { "Virtual display stream token must not be blank." }
         require(codecMime == DhdVirtualDisplayProtocol.CODEC_AVC) {
@@ -60,7 +66,7 @@ data class DhdVirtualDisplaySession(
     }
 
     val spec: DhdVirtualDisplaySpec
-        get() = DhdVirtualDisplaySpec(width, height, densityDpi, frameRate, bitRate)
+        get() = DhdVirtualDisplaySpec(width, height, densityDpi, frameRate, bitRate, appDensityDpi)
 }
 
 data class DhdVirtualDisplayCapture(
@@ -162,6 +168,7 @@ class DhdVirtualDisplayManager(
                         spec.densityDpi.toString(),
                         spec.frameRate.toString(),
                         spec.bitRate.toString(),
+                        spec.appDensityDpi.toString(),
                     ),
                 )
             } catch (cancelledError: CancellationException) {
@@ -345,6 +352,7 @@ class DhdVirtualDisplayManager(
                 streamPort = json.getInt("streamPort"),
                 streamToken = json.getString("streamToken"),
                 codecMime = json.optString("codecMime", DhdVirtualDisplayProtocol.CODEC_AVC),
+                appDensityDpi = json.optInt("appDensityDpi", json.getInt("densityDpi")),
             )
             require(session.sessionKey == expectedSessionKey)
             require(session.packageName == expectedPackageName)

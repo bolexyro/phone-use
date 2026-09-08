@@ -1034,6 +1034,8 @@ export function buildDhdDynamicTools(
         type: { const: DHD_ACTION_TYPES.scroll },
         direction: { type: "string", enum: [...DHD_SCROLL_DIRECTIONS] },
         amount: { type: "string", enum: [...DHD_SCROLL_AMOUNTS] },
+        x: { type: "integer", minimum: 0 },
+        y: { type: "integer", minimum: 0 },
       },
       required: ["type", "direction", "amount"],
     },

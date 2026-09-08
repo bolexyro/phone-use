@@ -84,6 +84,7 @@ class DhdTaskDisplayBackend(
                 width = spec.width,
                 height = spec.height,
                 densityDpi = spec.densityDpi,
+                appDensityDpi = spec.appDensityDpi,
             )
             val result = nativeManager.create(sessionKey, packageName, nativeSpec)
             val nativeSession = when (result) {

@@ -149,9 +149,9 @@ final class DhdNativeDisplayService implements Closeable {
     }
 
     private CommandResult create(List<String> command) throws Exception {
-        if (command.size() != 9) {
+        if (command.size() != 9 && command.size() != 10) {
             return CommandResult.failure(
-                    "dhd-display create requires sessionKey, packageName, width, height, densityDpi, frameRate, bitRate.");
+                    "dhd-display create requires sessionKey, packageName, width, height, densityDpi, frameRate, bitRate, appDensityDpi.");
         }
         String sessionKey = command.get(2);
         String packageName = command.get(3);
@@ -166,6 +166,11 @@ final class DhdNativeDisplayService implements Closeable {
         int densityDpi = boundedInt(command.get(6), 120, 640, "densityDpi");
         int frameRate = boundedInt(command.get(7), 1, 60, "frameRate");
         int bitRate = boundedInt(command.get(8), 128_000, 20_000_000, "bitRate");
+        // Accept the old payload from an already-running app process, but make
+        // new sessions explicit about the app-visible density.
+        int appDensityDpi = command.size() == 10
+                ? boundedInt(command.get(9), 120, 640, "appDensityDpi")
+                : densityDpi;
 
         synchronized (lock) {
             if (sessions.containsKey(sessionKey)) {
@@ -177,7 +182,7 @@ final class DhdNativeDisplayService implements Closeable {
         }
 
         DisplaySession session = new DisplaySession(
-                sessionKey, packageName, width, height, densityDpi, frameRate, bitRate);
+                sessionKey, packageName, width, height, densityDpi, appDensityDpi, frameRate, bitRate);
         try {
             session.start();
             synchronized (lock) {
@@ -489,6 +494,7 @@ final class DhdNativeDisplayService implements Closeable {
         private final int width;
         private final int height;
         private final int densityDpi;
+        private final int appDensityDpi;
         private final int frameRate;
         private final int bitRate;
         private final String streamToken = newToken();
@@ -506,15 +512,17 @@ final class DhdNativeDisplayService implements Closeable {
         private Surface encoderSurface;
         private DisplayManagerBridge displayBridge;
         private int displayId = -1;
+        private boolean displayDensityOverridden;
         private volatile MediaFormat outputFormat;
 
         DisplaySession(String sessionKey, String packageName, int width, int height,
-                       int densityDpi, int frameRate, int bitRate) {
+                       int densityDpi, int appDensityDpi, int frameRate, int bitRate) {
             this.sessionKey = sessionKey;
             this.packageName = packageName;
             this.width = width;
             this.height = height;
             this.densityDpi = densityDpi;
+            this.appDensityDpi = appDensityDpi;
             this.frameRate = frameRate;
             this.bitRate = bitRate;
         }
@@ -535,6 +543,7 @@ final class DhdNativeDisplayService implements Closeable {
             displayId = displayBridge.createVirtualDisplay(
                     "DHD " + sessionKey, width, height, densityDpi, encoderSurface);
             if (displayId <= 0) throw new IOException("Android created an invalid task display id.");
+            applyDisplayDensityOverride();
 
             streamServer = new ServerSocket();
             streamServer.setReuseAddress(true);
@@ -552,6 +561,7 @@ final class DhdNativeDisplayService implements Closeable {
                     ",\"width\":" + width +
                     ",\"height\":" + height +
                     ",\"densityDpi\":" + densityDpi +
+                    ",\"appDensityDpi\":" + appDensityDpi +
                     ",\"frameRate\":" + frameRate +
                     ",\"bitRate\":" + bitRate +
                     ",\"streamPort\":" + streamServer.getLocalPort() +
@@ -594,6 +604,7 @@ final class DhdNativeDisplayService implements Closeable {
                     encoderSurface = null;
                 }
             }
+            resetDisplayDensityOverride();
             if (displayBridge != null && displayId > 0) displayBridge.releaseVirtualDisplay();
             displayId = -1;
             executor.shutdownNow();
@@ -601,11 +612,11 @@ final class DhdNativeDisplayService implements Closeable {
 
         private void launchTarget() throws Exception {
             String component = resolveLaunchComponent();
-            String[] command = new String[]{
+            String[] launchCommand = new String[]{
                     "/system/bin/am", "start", "-W", "--display", Integer.toString(displayId),
                     "-f", "0x18080000", "-n", component,
             };
-            ProcessResult result = run(command, COMMAND_TIMEOUT_MS);
+            ProcessResult result = run(launchCommand, COMMAND_TIMEOUT_MS);
             if (result.exitCode != 0 || result.stderr.toLowerCase(Locale.ROOT).contains("error") ||
                     new String(result.stdout, StandardCharsets.UTF_8).toLowerCase(Locale.ROOT).contains("error:")) {
                 throw new IOException("Could not launch " + packageName + " on display " + displayId +
@@ -613,10 +624,47 @@ final class DhdNativeDisplayService implements Closeable {
             }
             long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(LAUNCH_VERIFY_TIMEOUT_MS);
             while (System.nanoTime() < deadline) {
-                if (focusedPackageOnDisplay(displayId, packageName)) return;
+                if (focusedPackageOnDisplay(displayId, packageName)) {
+                    return;
+                }
                 Thread.sleep(100L);
             }
             throw new IOException("Android did not verify " + packageName + " on display " + displayId + ".");
+        }
+
+        /**
+         * Keep the encoded pixel buffer at the requested display density while
+         * giving the launched app the smaller-window density used by the
+         * Samsung freeform preview. A task-only density transaction leaves
+         * Android in size-compat mode because the task and its parent display
+         * have different densities; the shell's per-display override avoids
+         * that compatibility scale and lets the app fill the whole buffer.
+         */
+        private void applyDisplayDensityOverride() throws Exception {
+            if (appDensityDpi == densityDpi) return;
+            ProcessResult result = run(new String[]{
+                    "/system/bin/wm", "density", Integer.toString(appDensityDpi),
+                    "-d", Integer.toString(displayId),
+            }, COMMAND_TIMEOUT_MS);
+            if (result.exitCode != 0 || result.stderr.toLowerCase(Locale.ROOT).contains("error")) {
+                throw new IOException("Could not set app density " + appDensityDpi +
+                        " on display " + displayId + ": " + diagnostic(result));
+            }
+            displayDensityOverridden = true;
+        }
+
+        private void resetDisplayDensityOverride() {
+            if (!displayDensityOverridden || displayId <= 0) return;
+            try {
+                run(new String[]{
+                        "/system/bin/wm", "density", "reset", "-d", Integer.toString(displayId),
+                }, COMMAND_TIMEOUT_MS);
+            } catch (Throwable ignored) {
+                // The display may already be gone while unwinding a failed
+                // session; its per-display override dies with the display.
+            } finally {
+                displayDensityOverridden = false;
+            }
         }
 
         private String resolveLaunchComponent() throws Exception {

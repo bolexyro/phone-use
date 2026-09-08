@@ -73,7 +73,7 @@ internal class DhdMaintenanceClient(
     }
 
     companion object {
-        const val REQUIRED_CAPABILITY_VERSION = 3
+        const val REQUIRED_CAPABILITY_VERSION = 7
         private const val LOOPBACK = "127.0.0.1"
         private val random = SecureRandom()
 
