@@ -43,6 +43,7 @@ sealed interface TransportResult {
 
 enum class RejectionCode {
     DEVELOPER_MODE_UNAVAILABLE,
+    TASK_DISPLAY_UNAVAILABLE,
     OBSERVATION_MISSING,
     OBSERVATION_FAILED,
     STALE_OBSERVATION,
@@ -54,6 +55,19 @@ enum class RejectionCode {
 
 interface PhoneActionTransport {
     suspend fun execute(action: PhoneAction, observation: ObservationSnapshot?): TransportResult
+
+    /** Execute against the display owned by one coordinator session. */
+    suspend fun executeForSession(
+        sessionKey: String,
+        action: PhoneAction,
+        observation: ObservationSnapshot?,
+    ): TransportResult = execute(action, observation)
+
+    /** Invalidate queued/in-flight work before a task display is released. */
+    fun cancelSession(sessionKey: String) = Unit
+
+    /** Release resources associated with a completed task display. */
+    suspend fun closeSession(sessionKey: String) = Unit
 }
 
 /** Executor for the typed v0 action set over DHD's selected phone bridge. */
@@ -68,8 +82,37 @@ class TypedPhoneActionTransport(
      * action's guard regions opt into the stricter visual comparison.
      */
     private val enforceObservationFreshness: Boolean = true,
+    private val taskDisplayBackend: TaskDisplayBackend? = null,
 ) : PhoneActionTransport {
     override suspend fun execute(
+        action: PhoneAction,
+        observation: ObservationSnapshot?,
+    ): TransportResult = executeInternal(
+        sessionKey = null,
+        action = action,
+        observation = observation,
+    )
+
+    override suspend fun executeForSession(
+        sessionKey: String,
+        action: PhoneAction,
+        observation: ObservationSnapshot?,
+    ): TransportResult = executeInternal(
+        sessionKey = sessionKey,
+        action = action,
+        observation = observation,
+    )
+
+    override fun cancelSession(sessionKey: String) {
+        taskDisplayBackend?.cancel(sessionKey)
+    }
+
+    override suspend fun closeSession(sessionKey: String) {
+        taskDisplayBackend?.close(sessionKey)
+    }
+
+    private suspend fun executeInternal(
+        sessionKey: String?,
         action: PhoneAction,
         observation: ObservationSnapshot?,
     ): TransportResult {
@@ -79,13 +122,23 @@ class TypedPhoneActionTransport(
                 "${executionUnavailableMessageProvider()} The action was not executed.",
             )
         }
-        if (observation == null) {
+        if (sessionKey != null && taskDisplayBackend == null) {
+            return TransportResult.Rejected(
+                RejectionCode.TASK_DISPLAY_UNAVAILABLE,
+                "The task display is unavailable; the action was not executed.",
+            )
+        }
+        if (observation == null && action !is OpenAppAction) {
             return TransportResult.Rejected(
                 RejectionCode.OBSERVATION_MISSING,
                 "A current phone screenshot is required for display bounds; the action was not executed.",
             )
         }
-        if (enforceObservationFreshness && observation.id != action.metadata.observationId) {
+        if (
+            enforceObservationFreshness &&
+            observation != null &&
+            observation.id != action.metadata.observationId
+        ) {
             return TransportResult.Rejected(
                 RejectionCode.STALE_OBSERVATION,
                 "The observation is stale; the action was not executed.",
@@ -104,22 +157,80 @@ class TypedPhoneActionTransport(
         }
 
         return when (action) {
-            is OpenAppAction -> openApp(action, observation)
-            is TapAction -> tap(action, observation)
-            is TypeAction -> type(action, observation)
-            is SwipeAction -> swipe(action, observation)
-            is ScrollAction -> scroll(action, observation)
-            is BackAction -> back(action, observation)
-            is KeypressAction -> keypress(action, observation)
-            is WaitAction -> wait(action, observation)
+            is OpenAppAction -> openApp(action, observation, sessionKey)
+            is TapAction -> tap(action, requireObservation(observation), sessionKey)
+            is TypeAction -> type(action, requireObservation(observation), sessionKey)
+            is SwipeAction -> swipe(action, requireObservation(observation), sessionKey)
+            is ScrollAction -> scroll(action, requireObservation(observation), sessionKey)
+            is BackAction -> back(action, requireObservation(observation), sessionKey)
+            is KeypressAction -> keypress(action, requireObservation(observation), sessionKey)
+            is WaitAction -> wait(action, requireObservation(observation), sessionKey)
         }
     }
 
     private suspend fun openApp(
         action: OpenAppAction,
-        observation: ObservationSnapshot,
+        observation: ObservationSnapshot?,
+        sessionKey: String?,
     ): TransportResult {
-        val before = when (val check = freshCheck(action, observation)) {
+        if (sessionKey != null) {
+            val backend = taskDisplayBackend
+                ?: return TransportResult.Rejected(
+                    RejectionCode.TASK_DISPLAY_UNAVAILABLE,
+                    "The task display is unavailable; ${action.packageName} was not opened.",
+                )
+            return try {
+                val current = backend.current(sessionKey)
+                if (current == null) {
+                    backend.create(sessionKey, action.packageName)
+                } else {
+                    val launchIntent = context.packageManager.getLaunchIntentForPackage(action.packageName)
+                        ?: return TransportResult.Rejected(
+                            RejectionCode.COMMAND_FAILED,
+                            "No launchable activity was found for ${action.packageName}.",
+                        )
+                    val component = launchIntent.component
+                        ?: return TransportResult.Rejected(
+                            RejectionCode.COMMAND_FAILED,
+                            "The launch intent for ${action.packageName} has no explicit component.",
+                        )
+                    if (component.packageName != action.packageName) {
+                        return TransportResult.Rejected(
+                            RejectionCode.COMMAND_FAILED,
+                            "The launch intent resolved outside the requested package.",
+                        )
+                    }
+                    val result = runOnTaskDisplay(
+                        current,
+                        listOf(
+                            "am",
+                            "start",
+                            "--display",
+                            current.displayId.toString(),
+                            "-W",
+                            "-n",
+                            "${component.packageName}/${component.className}",
+                        ),
+                    )
+                    if (result.timedOut || result.exitCode == null || result.exitCode != 0) {
+                        return commandResult(
+                            result,
+                            successMessage = "Opened ${action.packageName}.",
+                        )
+                    }
+                }
+                TransportResult.Succeeded("Opened ${action.packageName}.")
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                TransportResult.Rejected(
+                    RejectionCode.TASK_DISPLAY_UNAVAILABLE,
+                    "The task display could not open ${action.packageName}: ${error.message ?: error::class.java.simpleName}",
+                )
+            }
+        }
+        val approvedObservation = requireObservation(observation)
+        val before = when (val check = freshCheck(action, approvedObservation, null)) {
             is FreshCheck.Rejected -> return check.result
             is FreshCheck.Ready -> check
         }
@@ -158,8 +269,9 @@ class TypedPhoneActionTransport(
     private suspend fun tap(
         action: TapAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
     ): TransportResult {
-        val before = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation, sessionKey)) {
             is FreshCheck.Rejected -> return check.result
             is FreshCheck.Ready -> check
         }
@@ -171,9 +283,7 @@ class TypedPhoneActionTransport(
             )
         }
 
-        val result = processRunner.run(
-            listOf("input", "tap", action.x.toString(), action.y.toString()),
-        )
+        val result = runForSession(sessionKey, listOf("input", "tap", action.x.toString(), action.y.toString()), observation)
         return commandResult(
             result,
             successMessage = "Tapped ${action.x},${action.y}: ${action.metadata.purpose}",
@@ -183,8 +293,9 @@ class TypedPhoneActionTransport(
     private suspend fun type(
         action: TypeAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
     ): TransportResult {
-        val before = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation, sessionKey)) {
             is FreshCheck.Rejected -> return check.result
             is FreshCheck.Ready -> check
         }
@@ -196,7 +307,7 @@ class TypedPhoneActionTransport(
                 error.message ?: "The requested text cannot be sent by Android input text.",
             )
         }
-        val result = processRunner.run(listOf("input", "text", encoded))
+        val result = runForSession(sessionKey, listOf("input", "text", encoded), observation)
         return commandResult(
             result,
             successMessage = "Typed ${action.text.length} characters: ${action.metadata.purpose}",
@@ -206,8 +317,9 @@ class TypedPhoneActionTransport(
     private suspend fun swipe(
         action: SwipeAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
     ): TransportResult {
-        val before = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation, sessionKey)) {
             is FreshCheck.Rejected -> return check.result
             is FreshCheck.Ready -> check
         }
@@ -218,7 +330,8 @@ class TypedPhoneActionTransport(
                 "Swipe coordinates are outside the ${current.width}x${current.height} display.",
             )
         }
-        val result = processRunner.run(
+        val result = runForSession(
+            sessionKey,
             listOf(
                 "input",
                 "swipe",
@@ -228,6 +341,7 @@ class TypedPhoneActionTransport(
                 action.endY.toString(),
                 action.durationMs.toString(),
             ),
+            observation,
         )
         return commandResult(
             result,
@@ -238,10 +352,12 @@ class TypedPhoneActionTransport(
     private suspend fun back(
         action: BackAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
     ): TransportResult {
         return keypress(
             KeypressAction(KeypressKey.BACK, action.metadata),
             observation,
+            sessionKey,
             displayName = "Pressed Back",
         )
     }
@@ -249,9 +365,10 @@ class TypedPhoneActionTransport(
     private suspend fun keypress(
         action: KeypressAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
         displayName: String = "Pressed ${action.key.name}",
     ): TransportResult {
-        val before = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation, sessionKey)) {
             is FreshCheck.Rejected -> return check.result
             is FreshCheck.Ready -> check
         }
@@ -261,7 +378,7 @@ class TypedPhoneActionTransport(
             KeypressKey.ENTER -> "KEYCODE_ENTER"
             KeypressKey.DELETE -> "KEYCODE_DEL"
         }
-        val result = processRunner.run(listOf("input", "keyevent", keyCode))
+        val result = runForSession(sessionKey, listOf("input", "keyevent", keyCode), observation)
         return commandResult(result, successMessage = "$displayName: ${action.metadata.purpose}")
             .withBeforeScreenshot(before.screenshot)
     }
@@ -269,14 +386,16 @@ class TypedPhoneActionTransport(
     private suspend fun scroll(
         action: ScrollAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
     ): TransportResult {
-        val before = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation, sessionKey)) {
             is FreshCheck.Rejected -> return check.result
             is FreshCheck.Ready -> check
         }
         val current = before.snapshot
         val gesture = scrollGesture(current, action.direction, action.amount)
-        val result = processRunner.run(
+        val result = runForSession(
+            sessionKey,
             listOf(
                 "input",
                 "swipe",
@@ -286,6 +405,7 @@ class TypedPhoneActionTransport(
                 gesture.endY.toString(),
                 SCROLL_DURATION_MS.toString(),
             ),
+            observation,
         )
         return commandResult(
             result,
@@ -296,8 +416,9 @@ class TypedPhoneActionTransport(
     private suspend fun wait(
         action: WaitAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
     ): TransportResult {
-        val before = when (val check = freshCheck(action, observation)) {
+        val before = when (val check = freshCheck(action, observation, sessionKey)) {
             is FreshCheck.Rejected -> return check.result
             is FreshCheck.Ready -> check
         }
@@ -308,9 +429,64 @@ class TypedPhoneActionTransport(
         )
     }
 
+    private fun requireObservation(observation: ObservationSnapshot?): ObservationSnapshot =
+        observation ?: error("A non-open action requires an observation.")
+
+    /**
+     * Route every task input through an explicit display target.  The shell
+     * daemon still receives a typed argv list; adding the display selector
+     * here keeps the model and bridge from ever supplying raw commands.
+     */
+    private suspend fun runForSession(
+        sessionKey: String?,
+        command: List<String>,
+        observation: ObservationSnapshot,
+    ): PhoneProcessResult {
+        if (sessionKey == null) return processRunner.run(command)
+        val session = taskDisplayBackend?.current(sessionKey)
+            ?: return unavailableProcessResult("The task display is no longer available.")
+        if (observation.taskSessionKey != sessionKey || observation.taskId != session.taskId) {
+            return unavailableProcessResult("The task display changed before input dispatch.")
+        }
+        return runOnTaskDisplay(session, command)
+    }
+
+    private suspend fun runOnTaskDisplay(
+        session: TaskDisplaySession,
+        command: List<String>,
+    ): PhoneProcessResult {
+        val backend = taskDisplayBackend
+            ?: return unavailableProcessResult("The task display is no longer available.")
+        return try {
+            backend.withSession(session) {
+                val current = backend.current(session.sessionKey)
+                    ?: return@withSession unavailableProcessResult("The task display is no longer available.")
+                if (current.taskId != session.taskId || current.displayId != session.displayId) {
+                    return@withSession unavailableProcessResult("The task display changed before input dispatch.")
+                }
+                val scoped = when (command.firstOrNull()) {
+                    "input" -> listOf("input", "-d", session.displayId.toString()) + command.drop(1)
+                    else -> command
+                }
+                processRunner.run(scoped)
+            }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            unavailableProcessResult(error.message ?: "The task display is no longer available.")
+        }
+    }
+
+    private fun unavailableProcessResult(message: String): PhoneProcessResult = PhoneProcessResult(
+        exitCode = null,
+        stdout = ByteArray(0),
+        stderr = message,
+    )
+
     private suspend fun freshCheck(
         action: PhoneAction,
         observation: ObservationSnapshot,
+        sessionKey: String?,
     ): FreshCheck {
         val guardRegions = if (enforceObservationFreshness) {
             action.metadata.guardRegions
@@ -323,6 +499,7 @@ class TypedPhoneActionTransport(
             // the observer must not discard it just because the package changed.
             expectedPackageName = null,
             guardRegions = guardRegions,
+            taskSessionKey = sessionKey,
         )
         val current = when (fresh) {
             is ObservationCaptureResult.Failed -> {
@@ -383,7 +560,11 @@ class TypedPhoneActionTransport(
         if (result.timedOut || result.exitCode == null || result.exitCode != 0) {
             val detail = result.stderr.ifBlank { "exit ${result.exitCode}" }
             return TransportResult.Rejected(
-                RejectionCode.COMMAND_FAILED,
+                if (detail.contains("task display", ignoreCase = true)) {
+                    RejectionCode.TASK_DISPLAY_UNAVAILABLE
+                } else {
+                    RejectionCode.COMMAND_FAILED
+                },
                 "Phone command failed: $detail",
             )
         }
@@ -521,6 +702,16 @@ internal fun observationStaleReasons(
             code = StaleObservationReasonCode.DISPLAY_CHANGED,
             approved = previous.displayId,
             current = current.displayId,
+        )
+    }
+    if (
+        previous.taskSessionKey != current.taskSessionKey ||
+        previous.taskId != current.taskId
+    ) {
+        reasons += StaleObservationReason(
+            code = StaleObservationReasonCode.TASK_SESSION_CHANGED,
+            approved = previous.taskId ?: previous.taskSessionKey,
+            current = current.taskId ?: current.taskSessionKey,
         )
     }
     if (previous.rotation != current.rotation) {

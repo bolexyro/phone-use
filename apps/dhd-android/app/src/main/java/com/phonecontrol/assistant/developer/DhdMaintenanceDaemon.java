@@ -27,6 +27,9 @@ public final class DhdMaintenanceDaemon {
     private static final String LOOPBACK = "127.0.0.1";
     private static final int SOCKET_TIMEOUT_MS = 20_000;
     private static final long COMMAND_TIMEOUT_MS = 15_000L;
+    /** Bumped when the long-lived daemon gains a new reserved command surface. */
+    static final String CAPABILITIES =
+            "DHD-MAINTENANCE/3 display-lifecycle=1 live-avc=1 display-capture=1";
     private static final Set<String> ALLOWED_EXECUTABLES = new HashSet<>(Arrays.asList(
             "am",
             "dumpsys",
@@ -44,13 +47,15 @@ public final class DhdMaintenanceDaemon {
             return;
         }
 
+        DhdNativeDisplayService displayService = new DhdNativeDisplayService();
+        Runtime.getRuntime().addShutdownHook(new Thread(displayService::close, "dhd-display-shutdown"));
         try (ServerSocket server = new ServerSocket()) {
             server.setReuseAddress(true);
             server.bind(new java.net.InetSocketAddress(InetAddress.getByName(LOOPBACK), port));
             while (true) {
                 try (Socket client = server.accept()) {
                     client.setSoTimeout(SOCKET_TIMEOUT_MS);
-                    handleClient(client, token);
+                    handleClient(client, token, displayService);
                 } catch (Throwable ignored) {
                     // A malformed or disconnected client must not kill the
                     // shell-UID daemon. The next request can still connect.
@@ -59,10 +64,16 @@ public final class DhdMaintenanceDaemon {
         } catch (Throwable ignored) {
             // Startup failure is observed by the app's health check. Avoid
             // writing to the ADB session after the bootstrap command returns.
+        } finally {
+            displayService.close();
         }
     }
 
-    private static void handleClient(Socket client, String expectedToken) throws IOException {
+    private static void handleClient(
+            Socket client,
+            String expectedToken,
+            DhdNativeDisplayService displayService
+    ) throws IOException {
         DataInputStream input = new DataInputStream(client.getInputStream());
         DataOutputStream output = new DataOutputStream(client.getOutputStream());
         DhdMaintenanceProtocol.Request request = DhdMaintenanceProtocol.readRequest(input);
@@ -78,7 +89,7 @@ public final class DhdMaintenanceDaemon {
             return;
         }
 
-        CommandResult result = execute(request.command);
+        CommandResult result = execute(request.command, request.binaryOutput, displayService);
         DhdMaintenanceProtocol.writeResponse(
                 output,
                 result.exitCode,
@@ -89,11 +100,22 @@ public final class DhdMaintenanceDaemon {
         output.flush();
     }
 
-    private static CommandResult execute(List<String> command) {
+    private static CommandResult execute(
+            List<String> command,
+            boolean binaryOutput,
+            DhdNativeDisplayService displayService
+    ) {
         if (command == null || command.isEmpty()) {
             return CommandResult.failure("DHD maintenance rejected an empty command.");
         }
         String executable = command.get(0);
+        if ("dhd-capabilities".equals(executable)) {
+            return new CommandResult(0, false, CAPABILITIES.getBytes(StandardCharsets.UTF_8), "");
+        }
+        if (DhdNativeDisplayService.COMMAND.equals(executable)) {
+            DhdNativeDisplayService.CommandResult result = displayService.execute(command, binaryOutput);
+            return new CommandResult(result.exitCode, result.timedOut, result.stdout, result.stderr);
+        }
         if (!ALLOWED_EXECUTABLES.contains(executable)) {
             return CommandResult.failure("DHD maintenance rejected executable: " + executable);
         }

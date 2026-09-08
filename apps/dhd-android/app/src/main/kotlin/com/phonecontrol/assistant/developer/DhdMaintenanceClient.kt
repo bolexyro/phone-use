@@ -14,6 +14,18 @@ internal class DhdMaintenanceClient(
     private val connectTimeoutMs: Int = 500,
     private val readTimeoutMs: Int = 20_000,
 ) {
+    /** Capabilities advertised by the daemon currently bound to this port. */
+    data class Capabilities(
+        val version: Int,
+        val displayLifecycle: Boolean,
+        val liveAvc: Boolean,
+        val displayCapture: Boolean,
+    ) {
+        val supportsNativeDisplay: Boolean
+            get() = version >= REQUIRED_CAPABILITY_VERSION &&
+                displayLifecycle && liveAvc && displayCapture
+    }
+
     fun execute(command: List<String>, binaryOutput: Boolean = false): PhoneProcessResult {
         require(command.isNotEmpty()) { "A maintenance command must not be empty." }
         Socket().use { socket ->
@@ -38,7 +50,30 @@ internal class DhdMaintenanceClient(
         execute(listOf("true")).exitCode == 0
     }.getOrDefault(false)
 
+    fun capabilities(): Capabilities? = runCatching {
+        val result = execute(listOf("dhd-capabilities"))
+        if (result.exitCode != 0 || result.timedOut) return@runCatching null
+        parseCapabilities(String(result.stdout, Charsets.UTF_8))
+    }.getOrNull()
+
+    fun isCompatible(): Boolean = capabilities()?.supportsNativeDisplay == true
+
+    private fun parseCapabilities(value: String): Capabilities? {
+        val tokens = value.trim().split(Regex("\\s+"))
+        val version = tokens.firstOrNull()
+            ?.removePrefix("DHD-MAINTENANCE/")
+            ?.toIntOrNull()
+            ?: return null
+        return Capabilities(
+            version = version,
+            displayLifecycle = "display-lifecycle=1" in tokens,
+            liveAvc = "live-avc=1" in tokens,
+            displayCapture = "display-capture=1" in tokens,
+        )
+    }
+
     companion object {
+        const val REQUIRED_CAPABILITY_VERSION = 3
         private const val LOOPBACK = "127.0.0.1"
         private val random = SecureRandom()
 

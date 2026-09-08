@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import android.view.Surface as AndroidSurface
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -163,6 +164,9 @@ fun PhoneControlApp(
     onRunRequest: (String, String?, String?, Boolean) -> Unit,
     onStopSession: () -> Unit,
     onSteerRequest: (String) -> Boolean,
+    previewState: LiveDisplayPreviewState? = null,
+    onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
+    onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
@@ -326,6 +330,9 @@ fun PhoneControlApp(
                                 openDeveloperOptions(context)
                             },
                             onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
+                            previewState = previewState,
+                            onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
+                            onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
                         )
                     }
 

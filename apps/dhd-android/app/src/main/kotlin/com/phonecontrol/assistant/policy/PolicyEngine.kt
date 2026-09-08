@@ -48,7 +48,7 @@ class PolicyEngine(
     private val enforceObservationFreshness: Boolean = true,
 ) {
     fun evaluate(action: PhoneAction, context: PolicyContext): PolicyDecision {
-        val metadataError = validateMetadata(action.metadata)
+        val metadataError = validateMetadata(action)
         if (metadataError != null) {
             return PolicyDecision.Denied(DenialCode.INVALID_ACTION_METADATA, metadataError)
         }
@@ -91,7 +91,7 @@ class PolicyEngine(
             }
         }
 
-        if (enforceObservationFreshness) {
+        if (enforceObservationFreshness && action !is OpenAppAction) {
             val currentObservationId = context.currentObservationId
                 ?: return PolicyDecision.Denied(
                     DenialCode.OBSERVATION_MISSING,
@@ -122,9 +122,10 @@ class PolicyEngine(
         return PolicyDecision.Allowed
     }
 
-    private fun validateMetadata(metadata: ActionMetadata): String? {
+    private fun validateMetadata(action: PhoneAction): String? {
+        val metadata = action.metadata
         if (metadata.purpose.isBlank()) return "Every action needs a user-facing purpose."
-        if (enforceObservationFreshness && metadata.observationId.isBlank()) {
+        if (enforceObservationFreshness && action !is OpenAppAction && metadata.observationId.isBlank()) {
             return "Every action needs an observation ID."
         }
         if (metadata.targetDescription.isBlank()) return "Every action needs a target description."

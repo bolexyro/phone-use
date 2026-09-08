@@ -15,8 +15,11 @@ import com.phonecontrol.assistant.policy.PolicyEngine
 import com.phonecontrol.assistant.execution.PhoneActionTransport
 import com.phonecontrol.assistant.execution.TransportResult
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -103,17 +106,29 @@ class SessionCoordinator(
      */
     private val phoneActionsReadyProvider: () -> Boolean = { true },
     private val fullAccessProvider: () -> Boolean = { false },
+    /** Production DHD wires this true so task calls can never fall back to display 0. */
+    private val taskDisplayRequiredProvider: () -> Boolean = { false },
 ) {
     private val lock = Any()
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
     private val _events = MutableStateFlow<List<ActivityEvent>>(emptyList())
     private var sessionJob: Job? = null
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var claimedRequestSessionId: String? = null
     private val pendingSteers = mutableListOf<PendingSteer>()
     private val claimedSteers = mutableMapOf<String, PendingSteer>()
 
     val state: StateFlow<SessionState> = _state.asStateFlow()
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
+
+    /** Stable owner key used by the phone bridge to choose the task display. */
+    fun activeSessionId(): String? = synchronized(lock) {
+        when (val current = _state.value) {
+            is SessionState.Running -> current.sessionId
+            is SessionState.Paused -> current.sessionId
+            else -> null
+        }
+    }
 
     fun start(
         request: String,
@@ -309,6 +324,8 @@ class SessionCoordinator(
         val sessionId = _state.value.sessionIdOrNull ?: return false
         sessionJob?.cancel()
         sessionJob = null
+        transport.cancelSession(sessionId)
+        cleanupScope.launch { transport.closeSession(sessionId) }
         claimedRequestSessionId = null
         clearSteers(sessionId)
         val conversationId = _state.value.conversationIdOrNull()
@@ -328,6 +345,8 @@ class SessionCoordinator(
         if (!_state.value.isActive) return false
         sessionJob?.cancel()
         sessionJob = null
+        transport.cancelSession(sessionId)
+        cleanupScope.launch { transport.closeSession(sessionId) }
         claimedRequestSessionId = null
         clearSteers(sessionId)
         val safeReason = reason.trim().take(MAX_AGENT_FEEDBACK_CHARS)
@@ -363,7 +382,10 @@ class SessionCoordinator(
             ?.take(MAX_TEXT_CHARS)
             ?.ifBlank { null }
         val displayMessage = feedback ?: message.trim().take(MAX_TEXT_CHARS).ifBlank { "Session completed." }
+        sessionJob?.cancel()
         sessionJob = null
+        transport.cancelSession(sessionId)
+        cleanupScope.launch { transport.closeSession(sessionId) }
         claimedRequestSessionId = null
         val conversationId = _state.value.conversationIdOrNull()
         _state.value.sessionIdOrNull?.let(::clearSteers)
@@ -468,8 +490,29 @@ class SessionCoordinator(
         observation: ObservationSnapshot?,
         toolName: String? = null,
     ): ActionExecutionResult {
-        val running = _state.value as? SessionState.Running
+        val running = synchronized(lock) { _state.value as? SessionState.Running }
             ?: return ActionExecutionResult.SessionNotRunning
+        if (taskDisplayRequiredProvider()) {
+            val observationMatchesTask = observation?.taskSessionKey == running.sessionId
+            if ((observation != null && !observationMatchesTask) ||
+                (observation == null && action !is com.phonecontrol.assistant.domain.OpenAppAction)
+            ) {
+                return ActionExecutionResult.PolicyRejected(
+                    message = "The action must use the active task display; the physical display was not touched.",
+                    details = StaleObservationDiagnostics(
+                        approvedObservationId = action.metadata.observationId,
+                        currentObservationId = observation?.id,
+                        reasons = listOf(
+                            com.phonecontrol.assistant.domain.StaleObservationReason(
+                                code = com.phonecontrol.assistant.domain.StaleObservationReasonCode.TASK_SESSION_CHANGED,
+                                approved = observation?.taskId ?: observation?.taskSessionKey,
+                                current = running.sessionId,
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
         val displayPurpose = userFacingActivityLabel(
             actionType = action.type,
             purpose = action.metadata.purpose,
@@ -525,7 +568,11 @@ class SessionCoordinator(
             observationId = action.metadata.observationId,
             targetDescription = action.metadata.targetDescription,
         )
-        val result = transport.execute(action, observation)
+        val result = transport.executeForSession(running.sessionId, action, observation)
+        val stillActive = synchronized(lock) {
+            _state.value.sessionIdOrNull == running.sessionId && _state.value.isActive
+        }
+        if (!stillActive) return ActionExecutionResult.SessionNotRunning
         val eventKind = if (result is TransportResult.Succeeded) {
             ActivityEventKind.ACTION_SUCCEEDED
         } else {
@@ -547,6 +594,11 @@ class SessionCoordinator(
     fun close() {
         sessionJob?.cancel()
         sessionJob = null
+        val sessionId = synchronized(lock) { _state.value.sessionIdOrNull }
+        if (sessionId != null) {
+            transport.cancelSession(sessionId)
+            cleanupScope.launch { transport.closeSession(sessionId) }
+        }
         synchronized(lock) {
             pendingSteers.clear()
             claimedSteers.clear()

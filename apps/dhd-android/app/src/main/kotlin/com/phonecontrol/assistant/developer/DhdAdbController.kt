@@ -277,7 +277,7 @@ class DhdAdbController(context: Context) {
         if (!started.get() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R || !isPaired()) return
         maintenanceProbeJob?.cancel()
         maintenanceProbeJob = scope.launch {
-            if (maintenanceBootstrap.client().isReady()) {
+            if (maintenanceBootstrap.client().isCompatible()) {
                 publishReady()
             } else {
                 scheduleMaintenanceRecovery()
@@ -290,7 +290,7 @@ class DhdAdbController(context: Context) {
         maintenanceMonitorJob = scope.launch {
             while (isActive && started.get()) {
                 delay(MAINTENANCE_HEALTH_INTERVAL_MS)
-                if (!maintenanceBootstrap.client().isReady()) {
+                if (!maintenanceBootstrap.client().isCompatible()) {
                     handleMaintenanceUnavailable("DHD's maintenance service stopped.")
                     return@launch
                 }

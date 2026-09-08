@@ -156,6 +156,14 @@ data class ObservationSnapshot(
     val packageName: String,
     val activityName: String?,
     val displayId: Int,
+    /**
+     * Owner identity for a task virtual display.  Physical-display
+     * observations leave this null.  It is deliberately carried alongside
+     * displayId because Android may reuse a display ID after a task stops.
+     */
+    val taskSessionKey: String? = null,
+    /** Backend identity for the concrete display instance, when available. */
+    val taskId: String? = null,
     val rotation: Int,
     val width: Int,
     val height: Int,

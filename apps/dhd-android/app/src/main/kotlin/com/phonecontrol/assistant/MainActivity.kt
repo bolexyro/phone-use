@@ -10,8 +10,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import com.phonecontrol.assistant.developer.TaskPreviewState
 import com.phonecontrol.assistant.session.AssistantForegroundService
 import com.phonecontrol.assistant.ui.PhoneControlApp
+import com.phonecontrol.assistant.ui.LiveDisplayPreviewState
+import com.phonecontrol.assistant.ui.LiveDisplayPreviewStatus
 
 class MainActivity : ComponentActivity() {
     private var pendingRequest: String? = null
@@ -36,12 +41,36 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val initialConversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID)
+        val app = application as PhoneControlApplication
         setContent {
+            val display by app.taskDisplayBackend.activeSession.collectAsState()
+            val playback by app.taskDisplayBackend.previewState.collectAsState()
+            val preview = display?.let { session ->
+                val error = playback as? TaskPreviewState.Error
+                LiveDisplayPreviewState(
+                    status = when {
+                        error?.sessionKey == session.sessionKey -> LiveDisplayPreviewStatus.ERROR
+                        (playback as? TaskPreviewState.Attached)?.session == session ->
+                            LiveDisplayPreviewStatus.LIVE
+                        else -> LiveDisplayPreviewStatus.CONNECTING
+                    },
+                    message = error?.takeIf { it.sessionKey == session.sessionKey }?.message,
+                    aspectRatio = session.geometry.width.toFloat() / session.geometry.height,
+                    sessionKey = session.sessionKey,
+                )
+            }
             PhoneControlApp(
                 initialConversationId = initialConversationId,
                 onRunRequest = ::startSession,
                 onStopSession = ::stopSession,
                 onSteerRequest = ::steerSession,
+                previewState = preview,
+                onPreviewSurfaceAvailable = { surface ->
+                    display?.let { app.attachTaskPreview(it, surface) }
+                },
+                onPreviewSurfaceDestroyed = { surface ->
+                    display?.let { app.detachTaskPreview(it, surface) }
+                },
             )
         }
     }

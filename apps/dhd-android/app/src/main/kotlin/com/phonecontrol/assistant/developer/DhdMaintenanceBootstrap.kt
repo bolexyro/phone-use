@@ -41,7 +41,14 @@ internal class DhdMaintenanceBootstrap(
 
     suspend fun ensureStarted(adb: DhdAdbClient) {
         val client = client()
-        if (client.isReady()) return
+        if (client.isCompatible()) return
+        // A previous APK can leave an older daemon bound to the persisted
+        // port. `true` alone is not a capability check: stop that exact
+        // process before starting the new daemon so display commands cannot
+        // silently fall back to an old implementation.
+        if (client.isReady()) {
+            stopExistingDaemon(adb)
+        }
 
         val result = adb.shellV2(
             buildDhdMaintenanceStartCommand(
@@ -58,12 +65,31 @@ internal class DhdMaintenanceBootstrap(
         }
 
         repeat(20) {
-            if (client.isReady()) return
+            if (client.isCompatible()) return
             delay(100)
         }
         throw IOException(
-            "DHD maintenance service did not start. Check ${maintenanceLogPath()} after retrying.",
+            "DHD maintenance service with native display support did not start. " +
+                "Check ${maintenanceLogPath()} after retrying.",
         )
+    }
+
+    private suspend fun stopExistingDaemon(adb: DhdAdbClient) {
+        val pidResult = runCatching { adb.shellV2("pidof dhd_maintenance") }.getOrNull() ?: return
+        val pids = Regex("\\b\\d+\\b")
+            .findAll(String(pidResult.stdout, Charsets.UTF_8))
+            .map { it.value }
+            .distinct()
+            .toList()
+        pids.forEach { pid ->
+            // The PID is parsed as decimal digits from pidof output; it is
+            // never assembled from user or model text.
+            runCatching { adb.shellV2("kill -TERM $pid") }
+        }
+        repeat(10) {
+            if (!client().isReady()) return
+            delay(100)
+        }
     }
 
     private fun maintenanceLogPath(): String =

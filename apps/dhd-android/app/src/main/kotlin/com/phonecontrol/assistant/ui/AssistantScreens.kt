@@ -2,6 +2,7 @@
 
 package com.phonecontrol.assistant.ui
 
+import android.view.Surface as AndroidSurface
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -172,6 +173,9 @@ fun AssistantScreen(
     companionConnected: Boolean,
     onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
+    previewState: LiveDisplayPreviewState? = null,
+    onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
+    onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
 ) {
     val colors = LocalAssistantColors.current
     val state by coordinator.state.collectAsState()
@@ -337,6 +341,9 @@ fun AssistantScreen(
                             onOpenDeveloperOptions = onOpenDeveloperOptions,
                             onOpenCompanion = onOpenCompanion,
                             onStopSession = onStopSession,
+                            previewState = previewState,
+                            onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
+                            onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(
                                 top = 12.dp,
@@ -625,6 +632,9 @@ private fun ConversationTimeline(
     onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
+    previewState: LiveDisplayPreviewState? = null,
+    onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
+    onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(vertical = 12.dp),
 ) {
@@ -677,6 +687,9 @@ private fun ConversationTimeline(
                     onOpenDeveloperOptions = onOpenDeveloperOptions,
                     onOpenCompanion = onOpenCompanion,
                     onStopSession = onStopSession,
+                    previewState = previewState,
+                    onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
+                    onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
                     active = state.isActive() && state.sessionIdOrNullForUi() == group.id,
                 )
             }
@@ -695,6 +708,9 @@ private fun TaskGroupCard(
     onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
+    previewState: LiveDisplayPreviewState? = null,
+    onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
+    onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
     active: Boolean,
 ) {
     var traceExpanded by rememberSaveable(group.id) { mutableStateOf(false) }
@@ -717,6 +733,21 @@ private fun TaskGroupCard(
         // Steering instructions stay attached to the current run instead of
         // appearing as a new task.
         group.steerMessages.forEach { SteerMessageBubble(it) }
+
+        val taskPreviewState = previewState?.let { preview ->
+            if (preview.sessionKey == null) {
+                preview.copy(sessionKey = state.sessionIdOrNullForUi())
+            } else {
+                preview
+            }
+        }
+        if (active && taskPreviewState != null) {
+            LiveDisplayPreview(
+                state = taskPreviewState,
+                onSurfaceAvailable = onPreviewSurfaceAvailable,
+                onSurfaceDestroyed = onPreviewSurfaceDestroyed,
+            )
+        }
 
         // Keep the playful status for healthy work, but replace it with a
         // concrete recovery card whenever the phone cannot make progress.

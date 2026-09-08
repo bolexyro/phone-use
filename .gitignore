@@ -13,3 +13,4 @@ logs/
 !.env.example
 
 !/config/phone-control.example.json
+.artifacts/

@@ -89,6 +89,8 @@ class DevBridgeServer(
     private val allowedPackagesProvider: () -> Set<String>,
     private val port: Int = DEFAULT_PORT,
     private val fullAccessProvider: () -> Boolean = { false },
+    /** Production DHD keeps every model observation/action on a task display. */
+    private val taskDisplayRequiredProvider: () -> Boolean = { false },
 ) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val installedAppsRepository = InstalledAppsRepository(context)
@@ -872,7 +874,16 @@ class DevBridgeServer(
             targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { null },
             toolName = DHD_OBSERVE_TOOL,
         )
-        when (val captured = captureWithRetry(null, emptyList())) {
+        val taskSessionKey = coordinator.activeSessionId()
+        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
+            write(
+                writer,
+                errorResponse(requestId, "No active task display is available; the physical display was not observed.")
+                    .put("code", "TASK_DISPLAY_UNAVAILABLE"),
+            )
+            return
+        }
+        when (val captured = captureWithRetry(null, emptyList(), taskSessionKey)) {
             is ObservationCaptureResult.Failed -> write(writer, errorResponse(requestId, captured.message))
             is ObservationCaptureResult.Succeeded -> {
                 remember(captured.snapshot)
@@ -889,7 +900,16 @@ class DevBridgeServer(
             purpose = "Checking foreground app",
             toolName = DHD_FOREGROUND_APP_TOOL,
         )
-        when (val result = observationProvider.getForegroundApp()) {
+        val taskSessionKey = coordinator.activeSessionId()
+        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
+            write(
+                writer,
+                errorResponse(requestId, "No active task display is available; the physical display was not inspected.")
+                    .put("code", "TASK_DISPLAY_UNAVAILABLE"),
+            )
+            return
+        }
+        when (val result = observationProvider.getForegroundApp(taskSessionKey)) {
             is ForegroundAppResult.Failed -> write(
                 writer,
                 errorResponse(requestId, result.message).put("code", result.code),
@@ -924,13 +944,33 @@ class DevBridgeServer(
         val suppliedObservation = synchronized(observations) {
             observationId.takeIf(String::isNotBlank)?.let { observations[it] }
         }
+        val taskSessionKey = coordinator.activeSessionId()
+        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
+            write(
+                writer,
+                JSONObject()
+                    .put("type", "completed")
+                    .put("requestId", requestId)
+                    .put("ok", false)
+                    .put("action", wireActionName(parsedAction))
+                    .put("outcome", "failed")
+                    .put("executed", false)
+                    .put("code", "TASK_DISPLAY_UNAVAILABLE")
+                    .put("message", "No active task display is available; the physical display was not touched."),
+            )
+            return
+        }
         val observation = if (suppliedObservation != null) {
             suppliedObservation
         } else if (parsedAction is OpenAppAction && observationId.isBlank()) {
             // Launch is setup rather than an input against a model-selected
-            // screen. Establish the pre-launch baseline on the phone so the
-            // caller does not need to observe DHD just to open another app.
-            when (val captured = captureWithRetry(null, emptyList())) {
+            // screen. A task display does not have a meaningful pre-launch
+            // physical baseline: the task backend creates the virtual display
+            // and launches the allowlisted package atomically. Legacy calls
+            // without a task session retain the physical baseline behavior.
+            if (taskSessionKey != null) {
+                null
+            } else when (val captured = captureWithRetry(null, emptyList(), null)) {
                 is ObservationCaptureResult.Failed -> {
                     write(
                         writer,
@@ -958,7 +998,7 @@ class DevBridgeServer(
         } else {
             null
         }
-        if (observation == null) {
+        if (observation == null && parsedAction !is OpenAppAction) {
             write(
                 writer,
                 JSONObject()
@@ -973,7 +1013,11 @@ class DevBridgeServer(
             )
             return
         }
-        val action = if (parsedAction is OpenAppAction && observationId.isBlank()) {
+        val action = if (
+            parsedAction is OpenAppAction &&
+            observationId.isBlank() &&
+            observation != null
+        ) {
             parsedAction.copy(
                 metadata = parsedAction.metadata.copy(observationId = observation.id),
             )
@@ -1004,7 +1048,7 @@ class DevBridgeServer(
         // A successful action may intentionally navigate to another activity,
         // system surface, or package. Capture what is actually on screen and
         // let the model decide what the new observation means.
-        when (val captured = captureWithRetry(null, emptyList())) {
+        when (val captured = captureWithRetry(null, emptyList(), taskSessionKey)) {
             is ObservationCaptureResult.Failed -> {
                 write(
                     writer,
@@ -1077,12 +1121,62 @@ class DevBridgeServer(
             )
             return
         }
+        val taskSessionKey = coordinator.activeSessionId()
+        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
+            val firstAction = request.actions.first()
+            val failure = SequenceStepResult(
+                index = 0,
+                action = wireActionName(firstAction),
+                status = SequenceStepResult.Status.FAILED,
+                message = "No active task display is available; the physical display was not touched.",
+                code = "TASK_DISPLAY_UNAVAILABLE",
+                outcome = "failed",
+                executed = false,
+            )
+            writeSequenceResult(
+                writer,
+                requestId,
+                SequenceExecutionResult(
+                    requestedSteps = request.actions.size,
+                    steps = listOf(failure),
+                    failure = failure,
+                ),
+            )
+            return
+        }
+        if (
+            taskDisplayRequiredProvider() &&
+            observation.taskSessionKey != taskSessionKey
+        ) {
+            val firstAction = request.actions.first()
+            val failure = SequenceStepResult(
+                index = 0,
+                action = wireActionName(firstAction),
+                status = SequenceStepResult.Status.FAILED,
+                message = "The observation belongs to a different task display; no input was sent.",
+                code = "TASK_DISPLAY_CHANGED",
+                outcome = "failed",
+                executed = false,
+            )
+            writeSequenceResult(
+                writer,
+                requestId,
+                SequenceExecutionResult(
+                    requestedSteps = request.actions.size,
+                    steps = listOf(failure),
+                    failure = failure,
+                ),
+            )
+            return
+        }
 
         val result = SequenceExecutor(
             executeAction = { action, baseline ->
                 coordinator.executeAction(action, baseline, DHD_EXECUTE_SEQUENCE_TOOL)
             },
-            captureAfterAction = { guardRegions -> captureWithRetry(null, guardRegions) },
+            captureAfterAction = { guardRegions ->
+                captureWithRetry(null, guardRegions, taskSessionKey)
+            },
             rememberObservation = ::remember,
             settleAfterAction = ::settleAfterAction,
         ).execute(observation, request.actions)
@@ -1305,10 +1399,10 @@ class DevBridgeServer(
 
     private fun addBeforeDebug(
         response: JSONObject,
-        observation: ObservationSnapshot,
+        observation: ObservationSnapshot?,
         screenshot: ByteArray?,
     ) {
-        if (screenshot == null) return
+        if (observation == null || screenshot == null) return
         response
             .put("beforeObservation", snapshotJson(observation))
             .put("beforeScreenshotBase64", Base64.encodeToString(screenshot, Base64.NO_WRAP))
@@ -1435,6 +1529,8 @@ class DevBridgeServer(
         .put("packageName", snapshot.packageName)
         .put("activityName", snapshot.activityName ?: JSONObject.NULL)
         .put("displayId", snapshot.displayId)
+        .put("taskSessionKey", snapshot.taskSessionKey ?: JSONObject.NULL)
+        .put("taskId", snapshot.taskId ?: JSONObject.NULL)
         .put("rotation", snapshot.rotation)
         .put("width", snapshot.width)
         .put("height", snapshot.height)
@@ -1455,24 +1551,15 @@ class DevBridgeServer(
             return
         }
 
-        val beforeOpen = observationProvider.capture()
-        val preOpenSnapshot = when (beforeOpen) {
-            is ObservationCaptureResult.Failed -> {
-                failSession(writer, request, beforeOpen.message)
-                return
-            }
-
-            is ObservationCaptureResult.Succeeded -> beforeOpen.snapshot
-        }
         val open = OpenAppAction(
             packageName = request.packageName,
             metadata = ActionMetadata(
                 purpose = "Opening ${request.packageName}",
-                observationId = preOpenSnapshot.id,
+                observationId = "",
                 targetDescription = request.packageName,
             ),
         )
-        val openResult = coordinator.executeAction(open, preOpenSnapshot)
+        val openResult = coordinator.executeAction(open, null)
         writeActionResult(writer, request.requestId, "open_app", openResult)
         if (!openResult.isSuccessful()) {
             failSession(writer, request, openResult.failureMessage())
@@ -1480,7 +1567,11 @@ class DevBridgeServer(
         }
 
         delay(OPEN_SETTLE_DELAY_MS)
-        val afterOpen = captureWithRetry(request.packageName, request.guardRegions)
+        val afterOpen = captureWithRetry(
+            request.packageName,
+            request.guardRegions,
+            coordinator.activeSessionId(),
+        )
         val tapSnapshot = when (afterOpen) {
             is ObservationCaptureResult.Failed -> {
                 failSession(writer, request, afterOpen.message)
@@ -1507,7 +1598,7 @@ class DevBridgeServer(
         }
 
         delay(POST_ACTION_SETTLE_DELAY_MS)
-        val afterTap = captureWithRetry(null, emptyList())
+        val afterTap = captureWithRetry(null, emptyList(), coordinator.activeSessionId())
         when (afterTap) {
             is ObservationCaptureResult.Failed -> {
                 failSession(writer, request, "Tap completed, but the post-action observation failed: ${afterTap.message}")
@@ -1533,10 +1624,20 @@ class DevBridgeServer(
     private suspend fun captureWithRetry(
         expectedPackageName: String?,
         guardRegions: List<GuardRegion>,
+        taskSessionKey: String? = coordinator.activeSessionId(),
     ): ObservationCaptureResult {
+        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
+            return ObservationCaptureResult.Failed(
+                "No active task display is available; refusing to use the physical display.",
+            )
+        }
         var last: ObservationCaptureResult = ObservationCaptureResult.Failed("No capture attempted.")
         repeat(CAPTURE_ATTEMPTS) {
-            last = observationProvider.capture(expectedPackageName, guardRegions)
+            last = observationProvider.capture(
+                expectedPackageName = expectedPackageName,
+                guardRegions = guardRegions,
+                taskSessionKey = taskSessionKey,
+            )
             if (last is ObservationCaptureResult.Succeeded) return last
             delay(CAPTURE_RETRY_DELAY_MS)
         }

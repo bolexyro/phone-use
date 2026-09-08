@@ -13,6 +13,7 @@ import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.LinkedHashMap
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 
 sealed interface ObservationCaptureResult {
     data class Succeeded(
@@ -67,6 +68,7 @@ private val FOCUS_REGEX = Regex(
 class PhoneObservationProvider(
     private val context: Context,
     private val processRunner: PhoneProcessRunner,
+    private val taskDisplayBackend: TaskDisplayBackend? = null,
 ) {
     /**
      * Keep the compressed capture bytes beside their observation IDs so an
@@ -88,7 +90,30 @@ class PhoneObservationProvider(
      * an observation baseline. This is only situational context; callers must
      * still use capture() before sending any physical input.
      */
-    suspend fun getForegroundApp(): ForegroundAppResult {
+    suspend fun getForegroundApp(taskSessionKey: String? = null): ForegroundAppResult {
+        if (taskSessionKey != null) {
+            val backend = taskDisplayBackend
+                ?: return ForegroundAppResult.Failed(
+                    code = "TASK_DISPLAY_UNAVAILABLE",
+                    message = "The task display is unavailable.",
+                )
+            val session = backend.current(taskSessionKey)
+                ?: return ForegroundAppResult.Failed(
+                    code = "TASK_DISPLAY_UNAVAILABLE",
+                    message = "The task display is no longer available.",
+                )
+            return try {
+                backend.capture(session).foreground
+                    .let(ForegroundAppResult::Succeeded)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                ForegroundAppResult.Failed(
+                    code = "TASK_DISPLAY_UNAVAILABLE",
+                    message = "Could not read the task display foreground app: ${error.message ?: error::class.java.simpleName}",
+                )
+            }
+        }
         val focused = when (val result = readFocusedWindowResult()) {
             is FocusedWindowReadResult.Found -> result.window
             is FocusedWindowReadResult.Failed -> {
@@ -129,7 +154,11 @@ class PhoneObservationProvider(
     suspend fun capture(
         expectedPackageName: String? = null,
         guardRegions: List<GuardRegion> = emptyList(),
+        taskSessionKey: String? = null,
     ): ObservationCaptureResult {
+        if (taskSessionKey != null) {
+            return captureTaskDisplay(taskSessionKey, expectedPackageName, guardRegions)
+        }
         val screenshotResult = processRunner.run(listOf("screencap", "-p"))
         if (screenshotResult.timedOut || screenshotResult.exitCode != 0) {
             return ObservationCaptureResult.Failed(
@@ -169,6 +198,70 @@ class PhoneObservationProvider(
             activityName = focused?.activityName,
             displayId = Display.DEFAULT_DISPLAY,
             rotation = rotation,
+            width = bounds.first,
+            height = bounds.second,
+            screenshotFingerprint = sha256(screenshot),
+            guardFingerprints = guardFingerprints,
+        )
+        synchronized(screenshotLock) {
+            screenshots[snapshot.id] = screenshot.copyOf()
+        }
+        return ObservationCaptureResult.Succeeded(snapshot, screenshot)
+    }
+
+    private suspend fun captureTaskDisplay(
+        taskSessionKey: String,
+        expectedPackageName: String?,
+        guardRegions: List<GuardRegion>,
+    ): ObservationCaptureResult {
+        val backend = taskDisplayBackend
+            ?: return ObservationCaptureResult.Failed("The task display is unavailable; refusing to use the physical display.")
+        val session = backend.current(taskSessionKey)
+            ?: return ObservationCaptureResult.Failed("The task display is no longer available; refusing to use the physical display.")
+        val captured = try {
+            backend.capture(session)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            return ObservationCaptureResult.Failed(
+                "DHD task display capture failed: ${error.message ?: error::class.java.simpleName}",
+            )
+        }
+        if (captured.taskId != session.taskId) {
+            return ObservationCaptureResult.Failed(
+                "The task display changed while capturing; refusing to bind an action.",
+            )
+        }
+        val screenshot = captured.screenshot
+        val bounds = decodeBounds(screenshot)
+            ?: return ObservationCaptureResult.Failed("DHD returned an invalid task-display PNG screenshot.")
+        if (bounds.first <= 0 || bounds.second <= 0) {
+            return ObservationCaptureResult.Failed("The task-display screenshot has no usable dimensions.")
+        }
+        if (bounds.first != captured.geometry.width || bounds.second != captured.geometry.height) {
+            return ObservationCaptureResult.Failed(
+                "The task-display geometry changed from ${captured.geometry.width}x${captured.geometry.height} to ${bounds.first}x${bounds.second}.",
+            )
+        }
+        val focused = captured.foreground
+        if (expectedPackageName != null && focused.packageName != expectedPackageName) {
+            return ObservationCaptureResult.Failed(
+                "The task foreground app changed to ${focused.packageName}; expected $expectedPackageName.",
+            )
+        }
+        val guardFingerprints = try {
+            fingerprintGuards(screenshot, bounds.first, bounds.second, guardRegions)
+        } catch (error: IllegalArgumentException) {
+            return ObservationCaptureResult.Failed(error.message ?: "Invalid guard region.")
+        }
+        val snapshot = ObservationSnapshot(
+            id = UUID.randomUUID().toString(),
+            packageName = focused.packageName,
+            activityName = focused.activityName,
+            displayId = focused.displayId,
+            taskSessionKey = taskSessionKey,
+            taskId = captured.taskId,
+            rotation = focused.rotation,
             width = bounds.first,
             height = bounds.second,
             screenshotFingerprint = sha256(screenshot),
