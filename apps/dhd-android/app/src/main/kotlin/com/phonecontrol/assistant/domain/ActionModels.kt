@@ -122,7 +122,16 @@ data class ScrollAction(
     val direction: ScrollDirection,
     val amount: ScrollAmount,
     override val metadata: ActionMetadata,
+    /** Optional center of the scroll gesture in task-display pixels. */
+    val x: Int? = null,
+    val y: Int? = null,
 ) : PhoneAction {
+    init {
+        require((x == null) == (y == null)) { "Scroll x and y must be provided together." }
+        require(x == null || x >= 0) { "Scroll x must be non-negative" }
+        require(y == null || y >= 0) { "Scroll y must be non-negative" }
+    }
+
     override val type: ActionType = ActionType.SCROLL
 }
 

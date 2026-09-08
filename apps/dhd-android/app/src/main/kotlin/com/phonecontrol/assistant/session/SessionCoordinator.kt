@@ -5,7 +5,13 @@ import com.phonecontrol.assistant.domain.ActivityEventKind
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.PhoneAction
 import com.phonecontrol.assistant.domain.ReasoningEffort
+import com.phonecontrol.assistant.domain.ScrollAction
+import com.phonecontrol.assistant.domain.SwipeAction
+import com.phonecontrol.assistant.domain.TapAction
+import com.phonecontrol.assistant.domain.TaskPointerEvent
 import com.phonecontrol.assistant.domain.StaleObservationDiagnostics
+import com.phonecontrol.assistant.domain.TASK_SCROLL_DURATION_MS
+import com.phonecontrol.assistant.domain.calculateTaskScrollGesture
 import com.phonecontrol.assistant.domain.userFacingActivityLabel
 import com.phonecontrol.assistant.data.ConversationStore
 import com.phonecontrol.assistant.data.RunStatus
@@ -127,6 +133,7 @@ class SessionCoordinator(
     private val lock = Any()
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
     private val _events = MutableStateFlow<List<ActivityEvent>>(emptyList())
+    private val _pointerEvent = MutableStateFlow<TaskPointerEvent?>(null)
     private var sessionJob: Job? = null
     private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var claimedRequestSessionId: String? = null
@@ -137,6 +144,9 @@ class SessionCoordinator(
 
     val state: StateFlow<SessionState> = _state.asStateFlow()
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
+
+    /** Latest successful task-display gesture for the read-only live preview. */
+    val pointerEvent: StateFlow<TaskPointerEvent?> = _pointerEvent.asStateFlow()
 
     /** Stable owner key used by the phone bridge to choose the task display. */
     fun activeSessionId(): String? = synchronized(lock) {
@@ -160,6 +170,7 @@ class SessionCoordinator(
         val normalizedReasoningEffort = ReasoningEffort.fromCodexValue(reasoningEffort)?.codexValue
             ?: ReasoningEffort.default.codexValue
         completedAttentions.clear()
+        _pointerEvent.value = null
         val startedRun = conversationStore?.startRun(sessionId, request, conversationId)
         claimedRequestSessionId = null
         _state.value = SessionState.Running(
@@ -352,6 +363,7 @@ class SessionCoordinator(
         clearSteers(sessionId)
         val conversationId = _state.value.conversationIdOrNull()
         _state.value = SessionState.Stopped(sessionId, reason, conversationId)
+        _pointerEvent.value = null
         conversationStore?.completeRun(sessionId, RunStatus.STOPPED)
         appendEvent(ActivityEventKind.SESSION_STOPPED, reason, sessionId)
         true
@@ -377,6 +389,7 @@ class SessionCoordinator(
             .ifBlank { "The desktop Codex turn failed." }
         val conversationId = _state.value.conversationIdOrNull()
         _state.value = SessionState.Stopped(sessionId, "Failed: $safeReason", conversationId)
+        _pointerEvent.value = null
         conversationStore?.completeRun(
             sessionId,
             RunStatus.FAILED,
@@ -416,6 +429,7 @@ class SessionCoordinator(
         val conversationId = _state.value.conversationIdOrNull()
         _state.value.sessionIdOrNull?.let(::clearSteers)
         _state.value = SessionState.Completed(sessionId, displayMessage, conversationId)
+        _pointerEvent.value = null
         // Feedback is emitted as an AGENT_MESSAGE below so the live timeline
         // and the durable timeline share one row. The fallback completion has
         // no separate event, so persist it directly here.
@@ -703,6 +717,9 @@ class SessionCoordinator(
         } else {
             ActivityEventKind.ACTION_FAILED
         }
+        if (result is TransportResult.Succeeded) {
+            publishPointerEvent(running.sessionId, action, observation)
+        }
         appendEvent(
             eventKind,
             transportMessage(result),
@@ -714,6 +731,65 @@ class SessionCoordinator(
             targetDescription = action.metadata.targetDescription,
         )
         return ActionExecutionResult.TransportFinished(result)
+    }
+
+    /** Publish visual feedback only after the display-scoped command succeeds. */
+    private fun publishPointerEvent(
+        sessionId: String,
+        action: PhoneAction,
+        observation: ObservationSnapshot?,
+    ) = synchronized(lock) {
+        val current = _state.value
+        if (current.sessionIdOrNull != sessionId || !current.isActive || observation == null) return@synchronized
+        val sequence = (_pointerEvent.value?.sequence ?: 0L) + 1L
+        val nextEvent = when (action) {
+            is TapAction -> TaskPointerEvent.Click(
+                sequence = sequence,
+                sessionId = sessionId,
+                x = action.x,
+                y = action.y,
+                displayWidth = observation.width,
+                displayHeight = observation.height,
+            )
+
+            is SwipeAction -> TaskPointerEvent.Swipe(
+                sequence = sequence,
+                sessionId = sessionId,
+                startX = action.startX,
+                startY = action.startY,
+                endX = action.endX,
+                endY = action.endY,
+                durationMs = action.durationMs,
+                displayWidth = observation.width,
+                displayHeight = observation.height,
+            )
+
+            is ScrollAction -> calculateTaskScrollGesture(
+                width = observation.width,
+                height = observation.height,
+                direction = action.direction,
+                amount = action.amount,
+                centerX = action.x,
+                centerY = action.y,
+            ).let { gesture ->
+                TaskPointerEvent.Scroll(
+                    sequence = sequence,
+                    sessionId = sessionId,
+                    direction = action.direction,
+                    amount = action.amount,
+                    startX = gesture.startX,
+                    startY = gesture.startY,
+                    endX = gesture.endX,
+                    endY = gesture.endY,
+                    durationMs = TASK_SCROLL_DURATION_MS,
+                    displayWidth = observation.width,
+                    displayHeight = observation.height,
+                )
+            }
+
+            else -> return@synchronized
+        }
+        _pointerEvent.value = nextEvent
     }
 
     fun close() {

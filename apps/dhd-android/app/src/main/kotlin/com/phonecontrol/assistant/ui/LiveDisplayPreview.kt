@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.phonecontrol.assistant.domain.TaskPointerEvent
 
 /**
  * The state rendered by [LiveDisplayPreview].
@@ -48,6 +49,8 @@ data class LiveDisplayPreviewState(
     val aspectRatio: Float = DEFAULT_LIVE_DISPLAY_PREVIEW_ASPECT_RATIO,
     /** Identifies the task/display session using this surface. */
     val sessionKey: String? = null,
+    /** Latest successful gesture to render above the read-only stream. */
+    val pointerEvent: TaskPointerEvent? = null,
 ) {
     companion object {
         fun unavailable(
@@ -206,6 +209,10 @@ fun LiveDisplayPreview(
                             .align(Alignment.TopStart)
                             .padding(10.dp),
                     )
+                }
+
+                if (state.status == LiveDisplayPreviewStatus.LIVE) {
+                    TaskPointerOverlay(event = state.pointerEvent)
                 }
             }
         }

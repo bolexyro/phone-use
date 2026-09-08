@@ -6,6 +6,7 @@ import com.phonecontrol.assistant.domain.ReasoningEffort
 import com.phonecontrol.assistant.domain.ScreenProtection
 import com.phonecontrol.assistant.domain.ScreenProtectionStatus
 import com.phonecontrol.assistant.domain.TapAction
+import com.phonecontrol.assistant.domain.TaskPointerEvent
 import com.phonecontrol.assistant.policy.PolicyEngine
 import com.phonecontrol.assistant.execution.PhoneActionTransport
 import com.phonecontrol.assistant.execution.TransportResult
@@ -64,6 +65,10 @@ class SessionCoordinatorTest {
 
         assertTrue(result is ActionExecutionResult.TransportFinished)
         assertTrue(coordinator.events.value.any { it.kind == com.phonecontrol.assistant.domain.ActivityEventKind.ACTION_SUCCEEDED })
+        val pointer = coordinator.pointerEvent.value
+        assertTrue(pointer is TaskPointerEvent.Click)
+        assertEquals(500, (pointer as TaskPointerEvent.Click).x)
+        assertEquals(900, pointer.y)
     }
 
     @Test

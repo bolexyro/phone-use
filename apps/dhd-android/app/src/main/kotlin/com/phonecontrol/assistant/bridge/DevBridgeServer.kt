@@ -1380,11 +1380,18 @@ class DevBridgeServer(
                 metadata = metadata,
             )
 
-            "scroll" -> ScrollAction(
-                direction = enumValue<ScrollDirection>(json.getString("direction")),
-                amount = enumValue<ScrollAmount>(json.getString("amount")),
-                metadata = metadata,
-            )
+            "scroll" -> {
+                val hasX = json.has("x")
+                val hasY = json.has("y")
+                require(hasX == hasY) { "Scroll x and y must be provided together." }
+                ScrollAction(
+                    direction = enumValue<ScrollDirection>(json.getString("direction")),
+                    amount = enumValue<ScrollAmount>(json.getString("amount")),
+                    metadata = metadata,
+                    x = if (hasX) json.getInt("x") else null,
+                    y = if (hasY) json.getInt("y") else null,
+                )
+            }
 
             "back" -> BackAction(metadata)
 

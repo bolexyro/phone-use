@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val display by app.taskDisplayBackend.activeSession.collectAsState()
             val playback by app.taskDisplayBackend.previewState.collectAsState()
+            val pointerEvent by app.sessionCoordinator.pointerEvent.collectAsState()
             val preview = display?.let { session ->
                 val error = playback as? TaskPreviewState.Error
                 LiveDisplayPreviewState(
@@ -57,6 +58,7 @@ class MainActivity : ComponentActivity() {
                     message = error?.takeIf { it.sessionKey == session.sessionKey }?.message,
                     aspectRatio = session.geometry.width.toFloat() / session.geometry.height,
                     sessionKey = session.sessionKey,
+                    pointerEvent = pointerEvent?.takeIf { it.sessionId == session.sessionKey },
                 )
             }
             PhoneControlApp(

@@ -436,6 +436,29 @@ describe("DHD phone tool contract", () => {
     }).success).toBe(false);
   });
 
+  it("accepts an optional scroll gesture center in both execution surfaces", () => {
+    const scroll = {
+      type: "scroll" as const,
+      direction: "down" as const,
+      amount: "medium" as const,
+      x: 180,
+      y: 600,
+      metadata
+    };
+
+    expect(dhdExecuteActionSchema.safeParse(scroll).success).toBe(true);
+    expect(dhdExecuteSequenceInputSchema.safeParse({
+      observationId: "obs-1",
+      actions: [{
+        ...scroll,
+        metadata: {
+          purpose: metadata.purpose,
+          targetDescription: metadata.targetDescription
+        }
+      }]
+    }).success).toBe(true);
+  });
+
   it("requires one initial observation for a fixed typed sequence", () => {
     const action = {
       type: "tap" as const,

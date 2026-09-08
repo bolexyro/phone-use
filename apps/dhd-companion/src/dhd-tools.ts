@@ -131,6 +131,11 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
         type: z.literal(DHD_ACTION_TYPES.scroll),
         direction: z.enum(DHD_SCROLL_DIRECTIONS),
         amount: z.enum(DHD_SCROLL_AMOUNTS),
+        // When supplied, x/y identify the center of the scroll gesture in
+        // task-display pixels. The phone validates the pair against the
+        // current display geometry before sending input.
+        x: z.number().int().min(0).optional(),
+        y: z.number().int().min(0).optional(),
         metadata: actionMetadataSchema
       })
       .strict(),
@@ -192,6 +197,8 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
               type: z.literal(DHD_ACTION_TYPES.scroll),
               direction: z.enum(DHD_SCROLL_DIRECTIONS),
               amount: z.enum(DHD_SCROLL_AMOUNTS),
+              x: z.number().int().min(0).optional(),
+              y: z.number().int().min(0).optional(),
               metadata: sequenceActionMetadataSchema
             })
             .strict(),

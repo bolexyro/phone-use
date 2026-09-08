@@ -15,12 +15,12 @@ import com.phonecontrol.assistant.domain.KeypressKey
 import com.phonecontrol.assistant.domain.OpenAppAction
 import com.phonecontrol.assistant.domain.PhoneAction
 import com.phonecontrol.assistant.domain.ScrollAction
-import com.phonecontrol.assistant.domain.ScrollAmount
-import com.phonecontrol.assistant.domain.ScrollDirection
 import com.phonecontrol.assistant.domain.SwipeAction
 import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.domain.TypeAction
 import com.phonecontrol.assistant.domain.WaitAction
+import com.phonecontrol.assistant.domain.TASK_SCROLL_DURATION_MS
+import com.phonecontrol.assistant.domain.calculateTaskScrollGesture
 import kotlinx.coroutines.delay
 
 sealed interface TransportResult {
@@ -393,7 +393,22 @@ class TypedPhoneActionTransport(
             is FreshCheck.Ready -> check
         }
         val current = before.snapshot
-        val gesture = scrollGesture(current, action.direction, action.amount)
+        if ((action.x == null) != (action.y == null) ||
+            (action.x != null && !current.contains(action.x, action.y!!))
+        ) {
+            return TransportResult.Rejected(
+                RejectionCode.INVALID_COORDINATE,
+                "Scroll coordinate ${action.x},${action.y} is outside the ${current.width}x${current.height} display.",
+            )
+        }
+        val gesture = calculateTaskScrollGesture(
+            width = current.width,
+            height = current.height,
+            direction = action.direction,
+            amount = action.amount,
+            centerX = action.x,
+            centerY = action.y,
+        )
         val result = runForSession(
             sessionKey,
             listOf(
@@ -403,7 +418,7 @@ class TypedPhoneActionTransport(
                 gesture.startY.toString(),
                 gesture.endX.toString(),
                 gesture.endY.toString(),
-                SCROLL_DURATION_MS.toString(),
+                TASK_SCROLL_DURATION_MS.toString(),
             ),
             observation,
         )
@@ -600,61 +615,6 @@ class TypedPhoneActionTransport(
         return text.replace(" ", "%s")
     }
 
-    private fun scrollGesture(
-        observation: ObservationSnapshot,
-        direction: ScrollDirection,
-        amount: ScrollAmount,
-    ): Gesture {
-        val distance = when (amount) {
-            ScrollAmount.SMALL -> 0.22f
-            ScrollAmount.MEDIUM -> 0.42f
-            ScrollAmount.LARGE -> 0.62f
-        }
-        val centerX = observation.width / 2
-        val centerY = observation.height / 2
-        val horizontalDistance = (observation.width * distance).toInt().coerceAtLeast(1)
-        val verticalDistance = (observation.height * distance).toInt().coerceAtLeast(1)
-        return when (direction) {
-            ScrollDirection.UP -> Gesture(
-                centerX,
-                (centerY + verticalDistance / 2).coerceAtMost(observation.height - 1),
-                centerX,
-                (centerY - verticalDistance / 2).coerceAtLeast(0),
-            )
-
-            ScrollDirection.DOWN -> Gesture(
-                centerX,
-                (centerY - verticalDistance / 2).coerceAtLeast(0),
-                centerX,
-                (centerY + verticalDistance / 2).coerceAtMost(observation.height - 1),
-            )
-
-            ScrollDirection.LEFT -> Gesture(
-                (centerX + horizontalDistance / 2).coerceAtMost(observation.width - 1),
-                centerY,
-                (centerX - horizontalDistance / 2).coerceAtLeast(0),
-                centerY,
-            )
-
-            ScrollDirection.RIGHT -> Gesture(
-                (centerX - horizontalDistance / 2).coerceAtLeast(0),
-                centerY,
-                (centerX + horizontalDistance / 2).coerceAtMost(observation.width - 1),
-                centerY,
-            )
-        }
-    }
-
-    private data class Gesture(
-        val startX: Int,
-        val startY: Int,
-        val endX: Int,
-        val endY: Int,
-    )
-
-    private companion object {
-        const val SCROLL_DURATION_MS = 400L
-    }
 }
 
 /**

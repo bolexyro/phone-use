@@ -18,4 +18,14 @@ class ActionModelsTest {
     fun `guard region rejects inverted geometry`() {
         GuardRegion(left = 680, top = 840, right = 420, bottom = 960)
     }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `scroll rejects a coordinate without its pair`() {
+        ScrollAction(
+            direction = ScrollDirection.DOWN,
+            amount = ScrollAmount.MEDIUM,
+            metadata = ActionMetadata("Scroll the feed", "obs-1", "Feed"),
+            x = 180,
+        )
+    }
 }
