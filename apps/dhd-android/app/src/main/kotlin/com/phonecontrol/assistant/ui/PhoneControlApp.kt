@@ -163,6 +163,7 @@ fun PhoneControlApp(
     initialConversationId: String? = null,
     onRunRequest: (String, String?, String?, Boolean) -> Unit,
     onStopSession: () -> Unit,
+    onAcknowledgeAttention: () -> Boolean,
     onSteerRequest: (String) -> Boolean,
     previewState: LiveDisplayPreviewState? = null,
     onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
@@ -319,6 +320,7 @@ fun PhoneControlApp(
                             fastMode = fastMode,
                             onSetFastMode = setFastMode,
                             onStopSession = onStopSession,
+                            onAcknowledgeAttention = onAcknowledgeAttention,
                             onSteerRequest = onSteerRequest,
                             onOpenSettings = { navController.navigate(AppRoutes.SETTINGS) },
                             onStartFresh = {

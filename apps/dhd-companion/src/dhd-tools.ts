@@ -5,7 +5,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { requestBridge, type BridgeMessage } from "./phone-assistant-bridge.js";
+import {
+  BLOCKING_BRIDGE_TIMEOUT_MS,
+  requestBridge,
+  type BridgeMessage,
+} from "./phone-assistant-bridge.js";
 import {
   DHD_ACTION_TYPES,
   DHD_KEYPRESS_KEYS,
@@ -692,7 +696,10 @@ export async function invokeDhdTool(
     case "dhd_request_attention":
       return safely(() => {
         const reason = parseInput(z.string().min(1).max(DHD_MAX_TEXT_CHARS), readRecord(input).reason);
-        return requestBridge({ type: "request_attention", requestId: randomUUID(), reason });
+        return requestBridge(
+          { type: "request_attention", requestId: randomUUID(), reason },
+          { timeoutMs: BLOCKING_BRIDGE_TIMEOUT_MS },
+        );
       });
     default:
       throw new Error(`Unknown DHD tool: ${name}`);

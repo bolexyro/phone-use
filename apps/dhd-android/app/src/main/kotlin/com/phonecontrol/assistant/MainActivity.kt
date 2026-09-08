@@ -63,6 +63,7 @@ class MainActivity : ComponentActivity() {
                 initialConversationId = initialConversationId,
                 onRunRequest = ::startSession,
                 onStopSession = ::stopSession,
+                onAcknowledgeAttention = { app.sessionCoordinator.acknowledgeAttention() },
                 onSteerRequest = ::steerSession,
                 previewState = preview,
                 onPreviewSurfaceAvailable = { surface ->

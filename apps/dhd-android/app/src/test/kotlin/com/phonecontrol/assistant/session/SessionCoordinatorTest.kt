@@ -3,10 +3,15 @@ package com.phonecontrol.assistant.session
 import com.phonecontrol.assistant.domain.ActionMetadata
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.ReasoningEffort
+import com.phonecontrol.assistant.domain.ScreenProtection
+import com.phonecontrol.assistant.domain.ScreenProtectionStatus
 import com.phonecontrol.assistant.domain.TapAction
 import com.phonecontrol.assistant.policy.PolicyEngine
 import com.phonecontrol.assistant.execution.PhoneActionTransport
 import com.phonecontrol.assistant.execution.TransportResult
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -183,6 +188,65 @@ class SessionCoordinatorTest {
         assertTrue(coordinator.events.value.any {
             it.kind == com.phonecontrol.assistant.domain.ActivityEventKind.ATTENTION_REQUIRED
         })
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun `attention waiter stays blocked until the user acknowledges`() = runTest {
+        val coordinator = coordinator()
+        coordinator.start("Find a restaurant")
+        val sessionId = coordinator.activeSessionId()!!
+        val attention = coordinator.requestAttentionWaiter("Complete the PIN on the phone.")!!
+
+        val waiter = async { attention.await() }
+        runCurrent()
+        assertTrue(!waiter.isCompleted)
+        assertTrue(coordinator.attentionPending())
+
+        assertTrue(coordinator.acknowledgeAttention())
+        assertEquals(AttentionResolution.Acknowledged, waiter.await())
+        assertTrue(!coordinator.attentionPending())
+        assertNull((coordinator.state.value as SessionState.Running).attentionReason)
+    }
+
+    @Test
+    fun `attention completion survives an immediate Done tap before the bridge awaits`() = runTest {
+        val coordinator = coordinator()
+        coordinator.start("Find a restaurant")
+        val attention = coordinator.requestAttentionWaiter("Complete the PIN on the phone.")!!
+
+        assertTrue(coordinator.acknowledgeAttention())
+        assertEquals(AttentionResolution.Acknowledged, attention.await())
+    }
+
+    @Test
+    fun `secure observation rejects input and tells the agent to request attention`() = runTest {
+        val coordinator = coordinator()
+        coordinator.start("Unlock the banking app")
+        val secureObservation = observation.copy(
+            screenProtection = ScreenProtection(
+                status = ScreenProtectionStatus.SECURE,
+                requiresUserAttention = true,
+                reason = "The focused screen is protected by a PIN.",
+            ),
+        )
+
+        val result = coordinator.executeAction(
+            TapAction(
+                x = 500,
+                y = 900,
+                metadata = ActionMetadata(
+                    purpose = "Continue",
+                    observationId = secureObservation.id,
+                    targetDescription = "Continue button",
+                ),
+            ),
+            secureObservation,
+        )
+
+        assertTrue(result is ActionExecutionResult.PolicyRejected)
+        assertEquals("SECURE_SCREEN_REQUIRES_USER", (result as ActionExecutionResult.PolicyRejected).code)
+        assertTrue(result.message.contains("dhd_request_attention"))
     }
 
     @Test

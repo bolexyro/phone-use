@@ -8,6 +8,7 @@ import {
   CodexAppServerClient,
   extractCompanionTokenUsageEvent,
   handleDynamicToolCall,
+  shouldInterruptForPhoneStop,
 } from "../src/assistant-companion.js";
 
 describe("Codex App Server agent-message extraction", () => {
@@ -153,6 +154,23 @@ describe("Codex App Server agent-message extraction", () => {
         message: "Unsupported dynamic phone tool: unsupported_phone_tool"
       }]
     });
+  });
+
+  it("does not crash when an interrupted App Server closes before an error response", async () => {
+    const client = new CodexAppServerClient() as any;
+    client.child = null;
+
+    await expect(client.handleServerRequest({
+      id: "late-request",
+      method: "unsupported/server/request",
+      params: {},
+    })).resolves.toBeUndefined();
+  });
+
+  it("does not interpret a pending attention request as a phone stop", () => {
+    expect(shouldInterruptForPhoneStop({ active: false, attentionPending: true })).toBe(false);
+    expect(shouldInterruptForPhoneStop({ active: false })).toBe(true);
+    expect(shouldInterruptForPhoneStop({ active: true, attentionPending: true })).toBe(false);
   });
 
   it("emits a complete diagnostic event with normalized arguments and images", async () => {

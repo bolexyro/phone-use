@@ -166,6 +166,7 @@ fun AssistantScreen(
     fastMode: Boolean,
     onSetFastMode: (Boolean) -> Unit,
     onStopSession: () -> Unit,
+    onAcknowledgeAttention: () -> Boolean,
     onSteerRequest: (String) -> Boolean,
     onOpenSettings: () -> Unit,
     onStartFresh: () -> Unit,
@@ -341,6 +342,7 @@ fun AssistantScreen(
                             onOpenDeveloperOptions = onOpenDeveloperOptions,
                             onOpenCompanion = onOpenCompanion,
                             onStopSession = onStopSession,
+                            onAcknowledgeAttention = onAcknowledgeAttention,
                             previewState = previewState,
                             onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
                             onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
@@ -632,6 +634,7 @@ private fun ConversationTimeline(
     onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
+    onAcknowledgeAttention: () -> Boolean,
     previewState: LiveDisplayPreviewState? = null,
     onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
     onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
@@ -687,6 +690,7 @@ private fun ConversationTimeline(
                     onOpenDeveloperOptions = onOpenDeveloperOptions,
                     onOpenCompanion = onOpenCompanion,
                     onStopSession = onStopSession,
+                    onAcknowledgeAttention = onAcknowledgeAttention,
                     previewState = previewState,
                     onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
                     onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
@@ -708,6 +712,7 @@ private fun TaskGroupCard(
     onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
+    onAcknowledgeAttention: () -> Boolean,
     previewState: LiveDisplayPreviewState? = null,
     onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
     onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
@@ -755,6 +760,7 @@ private fun TaskGroupCard(
             when (state) {
                 is SessionState.Running -> RunningStatusIndicator(
                     currentPurpose = state.currentPurpose,
+                    attentionReason = state.attentionReason,
                     startedAtEpochMs = state.startedAtEpochMs,
                     developerStatus = developerStatus,
                     companionConnected = companionConnected,
@@ -762,10 +768,19 @@ private fun TaskGroupCard(
                     onOpenDeveloperOptions = onOpenDeveloperOptions,
                     onOpenCompanion = onOpenCompanion,
                     onStopSession = onStopSession,
+                    onAcknowledgeAttention = onAcknowledgeAttention,
                 )
-                is SessionState.Paused -> PausedStatusIndicator(
-                    currentPurpose = state.currentPurpose,
-                )
+                is SessionState.Paused -> if (state.attentionReason != null) {
+                    AttentionRecoveryCard(
+                        reason = state.attentionReason,
+                        onAcknowledgeAttention = onAcknowledgeAttention,
+                        onStopSession = onStopSession,
+                    )
+                } else {
+                    PausedStatusIndicator(
+                        currentPurpose = state.currentPurpose,
+                    )
+                }
                 else -> Unit
             }
         }
@@ -803,6 +818,7 @@ private fun TaskGroupCard(
 @Composable
 private fun RunningStatusIndicator(
     currentPurpose: String,
+    attentionReason: String?,
     startedAtEpochMs: Long,
     developerStatus: DeveloperModeStatus,
     companionConnected: Boolean,
@@ -810,6 +826,7 @@ private fun RunningStatusIndicator(
     onOpenDeveloperOptions: () -> Unit,
     onOpenCompanion: () -> Unit,
     onStopSession: () -> Unit,
+    onAcknowledgeAttention: () -> Boolean,
 ) {
     val elapsedSeconds = rememberElapsedSeconds(startedAtEpochMs)
     val developerConnectionNeedsAction = developerStatus.state in setOf(
@@ -820,6 +837,19 @@ private fun RunningStatusIndicator(
         DeveloperConnectionState.UNSUPPORTED,
         DeveloperConnectionState.ERROR,
     )
+
+    // A pending attention request owns the next step. Keep Done visible even
+    // if the companion or developer-status poll changes while the user is
+    // completing a biometric/PIN prompt.
+    if (currentPurpose.equals("Needs your attention", ignoreCase = true)) {
+        AttentionRecoveryCard(
+            reason = attentionReason,
+            onAcknowledgeAttention = onAcknowledgeAttention,
+            onStopSession = onStopSession,
+        )
+        return
+    }
+
     if (developerConnectionNeedsAction) {
         DeveloperConnectionRecoveryCard(
             status = developerStatus,
@@ -837,11 +867,6 @@ private fun RunningStatusIndicator(
             elapsedSeconds = elapsedSeconds,
             onOpenCompanion = onOpenCompanion,
         )
-        return
-    }
-
-    if (currentPurpose.equals("Needs your attention", ignoreCase = true)) {
-        AttentionRecoveryCard(onStopSession = onStopSession)
         return
     }
 
@@ -1007,15 +1032,22 @@ private fun DeveloperConnectionRecoveryCard(
 }
 
 @Composable
-private fun AttentionRecoveryCard(onStopSession: () -> Unit) {
+private fun AttentionRecoveryCard(
+    reason: String?,
+    onAcknowledgeAttention: () -> Boolean,
+    onStopSession: () -> Unit,
+) {
     val colors = LocalAssistantColors.current
     RecoveryCard(
         icon = R.drawable.ic_info,
         title = "DHD needs your attention",
-        detail = "The phone screen changed unexpectedly. Review the phone before continuing.",
+        detail = reason?.takeIf(String::isNotBlank)
+            ?: "Review the phone and complete the requested step before continuing.",
         accent = colors.warningAmber,
-        actionLabel = "Stop",
-        onAction = onStopSession,
+        actionLabel = "Done",
+        onAction = { onAcknowledgeAttention() },
+        secondaryActionLabel = "Stop",
+        onSecondaryAction = onStopSession,
     )
 }
 

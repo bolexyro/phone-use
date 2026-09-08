@@ -31,6 +31,7 @@ import com.phonecontrol.assistant.domain.TypeAction
 import com.phonecontrol.assistant.domain.WaitAction
 import com.phonecontrol.assistant.session.ActionExecutionResult
 import com.phonecontrol.assistant.session.AssistantForegroundService
+import com.phonecontrol.assistant.session.AttentionResolution
 import com.phonecontrol.assistant.session.SessionCoordinator
 import com.phonecontrol.assistant.session.SessionState
 import com.phonecontrol.assistant.execution.ForegroundAppResult
@@ -507,7 +508,8 @@ class DevBridgeServer(
             .put("requestId", requestId)
             .put("ok", true)
             .put("active", state is SessionState.Running)
-            .put("available", pending != null)
+            .put("attentionPending", coordinator.attentionPending())
+            .put("available", pending != null && !coordinator.attentionPending())
         if (pending != null) {
             response
                 .put("steerId", pending.steerId)
@@ -657,6 +659,7 @@ class DevBridgeServer(
                 coordinator.state.value.conversationIdOrNullForBridge(),
             )
         }
+        AssistantForegroundService.removeAttentionNotification(context)
         context.stopService(Intent(context, AssistantForegroundService::class.java))
         AssistantForegroundService.removeSessionNotification(context)
         write(
@@ -742,6 +745,7 @@ class DevBridgeServer(
         if (completed) {
             AssistantForegroundService.showCompletionNotification(context, completionMessage, coordinator.state.value.conversationIdOrNullForBridge())
         }
+        AssistantForegroundService.removeAttentionNotification(context)
         context.stopService(Intent(context, AssistantForegroundService::class.java))
         AssistantForegroundService.removeSessionNotification(context)
         write(
@@ -757,7 +761,7 @@ class DevBridgeServer(
         )
     }
 
-    private fun requestAttention(
+    private suspend fun requestAttention(
         requestId: String,
         json: JSONObject,
         writer: BufferedWriter,
@@ -766,7 +770,8 @@ class DevBridgeServer(
             .trim()
             .ifBlank { "The phone assistant needs your attention." }
             .take(MAX_TEXT_CHARS)
-        if (!coordinator.requestAttention(reason)) {
+        val sessionId = coordinator.activeSessionId()
+        if (sessionId == null) {
             write(
                 writer,
                 errorResponse(requestId, "The phone assistant has no active session to interrupt.")
@@ -774,15 +779,50 @@ class DevBridgeServer(
             )
             return
         }
+        val attention = coordinator.requestAttentionWaiter(reason)
+        if (attention == null) {
+            write(
+                writer,
+                errorResponse(requestId, "The phone assistant is already waiting for the user's attention.")
+                    .put("code", "ATTENTION_ALREADY_PENDING"),
+            )
+            return
+        }
         AssistantForegroundService.showAttentionNotification(context, reason, coordinator.state.value.conversationIdOrNullForBridge())
-        write(
-            writer,
-            JSONObject()
-                .put("type", "attention_requested")
-                .put("requestId", requestId)
-                .put("ok", true)
-                .put("message", reason),
-        )
+        when (attention.await()) {
+            AttentionResolution.Cancelled -> write(
+                writer,
+                JSONObject()
+                    .put("type", "attention_cancelled")
+                    .put("requestId", requestId)
+                    .put("ok", false)
+                    .put("sessionId", sessionId)
+                    .put("code", "SESSION_STOPPED")
+                    .put("message", "The attention step was cancelled because the phone session stopped."),
+            )
+
+            AttentionResolution.Acknowledged -> {
+                AssistantForegroundService.removeAttentionNotification(context)
+                val response = JSONObject()
+                    .put("type", "attention_resolved")
+                    .put("requestId", requestId)
+                    .put("ok", true)
+                    .put("sessionId", sessionId)
+                    .put("acknowledged", true)
+                    .put("message", "The user confirmed that the attention step is complete. Observe the phone before taking the next action.")
+                when (val captured = captureWithRetry(null, emptyList(), sessionId)) {
+                    is ObservationCaptureResult.Failed -> response.put("observationError", captured.message)
+                    is ObservationCaptureResult.Succeeded -> {
+                        remember(captured.snapshot)
+                        response
+                            .put("observation", snapshotJson(captured.snapshot))
+                            .put("screenshotBase64", Base64.encodeToString(captured.screenshot, Base64.NO_WRAP))
+                            .put("screenshotMimeType", "image/png")
+                    }
+                }
+                write(writer, response)
+            }
+        }
     }
 
     private fun allowedApps(
@@ -927,6 +967,14 @@ class DevBridgeServer(
                     .put("rotation", result.app.rotation)
                     .put("width", result.app.width)
                     .put("height", result.app.height)
+                    .put(
+                        "screenProtection",
+                        JSONObject()
+                            .put("status", result.app.screenProtection.status.name.lowercase())
+                            .put("requiresUserAttention", result.app.screenProtection.requiresUserAttention)
+                            .put("signals", JSONArray(result.app.screenProtection.signals))
+                            .put("reason", result.app.screenProtection.reason ?: JSONObject.NULL),
+                    )
                     .put("message", "The current foreground app is ${result.app.packageName}."),
             )
         }
@@ -1202,6 +1250,7 @@ class DevBridgeServer(
             .take(MAX_TEXT_CHARS)
         val stopped = coordinator.stop(reason)
         context.stopService(Intent(context, AssistantForegroundService::class.java))
+        AssistantForegroundService.removeAttentionNotification(context)
         write(
             writer,
             JSONObject()
@@ -1535,6 +1584,14 @@ class DevBridgeServer(
         .put("width", snapshot.width)
         .put("height", snapshot.height)
         .put("screenshotFingerprint", snapshot.screenshotFingerprint)
+        .put(
+            "screenProtection",
+            JSONObject()
+                .put("status", snapshot.screenProtection.status.name.lowercase())
+                .put("requiresUserAttention", snapshot.screenProtection.requiresUserAttention)
+                .put("signals", JSONArray(snapshot.screenProtection.signals))
+                .put("reason", snapshot.screenProtection.reason ?: JSONObject.NULL),
+        )
 
     private fun stateName(state: SessionState): String = when (state) {
         SessionState.Idle -> "idle"
@@ -1945,7 +2002,7 @@ private fun ActionExecutionResult.failureCode(): String? = when (this) {
         is TransportResult.Unsupported -> "UNSUPPORTED_ACTION"
         is TransportResult.Succeeded -> null
     }
-    is ActionExecutionResult.PolicyRejected -> "POLICY_REJECTED"
+    is ActionExecutionResult.PolicyRejected -> code
     ActionExecutionResult.SessionNotRunning -> "SESSION_NOT_RUNNING"
 }
 

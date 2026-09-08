@@ -3,6 +3,8 @@ import net from "node:net";
 export const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export const DEFAULT_BRIDGE_PORT = 8765;
 export const DEFAULT_BRIDGE_TIMEOUT_MS = 45_000;
+/** A zero timeout is reserved for tools that intentionally wait on the user. */
+export const BLOCKING_BRIDGE_TIMEOUT_MS = 0;
 export const MAX_BRIDGE_RESPONSE_BYTES = 16 * 1024 * 1024;
 
 export interface BridgeMessage {
@@ -42,6 +44,8 @@ const TERMINAL_MESSAGE_TYPES = new Set([
   "codex_thread_bound",
   "agent_message_streamed",
   "attention_requested",
+  "attention_resolved",
+  "attention_cancelled",
   "session_completed",
   "session_failed",
   "allowed_apps",
@@ -109,9 +113,12 @@ export function requestBridge(
       else resolve(message!);
     };
 
-    socket.setTimeout(options.timeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS, () => {
-      finish(new Error("Timed out waiting for the phone assistant bridge."));
-    });
+    const timeoutMs = options.timeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS;
+    if (timeoutMs > 0) {
+      socket.setTimeout(timeoutMs, () => {
+        finish(new Error("Timed out waiting for the phone assistant bridge."));
+      });
+    }
     socket.once("error", (error) => {
       finish(new Error(`Could not connect to the phone assistant bridge at ${host}:${port}: ${error.message}`));
     });

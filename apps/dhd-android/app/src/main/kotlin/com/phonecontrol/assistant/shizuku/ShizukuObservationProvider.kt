@@ -8,6 +8,7 @@ import android.util.DisplayMetrics
 import android.view.Display
 import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot
+import com.phonecontrol.assistant.domain.ScreenProtection
 import com.phonecontrol.assistant.execution.PhoneProcessRunner
 import java.nio.ByteBuffer
 import java.security.MessageDigest
@@ -31,6 +32,7 @@ data class ForegroundAppInfo(
     val rotation: Int,
     val width: Int,
     val height: Int,
+    val screenProtection: ScreenProtection = ScreenProtection.VISIBLE,
 )
 
 sealed interface ForegroundAppResult {
@@ -103,8 +105,14 @@ class PhoneObservationProvider(
                     message = "The task display is no longer available.",
                 )
             return try {
-                backend.capture(session).foreground
-                    .let(ForegroundAppResult::Succeeded)
+                val captured = backend.capture(session)
+                val foreground = captured.foreground
+                foreground.copy(
+                    screenProtection = detectTaskScreenProtection(
+                        screenshot = captured.screenshot,
+                        foreground = foreground,
+                    ),
+                ).let(ForegroundAppResult::Succeeded)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -114,12 +122,13 @@ class PhoneObservationProvider(
                 )
             }
         }
-        val focused = when (val result = readFocusedWindowResult()) {
-            is FocusedWindowReadResult.Found -> result.window
+        val focusedRead = when (val result = readFocusedWindowResult()) {
+            is FocusedWindowReadResult.Found -> result
             is FocusedWindowReadResult.Failed -> {
                 return ForegroundAppResult.Failed(result.code, result.message)
             }
         }
+        val focused = focusedRead.window
         val display = context.getSystemService(DisplayManager::class.java)
             ?.getDisplay(Display.DEFAULT_DISPLAY)
             ?: return ForegroundAppResult.Failed(
@@ -147,6 +156,13 @@ class PhoneObservationProvider(
                 rotation = display.rotation,
                 width = metrics.widthPixels,
                 height = metrics.heightPixels,
+                screenProtection = detectScreenProtection(
+                    screenshot = ByteArray(0),
+                    windowDump = focusedRead.dump,
+                    displayId = Display.DEFAULT_DISPLAY,
+                    packageName = focused.packageName,
+                    activityName = focused.activityName,
+                ),
             ),
         )
     }
@@ -171,7 +187,8 @@ class PhoneObservationProvider(
         if (bounds.first <= 0 || bounds.second <= 0) {
             return ObservationCaptureResult.Failed("The screenshot has no usable display dimensions.")
         }
-        val focused = readFocusedWindow()
+        val focusedRead = readFocusedWindowResult()
+        val focused = (focusedRead as? FocusedWindowReadResult.Found)?.window
         val packageName = focused?.packageName ?: expectedPackageName
         if (packageName == null) {
             return ObservationCaptureResult.Failed(
@@ -183,6 +200,14 @@ class PhoneObservationProvider(
                 "The foreground app changed to $packageName; expected $expectedPackageName.",
             )
         }
+
+        val screenProtection = detectScreenProtection(
+            screenshot = screenshot,
+            windowDump = (focusedRead as? FocusedWindowReadResult.Found)?.dump.orEmpty(),
+            displayId = Display.DEFAULT_DISPLAY,
+            packageName = packageName,
+            activityName = focused?.activityName,
+        )
 
         val guardFingerprints = try {
             fingerprintGuards(screenshot, bounds.first, bounds.second, guardRegions)
@@ -202,6 +227,7 @@ class PhoneObservationProvider(
             height = bounds.second,
             screenshotFingerprint = sha256(screenshot),
             guardFingerprints = guardFingerprints,
+            screenProtection = screenProtection,
         )
         synchronized(screenshotLock) {
             screenshots[snapshot.id] = screenshot.copyOf()
@@ -249,6 +275,10 @@ class PhoneObservationProvider(
                 "The task foreground app changed to ${focused.packageName}; expected $expectedPackageName.",
             )
         }
+        val screenProtection = detectTaskScreenProtection(
+            screenshot = screenshot,
+            foreground = focused,
+        )
         val guardFingerprints = try {
             fingerprintGuards(screenshot, bounds.first, bounds.second, guardRegions)
         } catch (error: IllegalArgumentException) {
@@ -266,6 +296,7 @@ class PhoneObservationProvider(
             height = bounds.second,
             screenshotFingerprint = sha256(screenshot),
             guardFingerprints = guardFingerprints,
+            screenProtection = screenProtection,
         )
         synchronized(screenshotLock) {
             screenshots[snapshot.id] = screenshot.copyOf()
@@ -296,11 +327,32 @@ class PhoneObservationProvider(
             )
         }
         val text = result.stdout.toString(Charsets.UTF_8)
-        return parseFocusedWindow(text)?.let(FocusedWindowReadResult::Found)
+        return parseFocusedWindow(text)?.let { focused ->
+            FocusedWindowReadResult.Found(focused, text)
+        }
             ?: FocusedWindowReadResult.Failed(
                 code = "FOREGROUND_UNAVAILABLE",
                 message = "The current foreground app could not be identified.",
             )
+    }
+
+    private suspend fun detectTaskScreenProtection(
+        screenshot: ByteArray,
+        foreground: ForegroundAppInfo,
+    ): ScreenProtection {
+        val result = processRunner.run(listOf("dumpsys", "window"))
+        val dump = if (result.timedOut || result.exitCode != 0) {
+            ""
+        } else {
+            result.stdout.toString(Charsets.UTF_8)
+        }
+        return detectScreenProtection(
+            screenshot = screenshot,
+            windowDump = dump,
+            displayId = foreground.displayId,
+            packageName = foreground.packageName,
+            activityName = foreground.activityName,
+        )
     }
 
     private fun decodeBounds(bytes: ByteArray): Pair<Int, Int>? {
@@ -350,7 +402,7 @@ class PhoneObservationProvider(
     }
 
     private sealed interface FocusedWindowReadResult {
-        data class Found(val window: FocusedWindow) : FocusedWindowReadResult
+        data class Found(val window: FocusedWindow, val dump: String) : FocusedWindowReadResult
         data class Failed(val code: String, val message: String) : FocusedWindowReadResult
     }
 

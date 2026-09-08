@@ -261,6 +261,10 @@ describe("DHD phone tool contract", () => {
     expect(String(openAppTool.description)).toContain("Full Access");
     expect(String(openAppTool.description)).toContain("without requiring a caller-supplied observation ID");
     expect(String(observeTool.description)).toContain("not part of the Android app UI");
+    expect(String(observeTool.description)).toContain("screenProtection");
+    const attentionTool = record(dynamicTools.find((tool) => tool.name === "dhd_request_attention"));
+    expect(String(attentionTool.description)).toContain("Blocks the Codex turn");
+    expect(String(attentionTool.description)).toContain("Done");
     expect(String(executeTool.description)).toContain("GUARD_REGION_CHANGED");
     expect(String(executeTool.description)).toContain("inputSent is false");
   });

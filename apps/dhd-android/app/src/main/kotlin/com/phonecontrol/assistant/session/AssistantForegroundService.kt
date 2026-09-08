@@ -43,6 +43,7 @@ class AssistantForegroundService : Service() {
             ACTION_TOGGLE_PAUSE -> coordinator.togglePause()
             ACTION_STOP -> {
                 coordinator.stop("Stopped from the notification.")
+                removeAttentionNotification(this)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelfResult(startId)
             }
@@ -216,6 +217,11 @@ class AssistantForegroundService : Service() {
                 .build()
             context.getSystemService(NotificationManager::class.java)
                 .notify(ATTENTION_NOTIFICATION_ID, notification)
+        }
+
+        fun removeAttentionNotification(context: Context) {
+            context.getSystemService(NotificationManager::class.java)
+                .cancel(ATTENTION_NOTIFICATION_ID)
         }
 
         private fun createNotificationChannels(context: Context) {

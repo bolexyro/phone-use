@@ -832,7 +832,17 @@ export class CodexAppServerClient {
   }
 
   private respondError(id: JsonRpcId, code: number, message: string): void {
-    this.send({ id, error: { code, message } });
+    try {
+      this.send({ id, error: { code, message } });
+    } catch (error) {
+      // The App Server can interrupt and close its stdin while an async
+      // server request handler is still unwinding. A best-effort JSON-RPC
+      // error must not become an unhandled rejection that kills the phone
+      // companion worker during an otherwise expected shutdown.
+      console.error(
+        `[codex-app-server] could not send server-request error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private request(
@@ -1733,7 +1743,7 @@ async function processPendingSteer(active: ActiveCodexTurn): Promise<void> {
   // A phone-side Stop changes the coordinator state before the next poll. In
   // that case interrupt Codex as well so the desktop turn cannot continue
   // operating the phone after the user has stopped it.
-  if (pending.active === false && active.client.isTurnInFlight) {
+  if (shouldInterruptForPhoneStop(pending) && active.client.isTurnInFlight) {
     await active.client.interrupt().catch((error) => {
       console.error(
         `[phone-assistant-companion] could not interrupt stopped phone session: ${error instanceof Error ? error.message : String(error)}`,
@@ -1825,6 +1835,11 @@ async function releaseRequest(sessionId: string): Promise<void> {
       `[phone-assistant-companion] could not release request: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+/** Attention waiting is active-session state, not a phone-side Stop. */
+export function shouldInterruptForPhoneStop(pending: BridgeMessage): boolean {
+  return pending.attentionPending !== true && pending.active === false;
 }
 
 function normalizeAgentFeedback(text: string): string {

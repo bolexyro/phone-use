@@ -168,6 +168,8 @@ data class ObservationSnapshot(
     val width: Int,
     val height: Int,
     val screenshotFingerprint: String,
+    /** Metadata explaining why the task preview may be blank or protected. */
+    val screenProtection: ScreenProtection = ScreenProtection.VISIBLE,
     /**
      * Fingerprints for the stable regions supplied with a coordinate action.
      * The raw screenshot is deliberately not kept in the domain model; the
