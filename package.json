@@ -15,6 +15,7 @@
     "phone-control-mcp:start": "pnpm --filter @dhd/phone-control-mcp start",
     "phone-control-mcp:dev": "pnpm --filter @dhd/phone-control-mcp dev",
     "phone-control-viewer:start": "pnpm --filter @dhd/phone-viewer start",
+    "dhd:setup": "node scripts/setup-dhd.mjs",
     "companion:build": "pnpm --filter @dhd/dhd-companion build",
     "companion:dashboard": "pnpm --filter @dhd/dhd-companion dashboard",
     "companion:worker": "pnpm --filter @dhd/dhd-companion worker",
