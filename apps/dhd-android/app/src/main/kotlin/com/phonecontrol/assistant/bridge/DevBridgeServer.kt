@@ -6,6 +6,7 @@ import android.content.Intent
 import com.phonecontrol.assistant.apps.InstalledAppsRepository
 import com.phonecontrol.assistant.apps.InstalledUserApp
 import com.phonecontrol.assistant.data.DHD_BROWSE_APP_TOOL
+import com.phonecontrol.assistant.data.DHD_EXECUTE_TOOL
 import com.phonecontrol.assistant.data.DHD_FOREGROUND_APP_TOOL
 import com.phonecontrol.assistant.data.DHD_EXECUTE_SEQUENCE_TOOL
 import com.phonecontrol.assistant.data.DHD_LIST_ALLOWED_APPS_TOOL
@@ -1072,7 +1073,10 @@ class DevBridgeServer(
         } else {
             parsedAction
         }
-        val result = coordinator.executeAction(action, observation)
+        // This bridge endpoint is the public dhd_execute tool. Preserve that
+        // identity on the activity event so the live-display footer can use
+        // the same green accent as the conversation trace row.
+        val result = coordinator.executeAction(action, observation, DHD_EXECUTE_TOOL)
         writeActionResult(writer, requestId, wireActionName(action), result)
         if (!result.isSuccessful()) {
             val response = JSONObject()

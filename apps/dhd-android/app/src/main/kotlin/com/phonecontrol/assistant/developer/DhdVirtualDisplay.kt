@@ -126,7 +126,7 @@ class DhdVirtualDisplayManager(
         }
 
         val resetFailure = try {
-            ensureDaemonReset()
+            ensureDaemonReady()
             null
         } catch (error: Throwable) {
             error
@@ -134,7 +134,7 @@ class DhdVirtualDisplayManager(
         if (resetFailure != null) {
             return DhdVirtualDisplayResult.Failed(
                 DhdVirtualDisplayResult.Code.NOT_READY,
-                "The native display service could not clear stale sessions: " +
+                "The native display service could not reconcile stale sessions: " +
                     (resetFailure.message ?: resetFailure::class.java.simpleName),
             )
         }
@@ -307,23 +307,95 @@ class DhdVirtualDisplayManager(
     }
 
     /**
+     * Re-adopt daemon sessions that match persisted task keys and close every
+     * unknown session. The stream token is returned only over the authenticated
+     * maintenance channel and is held in memory; it is never persisted.
+     */
+    suspend fun reconcile(expectedSessionKeys: Set<String>): Map<String, DhdVirtualDisplaySession> {
+        val validKeys = expectedSessionKeys.filter { DHD_SESSION_KEY_PATTERN.matches(it) }.toSet()
+        return daemonResetMutex.withLock {
+            if (daemonResetComplete) {
+                return@withLock stateMutex.withLock { sessions.toMap() }
+            }
+            val result = controller.execute(
+                listOf(DhdVirtualDisplayProtocol.COMMAND, DhdVirtualDisplayProtocol.LIST),
+            )
+            if (result.exitCode != 0 || result.timedOut || result.stdout.isEmpty()) {
+                // Older daemons do not know LIST. Preserve the pre-registry
+                // safety behavior rather than guessing a session identity.
+                closeAllNativeSessionsLocked()
+                daemonResetComplete = true
+                return@withLock emptyMap()
+            }
+            val parsed = parseListedSessions(result) ?: run {
+                // Never leave native sessions behind when the reconciliation
+                // payload is malformed or from an incompatible daemon.
+                closeAllNativeSessionsLocked()
+                daemonResetComplete = true
+                return@withLock emptyMap()
+            }
+            val adopted = parsed.filterKeys { it in validKeys }
+            val orphaned = parsed.keys - adopted.keys
+            orphaned.forEach { key ->
+                runCatching {
+                    controller.execute(
+                        listOf(DhdVirtualDisplayProtocol.COMMAND, DhdVirtualDisplayProtocol.CLOSE, key),
+                    )
+                }
+            }
+            stateMutex.withLock {
+                sessions.clear()
+                sessions.putAll(adopted)
+            }
+            daemonResetComplete = true
+            adopted
+        }
+    }
+
+    /**
      * The daemon outlives the app process so it can keep a display alive while
      * the UI is recreated. On a fresh manager, however, any daemon sessions
      * belong to the crashed/stopped app and must be reclaimed before a new
      * task is created. The reset is performed once per manager instance.
      */
-    private suspend fun ensureDaemonReset() {
+    private suspend fun ensureDaemonReady() {
         daemonResetMutex.withLock {
             if (daemonResetComplete) return
+            // Prefer identity-aware cleanup when a caller uses this manager
+            // directly (the task backend normally performs the same
+            // reconciliation with its persisted keys first). The legacy
+            // close-all path remains only as a safe fallback for an older or
+            // malformed daemon response.
             val result = controller.execute(
-                listOf(DhdVirtualDisplayProtocol.COMMAND, DhdVirtualDisplayProtocol.CLOSE_ALL),
+                listOf(DhdVirtualDisplayProtocol.COMMAND, DhdVirtualDisplayProtocol.LIST),
             )
-            if (result.timedOut || result.exitCode != 0) {
-                throw IOException(
-                    result.stderr.ifBlank { "exit ${result.exitCode}" },
-                )
+            val listed = if (result.exitCode == 0 && !result.timedOut && result.stdout.isNotEmpty()) {
+                parseListedSessions(result)
+            } else {
+                null
+            }
+            if (listed == null) {
+                closeAllNativeSessionsLocked()
+            } else {
+                listed.keys.forEach { key ->
+                    runCatching {
+                        controller.execute(
+                            listOf(DhdVirtualDisplayProtocol.COMMAND, DhdVirtualDisplayProtocol.CLOSE, key),
+                        )
+                    }
+                }
+                stateMutex.withLock { sessions.clear() }
             }
             daemonResetComplete = true
+        }
+    }
+
+    private suspend fun closeAllNativeSessionsLocked() {
+        val result = controller.execute(
+            listOf(DhdVirtualDisplayProtocol.COMMAND, DhdVirtualDisplayProtocol.CLOSE_ALL),
+        )
+        if (result.timedOut || result.exitCode != 0) {
+            throw IOException(result.stderr.ifBlank { "exit ${result.exitCode}" })
         }
     }
 
@@ -340,25 +412,43 @@ class DhdVirtualDisplayManager(
         return runCatching {
             val json = org.json.JSONObject(String(result.stdout, Charsets.UTF_8))
             require(json.optString("type") == DhdVirtualDisplayProtocol.CREATED_TYPE)
-            val session = DhdVirtualDisplaySession(
-                sessionKey = json.getString("sessionKey"),
-                packageName = json.getString("packageName"),
-                displayId = json.getInt("displayId"),
-                width = json.getInt("width"),
-                height = json.getInt("height"),
-                densityDpi = json.getInt("densityDpi"),
-                frameRate = json.getInt("frameRate"),
-                bitRate = json.getInt("bitRate"),
-                streamPort = json.getInt("streamPort"),
-                streamToken = json.getString("streamToken"),
-                codecMime = json.optString("codecMime", DhdVirtualDisplayProtocol.CODEC_AVC),
-                appDensityDpi = json.optInt("appDensityDpi", json.getInt("densityDpi")),
-            )
+            val session = parseSession(json)
             require(session.sessionKey == expectedSessionKey)
             require(session.packageName == expectedPackageName)
             session
         }.getOrNull()
     }
+
+    private fun parseListedSessions(
+        result: PhoneProcessResult,
+    ): Map<String, DhdVirtualDisplaySession>? = runCatching {
+        val root = org.json.JSONObject(String(result.stdout, Charsets.UTF_8))
+        require(root.optString("type") == "dhd_display_sessions")
+        val array = root.optJSONArray("sessions") ?: return@runCatching emptyMap()
+        buildMap {
+            for (index in 0 until array.length()) {
+                val session = parseSession(array.getJSONObject(index))
+                if (put(session.sessionKey, session) != null) {
+                    throw IllegalArgumentException("The daemon returned duplicate display session keys.")
+                }
+            }
+        }
+    }.getOrNull()
+
+    private fun parseSession(json: org.json.JSONObject): DhdVirtualDisplaySession = DhdVirtualDisplaySession(
+        sessionKey = json.getString("sessionKey"),
+        packageName = json.getString("packageName"),
+        displayId = json.getInt("displayId"),
+        width = json.getInt("width"),
+        height = json.getInt("height"),
+        densityDpi = json.getInt("densityDpi"),
+        frameRate = json.getInt("frameRate"),
+        bitRate = json.getInt("bitRate"),
+        streamPort = json.getInt("streamPort"),
+        streamToken = json.getString("streamToken"),
+        codecMime = json.optString("codecMime", DhdVirtualDisplayProtocol.CODEC_AVC),
+        appDensityDpi = json.optInt("appDensityDpi", json.getInt("densityDpi")),
+    )
 
     private fun failureCode(result: PhoneProcessResult): DhdVirtualDisplayResult.Code = when {
         result.timedOut -> DhdVirtualDisplayResult.Code.COMMAND_FAILED

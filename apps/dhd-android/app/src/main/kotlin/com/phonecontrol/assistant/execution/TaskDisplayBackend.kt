@@ -1,6 +1,7 @@
 package com.phonecontrol.assistant.execution
 
 import android.view.Surface
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * The fixed buffer geometry used by an agent display.  The Compose preview may
@@ -50,6 +51,8 @@ data class TaskDisplaySession(
     val displayId: Int,
     val streamEndpoint: String? = null,
     val geometry: TaskDisplayGeometry,
+    /** The package launched on this display, when known. */
+    val packageName: String = "",
 ) {
     init {
         require(sessionKey.isNotBlank()) { "Task display session key must not be blank." }
@@ -57,6 +60,90 @@ data class TaskDisplaySession(
         require(displayId > 0) { "Task display ID must be greater than the default display." }
     }
 }
+
+/** Lifecycle states exposed to the task-display manager and live viewer. */
+enum class TaskDisplayStatus {
+    RUNNING,
+    PAUSED,
+    COMPLETED,
+    FAILED,
+    STOPPED,
+    UNAVAILABLE,
+    ENDED,
+    EXPIRED,
+}
+
+/** Durable, display-scoped metadata. No screenshots or private reasoning are stored. */
+data class TaskDisplayRecord(
+    val sessionKey: String,
+    val taskId: String,
+    val packageName: String,
+    val displayId: Int,
+    val width: Int,
+    val height: Int,
+    val densityDpi: Int,
+    val rotation: Int,
+    val status: TaskDisplayStatus,
+    val createdAtEpochMs: Long,
+    val terminalAtEpochMs: Long? = null,
+    val expiresAtEpochMs: Long? = null,
+    val lastPurpose: String = "Preparing request",
+    val error: String? = null,
+) {
+    init {
+        require(sessionKey.isNotBlank()) { "Task display record session key must not be blank." }
+        require(taskId.isNotBlank()) { "Task display record task ID must not be blank." }
+        require(packageName.isNotBlank()) { "Task display record package name must not be blank." }
+        require(displayId > 0) { "Task display record ID must be greater than the default display." }
+        require(width > 0 && height > 0 && densityDpi > 0) { "Task display record geometry is invalid." }
+        require(createdAtEpochMs >= 0) { "Task display record creation time is invalid." }
+    }
+
+    val geometry: TaskDisplayGeometry
+        get() = TaskDisplayGeometry(width, height, densityDpi, rotation)
+}
+
+/**
+ * Apply a terminal state without touching the display itself. Keeping this
+ * calculation pure makes retention timing deterministic for the registry and
+ * its injected-clock tests.
+ */
+fun TaskDisplayRecord.terminalized(
+    status: TaskDisplayStatus,
+    terminalAtEpochMs: Long,
+    retentionMs: Long,
+    error: String? = null,
+): TaskDisplayRecord {
+    require(status.isTerminal) { "Only terminal statuses may retain a task display." }
+    val terminalAt = terminalAtEpochMs.coerceAtLeast(createdAtEpochMs)
+    val firstTerminalAt = this.terminalAtEpochMs ?: terminalAt
+    val expiresAt = when (status) {
+        TaskDisplayStatus.ENDED,
+        TaskDisplayStatus.EXPIRED,
+        -> firstTerminalAt
+        else -> firstTerminalAt + retentionMs.coerceAtLeast(0L)
+    }
+    return copy(
+        status = status,
+        terminalAtEpochMs = firstTerminalAt,
+        expiresAtEpochMs = expiresAt,
+        lastPurpose = lastPurpose
+            .takeIf { it.isNotBlank() && it != "Preparing request" }
+            ?: status.terminalPurpose(),
+        error = error?.trim()?.take(MAX_TASK_DISPLAY_ERROR_CHARS),
+    )
+}
+
+private fun TaskDisplayStatus.terminalPurpose(): String = when (this) {
+    TaskDisplayStatus.COMPLETED -> "Task complete"
+    TaskDisplayStatus.FAILED -> "Task failed"
+    TaskDisplayStatus.STOPPED -> "Task stopped"
+    TaskDisplayStatus.ENDED -> "Display ended"
+    TaskDisplayStatus.EXPIRED -> "Display expired"
+    else -> "Preparing request"
+}
+
+private const val MAX_TASK_DISPLAY_ERROR_CHARS = 4_000
 
 data class TaskDisplayGeometry(
     val width: Int,
@@ -95,6 +182,13 @@ data class TaskDisplayCapture(
  * a new task.
  */
 interface TaskDisplayBackend {
+    /** All known display records, ordered newest first. */
+    val displayRecords: StateFlow<List<TaskDisplayRecord>>
+
+    /** Alias used by display-manager consumers. */
+    val taskDisplays: StateFlow<List<TaskDisplayRecord>>
+        get() = displayRecords
+
     /** Create and launch [packageName] on a display owned by [sessionKey]. */
     suspend fun create(
         sessionKey: String,
@@ -122,10 +216,41 @@ interface TaskDisplayBackend {
     suspend fun attachLiveSurface(session: TaskDisplaySession, surface: Surface)
     suspend fun detachLiveSurface(session: TaskDisplaySession, surface: Surface)
 
-    /** Invalidate work immediately, then release resources asynchronously. */
+    /** Restart decoding on the currently attached preview surface after an error. */
+    suspend fun retryLiveSurface(sessionKey: String) = Unit
+
+    /** Invalidate agent work immediately while leaving the display viewable. */
     fun cancel(sessionKey: String)
+
+    /** Mark a run terminal while retaining its display for the viewer. */
+    suspend fun retain(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = Unit
+
+    /** Update a non-terminal lifecycle state while the run remains active. */
+    suspend fun updateStatus(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = Unit
+
+    /** Update the sanitized purpose shown in the live viewer footer. */
+    fun updatePurpose(sessionKey: String, purpose: String) = Unit
+
     suspend fun close(session: TaskDisplaySession)
 
     /** Close by owner key, including a create that is still in flight. */
     suspend fun close(sessionKey: String)
+
+    /** Explicitly end a display from the task-display manager. */
+    suspend fun closeTaskDisplay(sessionKey: String) = close(sessionKey)
 }
+
+val TaskDisplayStatus.isTerminal: Boolean
+    get() = this == TaskDisplayStatus.COMPLETED ||
+        this == TaskDisplayStatus.FAILED ||
+        this == TaskDisplayStatus.STOPPED ||
+        this == TaskDisplayStatus.ENDED ||
+        this == TaskDisplayStatus.EXPIRED

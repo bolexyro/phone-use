@@ -153,6 +153,7 @@ private fun visibleReasoningEffortsFromStorage(value: String?): List<ReasoningEf
 object AppRoutes {
     const val MAIN = "main"
     const val SETTINGS = "settings"
+    const val TASK_DISPLAYS = "task_displays"
     const val PAIRING = "pairing"
     const val APPROVED_APPS = "approved_apps"
     const val COMPANION = "companion"
@@ -168,6 +169,16 @@ fun PhoneControlApp(
     previewState: LiveDisplayPreviewState? = null,
     onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
     onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
+    /** Display records supplied by the lifecycle/backend layer. */
+    displayRecords: List<TaskDisplayUiRecord> = emptyList(),
+    onTaskDisplaySurfaceAvailable: (TaskDisplayUiRecord, AndroidSurface) -> Unit = { _, surface ->
+        onPreviewSurfaceAvailable(surface)
+    },
+    onTaskDisplaySurfaceDestroyed: (TaskDisplayUiRecord, AndroidSurface) -> Unit = { _, surface ->
+        onPreviewSurfaceDestroyed(surface)
+    },
+    onEndTaskDisplay: (TaskDisplayUiRecord) -> Unit = {},
+    onRetryTaskDisplayPreview: (TaskDisplayUiRecord) -> Unit = {},
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
@@ -252,6 +263,46 @@ fun PhoneControlApp(
     val apps = remember { InstalledAppsRepository(context).listLaunchableUserApps() }
 
     val navController = rememberNavController()
+    var viewerSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var taskDisplaysSheetVisible by rememberSaveable { mutableStateOf(false) }
+    val openTaskDisplays: () -> Unit = { taskDisplaysSheetVisible = true }
+
+    // Until the backend exposes its registry, the active preview remains a
+    // valid single-record manager model. MainActivity can pass persisted and
+    // retained records later without changing the viewer contract.
+    val visibleDisplayRecords = displayRecords.ifEmpty {
+        previewState?.sessionKey?.let { key ->
+            listOf(
+                TaskDisplayUiRecord(
+                    sessionKey = key,
+                    lifecycle = TaskDisplayLifecycle.RUNNING,
+                    appLabel = previewState.appLabel,
+                    currentPurpose = previewState.purpose,
+                    currentToolName = previewState.currentToolName,
+                    previewState = previewState,
+                ),
+            )
+        }.orEmpty()
+    }
+    val viewerRecord = viewerSessionKey?.let { key ->
+        visibleDisplayRecords.firstOrNull { it.sessionKey == key }
+    }
+    val viewerState = viewerRecord?.previewState
+        ?: previewState?.takeIf { it.sessionKey == viewerRecord?.sessionKey }
+        ?: viewerRecord?.let { record ->
+            val ratio = record.geometry?.let { geometry ->
+                geometry.width.toFloat() / geometry.height.toFloat()
+            } ?: DEFAULT_LIVE_DISPLAY_PREVIEW_ASPECT_RATIO
+            LiveDisplayPreviewState.unavailable(
+                message = record.error,
+                aspectRatio = ratio,
+                sessionKey = record.sessionKey,
+            ).copy(
+                appLabel = record.appLabel,
+                purpose = record.currentPurpose,
+                currentToolName = record.currentToolName,
+            )
+        }
 
     val assistantColors = if (isDarkMode) DarkAssistantColors else LightAssistantColors
     val materialColors = if (isDarkMode) {
@@ -323,6 +374,7 @@ fun PhoneControlApp(
                             onAcknowledgeAttention = onAcknowledgeAttention,
                             onSteerRequest = onSteerRequest,
                             onOpenSettings = { navController.navigate(AppRoutes.SETTINGS) },
+                            onOpenTaskDisplays = openTaskDisplays,
                             onStartFresh = {
                                 conversationStore.deleteConversation(DHD_CONVERSATION_ID)
                             },
@@ -335,6 +387,8 @@ fun PhoneControlApp(
                             previewState = previewState,
                             onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
                             onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
+                            onOpenPreview = { sessionKey -> viewerSessionKey = sessionKey },
+                            expandedPreviewSessionKey = viewerSessionKey,
                         )
                     }
 
@@ -351,6 +405,22 @@ fun PhoneControlApp(
                             onOpenPairing = { navController.navigate(AppRoutes.PAIRING) },
                             onOpenApprovedApps = { navController.navigate(AppRoutes.APPROVED_APPS) },
                             onOpenCompanion = { navController.navigate(AppRoutes.COMPANION) },
+                            onOpenTaskDisplays = openTaskDisplays,
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    // Keep the route for state restoration and older callers;
+                    // the screen itself is a bottom sheet rather than a full
+                    // page, so it retains the same presentation everywhere.
+                    composable(AppRoutes.TASK_DISPLAYS) {
+                        TaskDisplaysScreen(
+                            records = visibleDisplayRecords,
+                            onView = { record ->
+                                viewerSessionKey = record.sessionKey
+                                navController.popBackStack()
+                            },
+                            onEnd = onEndTaskDisplay,
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -378,6 +448,35 @@ fun PhoneControlApp(
                             onBack = { navController.popBackStack() },
                         )
                     }
+                }
+
+                if (taskDisplaysSheetVisible) {
+                    TaskDisplaysScreen(
+                        records = visibleDisplayRecords,
+                        onView = { record ->
+                            taskDisplaysSheetVisible = false
+                            viewerSessionKey = record.sessionKey
+                        },
+                        onEnd = onEndTaskDisplay,
+                        onBack = { taskDisplaysSheetVisible = false },
+                    )
+                }
+
+                if (viewerRecord != null && viewerState != null) {
+                    FullScreenLiveDisplayViewer(
+                        record = viewerRecord,
+                        state = viewerState,
+                        onDismiss = { viewerSessionKey = null },
+                        onSurfaceAvailable = { surface ->
+                            onTaskDisplaySurfaceAvailable(viewerRecord, surface)
+                        },
+                        onSurfaceDestroyed = { surface ->
+                            onTaskDisplaySurfaceDestroyed(viewerRecord, surface)
+                        },
+                        onRetry = { onRetryTaskDisplayPreview(viewerRecord) },
+                        onAcknowledgeAttention = onAcknowledgeAttention,
+                        onStopSession = onStopSession,
+                    )
                 }
             }
         }

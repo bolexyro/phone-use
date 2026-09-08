@@ -349,6 +349,7 @@ internal object DhdVirtualDisplayProtocol {
     const val ATTACH = "attach"
     const val DETACH = "detach"
     const val CAPTURE = "capture"
+    const val LIST = "list"
     const val CLOSE = "close"
     const val CLOSE_ALL = "close-all"
     const val CREATED_TYPE = "dhd_display_created"

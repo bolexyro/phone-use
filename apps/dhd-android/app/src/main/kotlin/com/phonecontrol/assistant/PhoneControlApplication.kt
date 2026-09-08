@@ -50,18 +50,47 @@ class PhoneControlApplication : Application() {
         previewScope.launch { taskDisplayBackend.detachLiveSurface(session, surface) }
     }
 
+    /** Resolve a retained session by owner key before attaching a viewer surface. */
+    fun attachTaskPreview(sessionKey: String, surface: Surface) {
+        previewScope.launch {
+            val session = taskDisplayBackend.current(sessionKey) ?: return@launch
+            runCatching { taskDisplayBackend.attachLiveSurface(session, surface) }
+        }
+    }
+
+    /** Resolve a retained session by owner key before detaching a viewer surface. */
+    fun detachTaskPreview(sessionKey: String, surface: Surface) {
+        previewScope.launch {
+            val session = taskDisplayBackend.current(sessionKey) ?: return@launch
+            taskDisplayBackend.detachLiveSurface(session, surface)
+        }
+    }
+
+    fun retryTaskPreview(sessionKey: String) {
+        previewScope.launch { taskDisplayBackend.retryLiveSurface(sessionKey) }
+    }
+
+    /** End one display, stopping its active agent run before releasing native resources. */
+    fun endTaskDisplay(sessionKey: String) {
+        if (sessionCoordinator.activeSessionId() == sessionKey) {
+            sessionCoordinator.stop("Display ended by the user.")
+        }
+        previewScope.launch { taskDisplayBackend.closeTaskDisplay(sessionKey) }
+    }
+
     override fun onCreate() {
         super.onCreate()
         appPermissionRepository = AppPermissionRepository(this)
         developerModeController = DhdAdbController(this).also { it.start() }
         processRunner = DhdAdbProcessRunner(developerModeController)
+        conversationStore = ConversationStore(this)
         taskDisplayBackend = DhdTaskDisplayBackend(
             this,
             DhdVirtualDisplayManager(this, developerModeController),
             processRunner,
+            conversationStore,
         )
         observationProvider = PhoneObservationProvider(this, processRunner, taskDisplayBackend)
-        conversationStore = ConversationStore(this)
         sessionCoordinator = SessionCoordinator(
             enabledPackagesProvider = { appPermissionRepository.enabledPackages() },
             // Structural observation checks are always enabled; guard-region
@@ -80,6 +109,7 @@ class PhoneControlApplication : Application() {
             phoneActionsReadyProvider = { developerModeController.status.value.privilegedApiReady },
             fullAccessProvider = { appPermissionRepository.isFullAccessEnabled() },
             taskDisplayRequiredProvider = { true },
+            taskDisplayBackend = taskDisplayBackend,
         )
         // The bridge accepts paired LAN connections for the development
         // companion. adb forwarding remains compatible because forwarded

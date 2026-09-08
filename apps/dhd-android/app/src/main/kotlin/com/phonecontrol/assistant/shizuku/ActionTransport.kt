@@ -3,6 +3,7 @@ package com.phonecontrol.assistant.execution
 import android.content.Context
 import com.phonecontrol.assistant.execution.PhoneProcessResult
 import com.phonecontrol.assistant.execution.PhoneProcessRunner
+import com.phonecontrol.assistant.execution.TaskDisplayStatus
 import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSize
 import com.phonecontrol.assistant.domain.ObservationSnapshot
@@ -68,6 +69,20 @@ interface PhoneActionTransport {
 
     /** Release resources associated with a completed task display. */
     suspend fun closeSession(sessionKey: String) = Unit
+
+    /** Retain a terminal task display for the read-only viewer. */
+    suspend fun retainSession(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = Unit
+
+    /** Update a live display's lifecycle status without ending its run. */
+    suspend fun updateSessionDisplayStatus(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = Unit
 }
 
 /** Executor for the typed v0 action set over DHD's selected phone bridge. */
@@ -109,6 +124,22 @@ class TypedPhoneActionTransport(
 
     override suspend fun closeSession(sessionKey: String) {
         taskDisplayBackend?.close(sessionKey)
+    }
+
+    override suspend fun retainSession(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String?,
+    ) {
+        taskDisplayBackend?.retain(sessionKey, status, error)
+    }
+
+    override suspend fun updateSessionDisplayStatus(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String?,
+    ) {
+        taskDisplayBackend?.updateStatus(sessionKey, status, error)
     }
 
     private suspend fun executeInternal(

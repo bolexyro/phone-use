@@ -71,8 +71,10 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -169,6 +171,7 @@ fun AssistantScreen(
     onAcknowledgeAttention: () -> Boolean,
     onSteerRequest: (String) -> Boolean,
     onOpenSettings: () -> Unit,
+    onOpenTaskDisplays: () -> Unit = {},
     onStartFresh: () -> Unit,
     developerStatus: DeveloperModeStatus,
     companionConnected: Boolean,
@@ -177,6 +180,8 @@ fun AssistantScreen(
     previewState: LiveDisplayPreviewState? = null,
     onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
     onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
+    onOpenPreview: (String) -> Unit = {},
+    expandedPreviewSessionKey: String? = null,
 ) {
     val colors = LocalAssistantColors.current
     val state by coordinator.state.collectAsState()
@@ -249,6 +254,25 @@ fun AssistantScreen(
                 },
                 actions = {
                     // Start fresh circular button (48dp)
+                    Surface(
+                        shape = CircleShape,
+                        color = colors.composerBackground,
+                        border = BorderStroke(1.dp, colors.borderColor),
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .clickable(onClick = onOpenTaskDisplays),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_laptop),
+                                contentDescription = "Task displays",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
                     Surface(
                         shape = CircleShape,
                         color = colors.composerBackground,
@@ -346,6 +370,8 @@ fun AssistantScreen(
                             previewState = previewState,
                             onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
                             onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
+                            onOpenPreview = onOpenPreview,
+                            expandedPreviewSessionKey = expandedPreviewSessionKey,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(
                                 top = 12.dp,
@@ -638,6 +664,8 @@ private fun ConversationTimeline(
     previewState: LiveDisplayPreviewState? = null,
     onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
     onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
+    onOpenPreview: (String) -> Unit = {},
+    expandedPreviewSessionKey: String? = null,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(vertical = 12.dp),
 ) {
@@ -661,15 +689,30 @@ private fun ConversationTimeline(
             if (!canScrollForward) followLatest = true
         }
     }
+    // The inline preview is a live child of the task group. Its decoder and
+    // tool rows can change height while the user is reading older messages;
+    // do not reposition the list around that child as it updates.
+    val inlinePreviewVisible = state.isActive() &&
+        previewState?.sessionKey?.let { previewSessionKey ->
+            previewSessionKey == state.sessionIdOrNullForUi() &&
+                previewSessionKey != expandedPreviewSessionKey &&
+                groups.any { it.id == previewSessionKey }
+        } == true
     LaunchedEffect(
         groups.lastOrNull()?.id,
         groups.lastOrNull()?.activities?.size,
         groups.lastOrNull()?.steerMessages?.size,
         groups.lastOrNull()?.assistantMessages?.lastOrNull()?.text?.length,
+        inlinePreviewVisible,
     ) {
-        if (groups.isNotEmpty() && followLatest && !listState.isScrollInProgress) {
-            // A very large offset positions the last item at the bottom of the
-            // viewport instead of repeatedly snapping to the card's start.
+        if (
+            groups.isNotEmpty() &&
+            followLatest &&
+            !listState.isScrollInProgress &&
+            !inlinePreviewVisible
+        ) {
+            // A very large offset positions the last item at the bottom of
+            // the viewport instead of repeatedly snapping to its start.
             listState.scrollToItem(groups.lastIndex, scrollOffset = Int.MAX_VALUE)
         }
     }
@@ -694,6 +737,8 @@ private fun ConversationTimeline(
                     previewState = previewState,
                     onPreviewSurfaceAvailable = onPreviewSurfaceAvailable,
                     onPreviewSurfaceDestroyed = onPreviewSurfaceDestroyed,
+                    onOpenPreview = onOpenPreview,
+                    expandedPreviewSessionKey = expandedPreviewSessionKey,
                     active = state.isActive() && state.sessionIdOrNullForUi() == group.id,
                 )
             }
@@ -716,6 +761,8 @@ private fun TaskGroupCard(
     previewState: LiveDisplayPreviewState? = null,
     onPreviewSurfaceAvailable: (AndroidSurface) -> Unit = {},
     onPreviewSurfaceDestroyed: (AndroidSurface) -> Unit = {},
+    onOpenPreview: (String) -> Unit = {},
+    expandedPreviewSessionKey: String? = null,
     active: Boolean,
 ) {
     var traceExpanded by rememberSaveable(group.id) { mutableStateOf(false) }
@@ -746,11 +793,14 @@ private fun TaskGroupCard(
                 preview
             }
         }
-        if (active && taskPreviewState != null) {
+        if (active && taskPreviewState != null && taskPreviewState.sessionKey == group.id &&
+            taskPreviewState.sessionKey != expandedPreviewSessionKey
+        ) {
             LiveDisplayPreview(
                 state = taskPreviewState,
                 onSurfaceAvailable = onPreviewSurfaceAvailable,
                 onSurfaceDestroyed = onPreviewSurfaceDestroyed,
+                onExpand = { taskPreviewState.sessionKey?.let(onOpenPreview) },
             )
         }
 
@@ -1436,15 +1486,7 @@ private fun TraceStepRow(activity: TimelineItem.Activity) {
     val iconColor = when (status) {
         "failed" -> colors.errorRed
         "attention" -> colors.warningAmber
-        else -> when (activity.toolName?.lowercase()) {
-            DHD_OBSERVE_TOOL, "dhd_observe_app" -> colors.accentBlue
-            DHD_EXECUTE_TOOL, DHD_EXECUTE_SEQUENCE_TOOL -> colors.accentGreen
-            DHD_BROWSE_APP_TOOL -> colors.accentPurple
-            DHD_OPEN_APP_TOOL -> colors.accentGold
-            DHD_FOREGROUND_APP_TOOL -> colors.accentOrange
-            DHD_LIST_ALLOWED_APPS_TOOL -> colors.accentPink
-            else -> statusColor
-        }
+        else -> toolActivityColor(activity.toolName, colors, statusColor)
     }
 
     Row(
@@ -1471,6 +1513,24 @@ private fun TraceStepRow(activity: TimelineItem.Activity) {
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * Maps the DHD tool represented by an activity row to the same accent used by
+ * the live task-display footer. Unknown tools retain the caller's fallback.
+ */
+internal fun toolActivityColor(
+    toolName: String?,
+    colors: AssistantColorScheme,
+    fallback: Color = colors.textSecondary,
+): Color = when (toolName?.lowercase()) {
+    DHD_OBSERVE_TOOL, "dhd_observe_app" -> colors.accentBlue
+    DHD_EXECUTE_TOOL, DHD_EXECUTE_SEQUENCE_TOOL -> colors.accentGreen
+    DHD_BROWSE_APP_TOOL -> colors.accentPurple
+    DHD_OPEN_APP_TOOL -> colors.accentGold
+    DHD_FOREGROUND_APP_TOOL -> colors.accentOrange
+    DHD_LIST_ALLOWED_APPS_TOOL -> colors.accentPink
+    else -> fallback
 }
 
 @Composable
@@ -2292,6 +2352,7 @@ fun SettingsScreen(
     onOpenApprovedApps: () -> Unit,
     onOpenCompanion: () -> Unit,
     onBack: () -> Unit,
+    onOpenTaskDisplays: () -> Unit = {},
 ) {
     val colors = LocalAssistantColors.current
     val isFullAccess = remember(permissions.isFullAccessEnabled()) { permissions.isFullAccessEnabled() }
@@ -2759,6 +2820,336 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * Lists every display record currently known to the task-display registry.
+ * The composable intentionally receives immutable UI records and callbacks so
+ * the lifecycle/daemon implementation can remain outside the UI package.
+ */
+@Composable
+fun TaskDisplaysScreen(
+    records: List<TaskDisplayUiRecord>,
+    onView: (TaskDisplayUiRecord) -> Unit,
+    onEnd: (TaskDisplayUiRecord) -> Unit,
+    onBack: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    var endCandidate by remember { mutableStateOf<TaskDisplayUiRecord?>(null) }
+    var nowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowEpochMs = System.currentTimeMillis()
+            delay(TASK_DISPLAY_MANAGER_REFRESH_MS)
+        }
+    }
+
+    // Ended records remain in the backend for lifecycle/history purposes, but
+    // the manager is for displays the user can still inspect or retain.
+    val visibleRecords = remember(records) {
+        records.filter { it.lifecycle != TaskDisplayLifecycle.ENDED }
+    }
+    val sortedRecords = remember(visibleRecords) {
+        visibleRecords.sortedWith(
+            compareByDescending<TaskDisplayUiRecord> { it.lifecycle.isLive() }
+                .thenByDescending { it.createdAtEpochMs },
+        )
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onBack,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
+        // Keep the sheet visibly separate from the conversation in both
+        // themes, especially against the near-black dark-mode background.
+        containerColor = colors.surfaceCard,
+        contentColor = colors.textPrimary,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                // The empty state should size to its content so the sheet's
+                // partially-expanded anchor never cuts the message off. A
+                // populated manager still gets a tall, scrollable surface.
+                .then(if (sortedRecords.isEmpty()) Modifier else Modifier.fillMaxHeight(0.9f))
+                .navigationBarsPadding(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = colors.composerBackground,
+                    border = BorderStroke(1.dp, colors.borderColor),
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onBack),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_arrow_back),
+                            contentDescription = "Back",
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+                Text(
+                    text = "Task displays",
+                    color = colors.textPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 18.sp,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 14.dp),
+                )
+            }
+
+        if (sortedRecords.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 24.dp),
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_laptop),
+                        contentDescription = null,
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(42.dp),
+                    )
+                    Text(
+                        text = "No task displays",
+                        color = colors.textPrimary,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    Text(
+                        text = "Displays created by an agent will appear here.",
+                        color = colors.textSecondary,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 5.dp),
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(top = 14.dp, bottom = 24.dp),
+            ) {
+                item {
+                    Text(
+                        text = "Phone displays stay available while a task runs and briefly after it ends.",
+                        color = colors.textSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                }
+                items(sortedRecords, key = { it.sessionKey }) { record ->
+                    TaskDisplayManagerCard(
+                        record = record,
+                        nowEpochMs = nowEpochMs,
+                        onView = { onView(record) },
+                        onEnd = { endCandidate = record },
+                    )
+                }
+            }
+        }
+        }
+    }
+
+    endCandidate?.let { record ->
+        AlertDialog(
+            onDismissRequest = { endCandidate = null },
+            containerColor = colors.surfaceCard,
+            titleContentColor = colors.textPrimary,
+            textContentColor = colors.textSecondary,
+            shape = RoundedCornerShape(20.dp),
+            title = { Text("End task display?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "This closes the ${record.appLabel ?: record.packageName ?: "app"} display. " +
+                        "An active task will be stopped before the display is released.",
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        endCandidate = null
+                        onEnd(record)
+                    },
+                ) {
+                    Text("End display", color = colors.errorRed, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { endCandidate = null }) {
+                    Text("Cancel", color = colors.textSecondary)
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun TaskDisplayManagerCard(
+    record: TaskDisplayUiRecord,
+    nowEpochMs: Long,
+    onView: () -> Unit,
+    onEnd: () -> Unit,
+) {
+    val colors = LocalAssistantColors.current
+    val statusColor = when (record.lifecycle) {
+        TaskDisplayLifecycle.RUNNING -> colors.accentGreen
+        TaskDisplayLifecycle.PAUSED -> colors.accentBlue
+        TaskDisplayLifecycle.COMPLETED,
+        TaskDisplayLifecycle.STOPPED -> colors.textSecondary
+        TaskDisplayLifecycle.FAILED,
+        TaskDisplayLifecycle.UNAVAILABLE -> colors.warningAmber
+        TaskDisplayLifecycle.ENDED,
+        TaskDisplayLifecycle.EXPIRED -> colors.textSecondary.copy(alpha = 0.7f)
+    }
+    val canView = record.lifecycle != TaskDisplayLifecycle.ENDED &&
+        record.lifecycle != TaskDisplayLifecycle.EXPIRED
+    val canEnd = record.lifecycle != TaskDisplayLifecycle.ENDED &&
+        record.lifecycle != TaskDisplayLifecycle.EXPIRED
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = colors.settingsCard,
+        border = BorderStroke(1.dp, colors.borderColor),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = canView, onClick = onView),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 5.dp)
+                        .size(10.dp)
+                        .background(statusColor, CircleShape),
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 12.dp),
+                ) {
+                    Text(
+                        text = record.appLabel ?: record.packageName ?: "Task display",
+                        color = colors.textPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = buildString {
+                            append(record.lifecycle.displayLabel())
+                            record.displayId?.let { append(" · Display $it") }
+                        },
+                        color = statusColor,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
+                }
+                record.expiresAtEpochMs?.let { expiry ->
+                    Text(
+                        text = taskDisplayRemainingLabel(expiry, nowEpochMs),
+                        color = colors.textSecondary,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
+
+            record.currentPurpose
+                ?.takeIf(String::isNotBlank)
+                ?.takeUnless { record.lifecycle == TaskDisplayLifecycle.COMPLETED }
+                ?.let { purpose ->
+                Text(
+                    text = purpose,
+                    color = colors.textSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 22.dp, top = 10.dp),
+                )
+            }
+            record.error?.takeIf(String::isNotBlank)?.let { error ->
+                Text(
+                    text = error,
+                    color = colors.warningAmber,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 22.dp, top = 5.dp),
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = taskDisplayAgeLabel(record.createdAtEpochMs, nowEpochMs),
+                    color = colors.textSecondary,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onView, enabled = canView) {
+                    Text("View", color = if (canView) colors.accentBlue else colors.textSecondary)
+                }
+                TextButton(onClick = onEnd, enabled = canEnd) {
+                    Text("End", color = if (canEnd) colors.errorRed else colors.textSecondary)
+                }
+            }
+        }
+    }
+}
+
+private const val TASK_DISPLAY_MANAGER_REFRESH_MS = 30_000L
+
+private fun TaskDisplayLifecycle.isLive(): Boolean = when (this) {
+    TaskDisplayLifecycle.RUNNING,
+    TaskDisplayLifecycle.PAUSED -> true
+    else -> false
+}
+
+private fun taskDisplayAgeLabel(createdAtEpochMs: Long, nowEpochMs: Long): String {
+    if (createdAtEpochMs <= 0L) return "Age unavailable"
+    val seconds = ((nowEpochMs - createdAtEpochMs).coerceAtLeast(0L)) / 1000L
+    return when {
+        seconds < 60L -> "Started just now"
+        seconds < 3600L -> "Started ${seconds / 60L}m ago"
+        else -> "Started ${seconds / 3600L}h ago"
+    }
+}
+
+private fun taskDisplayRemainingLabel(expiryEpochMs: Long, nowEpochMs: Long): String {
+    val seconds = ((expiryEpochMs - nowEpochMs).coerceAtLeast(0L)) / 1000L
+    return when {
+        seconds < 60L -> "<1m left"
+        seconds < 3600L -> "${seconds / 60L}m left"
+        else -> "${seconds / 3600L}h left"
     }
 }
 

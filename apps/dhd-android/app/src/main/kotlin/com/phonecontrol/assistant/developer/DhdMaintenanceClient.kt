@@ -20,10 +20,11 @@ internal class DhdMaintenanceClient(
         val displayLifecycle: Boolean,
         val liveAvc: Boolean,
         val displayCapture: Boolean,
+        val displayReconciliation: Boolean = false,
     ) {
         val supportsNativeDisplay: Boolean
             get() = version >= REQUIRED_CAPABILITY_VERSION &&
-                displayLifecycle && liveAvc && displayCapture
+                displayLifecycle && liveAvc && displayCapture && displayReconciliation
     }
 
     fun execute(command: List<String>, binaryOutput: Boolean = false): PhoneProcessResult {
@@ -69,11 +70,12 @@ internal class DhdMaintenanceClient(
             displayLifecycle = "display-lifecycle=1" in tokens,
             liveAvc = "live-avc=1" in tokens,
             displayCapture = "display-capture=1" in tokens,
+            displayReconciliation = "display-reconciliation=1" in tokens,
         )
     }
 
     companion object {
-        const val REQUIRED_CAPABILITY_VERSION = 7
+        const val REQUIRED_CAPABILITY_VERSION = 8
         private const val LOOPBACK = "127.0.0.1"
         private val random = SecureRandom()
 

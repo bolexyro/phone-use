@@ -12,10 +12,14 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Update
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.phonecontrol.assistant.domain.ActivityEvent
 import com.phonecontrol.assistant.domain.ActivityEventKind
 import com.phonecontrol.assistant.domain.ActionType
 import com.phonecontrol.assistant.domain.userFacingActivityLabel
+import com.phonecontrol.assistant.execution.TaskDisplayRecord
+import com.phonecontrol.assistant.execution.TaskDisplayStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -90,6 +94,32 @@ data class ToolActivityEntity(
     val updatedAtEpochMs: Long,
 )
 
+/** Durable metadata for a phone-local virtual display. Frames never enter Room. */
+@Entity(
+    tableName = "task_displays",
+    indices = [
+        Index(value = ["taskId"]),
+        Index(value = ["status"]),
+        Index(value = ["expiresAtEpochMs"]),
+    ],
+)
+data class TaskDisplayEntity(
+    @PrimaryKey val sessionKey: String,
+    val taskId: String,
+    val packageName: String,
+    val displayId: Int,
+    val width: Int,
+    val height: Int,
+    val densityDpi: Int,
+    val rotation: Int,
+    val status: String,
+    val createdAtEpochMs: Long,
+    val terminalAtEpochMs: Long? = null,
+    val expiresAtEpochMs: Long? = null,
+    val lastPurpose: String,
+    val error: String? = null,
+)
+
 @Dao
 interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE deleted = 0 ORDER BY updatedAtEpochMs DESC")
@@ -151,15 +181,74 @@ interface ConversationDao {
 
     @Query("DELETE FROM tool_activities WHERE conversationId = :conversationId")
     fun deleteActivities(conversationId: String)
+
+    @Query("SELECT * FROM task_displays ORDER BY createdAtEpochMs DESC, sessionKey ASC")
+    fun listTaskDisplays(): List<TaskDisplayEntity>
+
+    @Query("SELECT * FROM task_displays WHERE sessionKey = :sessionKey LIMIT 1")
+    fun findTaskDisplay(sessionKey: String): TaskDisplayEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertTaskDisplay(display: TaskDisplayEntity)
+
+    @Query("DELETE FROM task_displays WHERE sessionKey = :sessionKey")
+    fun deleteTaskDisplay(sessionKey: String)
 }
 
 @Database(
-    entities = [ConversationEntity::class, MessageEntity::class, AgentRunEntity::class, ToolActivityEntity::class],
-    version = 1,
+    entities = [
+        ConversationEntity::class,
+        MessageEntity::class,
+        AgentRunEntity::class,
+        ToolActivityEntity::class,
+        TaskDisplayEntity::class,
+    ],
+    version = 2,
     exportSchema = false,
 )
 abstract class AssistantDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
+
+    companion object {
+        /** Preserve existing conversations while adding display metadata. */
+        val MIGRATION_1_2: Migration = object : Migration(1, 2) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `task_displays` (
+                        `sessionKey` TEXT NOT NULL,
+                        `taskId` TEXT NOT NULL,
+                        `packageName` TEXT NOT NULL,
+                        `displayId` INTEGER NOT NULL,
+                        `width` INTEGER NOT NULL,
+                        `height` INTEGER NOT NULL,
+                        `densityDpi` INTEGER NOT NULL,
+                        `rotation` INTEGER NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `createdAtEpochMs` INTEGER NOT NULL,
+                        `terminalAtEpochMs` INTEGER,
+                        `expiresAtEpochMs` INTEGER,
+                        `lastPurpose` TEXT NOT NULL,
+                        `error` TEXT,
+                        PRIMARY KEY(`sessionKey`)
+                    )
+                    """.trimIndent(),
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_task_displays_taskId` " +
+                        "ON `task_displays` (`taskId`)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_task_displays_status` " +
+                        "ON `task_displays` (`status`)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_task_displays_expiresAtEpochMs` " +
+                        "ON `task_displays` (`expiresAtEpochMs`)"
+                )
+            }
+        }
+    }
 }
 
 enum class RunStatus {
@@ -226,7 +315,10 @@ class ConversationStore(context: Context) {
         context.applicationContext,
         AssistantDatabase::class.java,
         "dhd-conversations.db",
-    ).fallbackToDestructiveMigration().allowMainThreadQueries().build()
+    )
+        .addMigrations(AssistantDatabase.MIGRATION_1_2)
+        .allowMainThreadQueries()
+        .build()
     private val dao = database.conversationDao()
     private val lock = Any()
     private val _conversations = MutableStateFlow<List<ConversationSummary>>(emptyList())
@@ -496,6 +588,28 @@ class ConversationStore(context: Context) {
         refresh(run.conversationId)
     }
 
+    /** Return the durable task-display registry, newest display first. */
+    fun listTaskDisplays(): List<TaskDisplayRecord> = synchronized(lock) {
+        dao.listTaskDisplays().mapNotNull { it.toTaskDisplayRecord() }
+    }
+
+    fun findTaskDisplay(sessionKey: String): TaskDisplayRecord? = synchronized(lock) {
+        dao.findTaskDisplay(sessionKey)?.toTaskDisplayRecord()
+    }
+
+    fun currentPurpose(runId: String): String? = synchronized(lock) {
+        dao.findRun(runId)?.currentPurpose
+    }
+
+    /** Insert or replace one display's metadata without storing frames. */
+    fun upsertTaskDisplay(record: TaskDisplayRecord) = synchronized(lock) {
+        dao.insertTaskDisplay(record.toEntity())
+    }
+
+    fun deleteTaskDisplay(sessionKey: String) = synchronized(lock) {
+        dao.deleteTaskDisplay(sessionKey)
+    }
+
     fun bindCodexThread(conversationId: String, codexThreadId: String) = synchronized(lock) {
         val conversation = dao.findConversation(canonicalConversationId(conversationId)) ?: return@synchronized
         dao.updateConversation(conversation.copy(codexThreadId = codexThreadId, updatedAtEpochMs = System.currentTimeMillis()))
@@ -622,4 +736,43 @@ private fun ActivityEventKind.activityStatus(): String = when (this) {
     ActivityEventKind.ACTION_FAILED -> "failed"
     ActivityEventKind.ATTENTION_REQUIRED -> "attention"
     else -> "info"
+}
+
+private fun TaskDisplayRecord.toEntity(): TaskDisplayEntity = TaskDisplayEntity(
+    sessionKey = sessionKey,
+    taskId = taskId,
+    packageName = packageName,
+    displayId = displayId,
+    width = width,
+    height = height,
+    densityDpi = densityDpi,
+    rotation = rotation,
+    status = status.name,
+    createdAtEpochMs = createdAtEpochMs,
+    terminalAtEpochMs = terminalAtEpochMs,
+    expiresAtEpochMs = expiresAtEpochMs,
+    lastPurpose = lastPurpose,
+    error = error,
+)
+
+private fun TaskDisplayEntity.toTaskDisplayRecord(): TaskDisplayRecord? {
+    val parsedStatus = runCatching { TaskDisplayStatus.valueOf(status) }.getOrNull() ?: return null
+    return runCatching {
+        TaskDisplayRecord(
+            sessionKey = sessionKey,
+            taskId = taskId,
+            packageName = packageName,
+            displayId = displayId,
+            width = width,
+            height = height,
+            densityDpi = densityDpi,
+            rotation = rotation,
+            status = parsedStatus,
+            createdAtEpochMs = createdAtEpochMs,
+            terminalAtEpochMs = terminalAtEpochMs,
+            expiresAtEpochMs = expiresAtEpochMs,
+            lastPurpose = lastPurpose,
+            error = error,
+        )
+    }.getOrNull()
 }

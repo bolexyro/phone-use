@@ -124,6 +124,8 @@ final class DhdNativeDisplayService implements Closeable {
                     return detach(command);
                 case "capture":
                     return capture(command, binaryOutput);
+                case "list":
+                    return listSessions(command);
                 case "close":
                     return closeSession(command);
                 case "close-all":
@@ -221,6 +223,22 @@ final class DhdNativeDisplayService implements Closeable {
         if (session == null) return CommandResult.failure("DHD display session is not active.");
         byte[] png = captureDisplay(session.displayId, "DHD " + session.sessionKey);
         return CommandResult.success(png);
+    }
+
+    /** Return only the metadata required to reconcile a surviving daemon session. */
+    private CommandResult listSessions(List<String> command) {
+        if (command.size() != 2) return CommandResult.failure("dhd-display list takes no arguments.");
+        DisplaySession[] active;
+        synchronized (lock) {
+            active = sessions.values().toArray(new DisplaySession[0]);
+        }
+        StringBuilder json = new StringBuilder("{\"type\":\"dhd_display_sessions\",\"sessions\":[");
+        for (int index = 0; index < active.length; index++) {
+            if (index > 0) json.append(',');
+            json.append(new String(active[index].createdJson(), StandardCharsets.UTF_8));
+        }
+        json.append("]}");
+        return CommandResult.success(json.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private CommandResult closeSession(List<String> command) {
@@ -508,6 +526,11 @@ final class DhdNativeDisplayService implements Closeable {
         /** True until the queue contains a decodable IDR boundary. */
         private boolean awaitingKeyFrame = true;
         private ServerSocket streamServer;
+        // Keep the bound port as immutable session metadata. The daemon can
+        // snapshot a session for LIST while close() is releasing the server;
+        // reading ServerSocket.getLocalPort() after it is nulled would make
+        // reconciliation fail spuriously.
+        private volatile int streamPort = -1;
         private MediaCodec encoder;
         private Surface encoderSurface;
         private DisplayManagerBridge displayBridge;
@@ -548,6 +571,7 @@ final class DhdNativeDisplayService implements Closeable {
             streamServer = new ServerSocket();
             streamServer.setReuseAddress(true);
             streamServer.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
+            streamPort = streamServer.getLocalPort();
             executor.submit(this::drainEncoder);
             executor.submit(this::serveStream);
             launchTarget();
@@ -564,7 +588,7 @@ final class DhdNativeDisplayService implements Closeable {
                     ",\"appDensityDpi\":" + appDensityDpi +
                     ",\"frameRate\":" + frameRate +
                     ",\"bitRate\":" + bitRate +
-                    ",\"streamPort\":" + streamServer.getLocalPort() +
+                    ",\"streamPort\":" + streamPort +
                     ",\"streamToken\":\"" + escape(streamToken) + "\"" +
                     ",\"codecMime\":\"" + CODEC_MIME + "\"}";
             return json.getBytes(StandardCharsets.UTF_8);

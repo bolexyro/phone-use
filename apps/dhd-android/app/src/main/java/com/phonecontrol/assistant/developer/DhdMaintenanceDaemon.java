@@ -27,9 +27,10 @@ public final class DhdMaintenanceDaemon {
     private static final String LOOPBACK = "127.0.0.1";
     private static final int SOCKET_TIMEOUT_MS = 20_000;
     private static final long COMMAND_TIMEOUT_MS = 15_000L;
-    /** Bumped when the long-lived daemon gains a new reserved command surface. */
+    /** Bumped when the long-lived daemon gains display-session reconciliation. */
     static final String CAPABILITIES =
-            "DHD-MAINTENANCE/7 display-lifecycle=1 live-avc=1 display-capture=1 display-density-override=1";
+            "DHD-MAINTENANCE/8 display-lifecycle=1 live-avc=1 display-capture=1 " +
+                    "display-density-override=1 display-reconciliation=1";
     private static final Set<String> ALLOWED_EXECUTABLES = new HashSet<>(Arrays.asList(
             "am",
             "dumpsys",
