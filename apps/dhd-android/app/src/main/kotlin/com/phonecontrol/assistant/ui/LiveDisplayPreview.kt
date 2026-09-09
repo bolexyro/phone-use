@@ -77,6 +77,15 @@ data class LiveDisplayPreviewState(
     val aspectRatio: Float = DEFAULT_LIVE_DISPLAY_PREVIEW_ASPECT_RATIO,
     /** Identifies the task/display session using this surface. */
     val sessionKey: String? = null,
+    /**
+     * Identifies the current coordinator run that is presenting this display.
+     *
+     * A retained display keeps its native owner key when a later run selects
+     * it with displayRef. The owner key remains the surface/manager identity,
+     * while this optional key lets the conversation attach the preview to the
+     * current run's message group.
+     */
+    val runSessionKey: String? = null,
     /** Latest successful gesture to render above the read-only stream. */
     val pointerEvent: TaskPointerEvent? = null,
     /** Sanitized purpose shown in the full-screen viewer footer. */
@@ -171,6 +180,7 @@ data class TaskDisplayUiRecord(
     val packageName: String? = null,
     val appLabel: String? = null,
     val displayId: Int? = null,
+    val displayRef: String? = null,
     val geometry: TaskDisplayGeometry? = null,
     val lifecycle: TaskDisplayLifecycle = TaskDisplayLifecycle.RUNNING,
     val currentPurpose: String? = null,

@@ -41,6 +41,12 @@ const packageNameSchema = z
   .max(255)
   .regex(/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/);
 
+const displayRefSchema = z.string().regex(/^dsp_[a-f0-9]{14}$/);
+
+const displayTargetFields = {
+  displayRef: displayRefSchema.optional(),
+};
+
 const guardRegionSchema = z
   .object({
     left: z.number().int().min(0),
@@ -81,6 +87,7 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
   const dhdOpenAppInputSchema = z
     .object({
       packageName: packageNameSchema,
+      ...displayTargetFields,
       metadata: openAppMetadataSchema
     })
     .strict();
@@ -97,7 +104,15 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
     })
     .strict();
 
-  const dhdGetForegroundAppInputSchema = z.object({}).strict();
+  const dhdListDisplaysInputSchema = z.object({}).strict();
+
+  const dhdCloseDisplayInputSchema = z
+    .object({
+      displayRef: displayRefSchema,
+    })
+    .strict();
+
+  const dhdGetForegroundAppInputSchema = z.object(displayTargetFields).strict();
 
   const dhdExecuteActionSchema = z.discriminatedUnion("type", [
     z
@@ -161,9 +176,17 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
       .strict()
   ]);
 
+  const dhdExecuteInputSchema = z
+    .object({
+      ...displayTargetFields,
+      action: dhdExecuteActionSchema,
+    })
+    .strict();
+
   const dhdExecuteSequenceInputSchema = z
     .object({
       observationId: z.string().min(1).max(DHD_MAX_TEXT_CHARS),
+      ...displayTargetFields,
       actions: z.array(
         z.discriminatedUnion("type", [
           z
@@ -231,6 +254,14 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
     .object({
       purpose: z.string().min(1).max(DHD_MAX_TEXT_CHARS).optional(),
       targetDescription: z.string().min(1).max(DHD_MAX_TEXT_CHARS).optional(),
+      ...displayTargetFields,
+    })
+    .strict();
+
+  const dhdRequestAttentionInputSchema = z
+    .object({
+      reason: z.string().min(1).max(DHD_MAX_TEXT_CHARS),
+      ...displayTargetFields,
     })
     .strict();
 
@@ -238,10 +269,14 @@ export function createDhdToolSchemas(enableGuardRegions: boolean = isGuardRegion
     dhdOpenAppInputSchema,
     dhdListAllowedAppsInputSchema,
     dhdBrowseAppInputSchema,
+    dhdListDisplaysInputSchema,
+    dhdCloseDisplayInputSchema,
     dhdGetForegroundAppInputSchema,
     dhdExecuteActionSchema,
+    dhdExecuteInputSchema,
     dhdObserveInputSchema,
-    dhdExecuteSequenceInputSchema
+    dhdExecuteSequenceInputSchema,
+    dhdRequestAttentionInputSchema,
   };
 }
 
@@ -255,10 +290,14 @@ const defaultDhdToolSchemas = createDhdToolSchemas(isGuardRegionsEnabled());
 export const dhdOpenAppInputSchema = defaultDhdToolSchemas.dhdOpenAppInputSchema;
 export const dhdListAllowedAppsInputSchema = defaultDhdToolSchemas.dhdListAllowedAppsInputSchema;
 export const dhdBrowseAppInputSchema = defaultDhdToolSchemas.dhdBrowseAppInputSchema;
+export const dhdListDisplaysInputSchema = defaultDhdToolSchemas.dhdListDisplaysInputSchema;
+export const dhdCloseDisplayInputSchema = defaultDhdToolSchemas.dhdCloseDisplayInputSchema;
 export const dhdGetForegroundAppInputSchema = defaultDhdToolSchemas.dhdGetForegroundAppInputSchema;
 export const dhdExecuteActionSchema = defaultDhdToolSchemas.dhdExecuteActionSchema;
+export const dhdExecuteInputSchema = defaultDhdToolSchemas.dhdExecuteInputSchema;
 export const dhdObserveInputSchema = defaultDhdToolSchemas.dhdObserveInputSchema;
 export const dhdExecuteSequenceInputSchema = defaultDhdToolSchemas.dhdExecuteSequenceInputSchema;
+export const dhdRequestAttentionInputSchema = defaultDhdToolSchemas.dhdRequestAttentionInputSchema;
 
 function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
   const parsed = schema.safeParse(input);
@@ -333,12 +372,27 @@ export function normalizeScreenshot(
 }
 
 function withoutScreenshot(message: BridgeMessage): Record<string, unknown> {
-  const copy = { ...message };
+  const copy = sanitizeAgentValue(message) as Record<string, unknown>;
   delete copy.screenshotBase64;
   delete copy.beforeScreenshotBase64;
   delete copy.beforeScreenshotMimeType;
   delete copy.beforeObservation;
   return copy;
+}
+
+/** Remove bridge correlation, owner, and native display identifiers before a result reaches Codex. */
+function sanitizeAgentValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeAgentValue);
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(record)) {
+    if (key === "requestId" || key === "taskId" || key === "taskSessionKey" || key === "sessionKey" || key === "displayId") {
+      continue;
+    }
+    sanitized[key] = sanitizeAgentValue(nested);
+  }
+  return sanitized;
 }
 
 type AssistantTextContent = { type: "text"; text: string };
@@ -644,13 +698,31 @@ export async function invokeDhdTool(
           requestId: randomUUID(),
           query: parsed.query
         });
+        });
+    case "dhd_list_displays":
+      return safely(() => {
+        parseInput(schemas.dhdListDisplaysInputSchema, input);
+        return requestBridge({
+          type: "list_displays",
+          requestId: randomUUID(),
+        });
+      });
+    case "dhd_close_display":
+      return safely(() => {
+        const parsed = parseInput(schemas.dhdCloseDisplayInputSchema, input);
+        return requestBridge({
+          type: "close_display",
+          requestId: randomUUID(),
+          displayRef: parsed.displayRef,
+        });
       });
     case "dhd_get_foreground_app":
       return safely(() => {
-        parseInput(schemas.dhdGetForegroundAppInputSchema, input);
+        const parsed = parseInput(schemas.dhdGetForegroundAppInputSchema, input);
         return requestBridge({
           type: "foreground_app",
-          requestId: randomUUID()
+          requestId: randomUUID(),
+          ...(parsed.displayRef !== undefined ? { displayRef: parsed.displayRef } : {}),
         });
       });
     case "dhd_observe":
@@ -660,7 +732,8 @@ export async function invokeDhdTool(
           type: "observe",
           requestId: randomUUID(),
           ...(parsed.purpose ? { purpose: parsed.purpose } : {}),
-          ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {})
+          ...(parsed.targetDescription ? { targetDescription: parsed.targetDescription } : {}),
+          ...(parsed.displayRef !== undefined ? { displayRef: parsed.displayRef } : {}),
         });
       }, undefined, options);
     case "dhd_open_app":
@@ -674,6 +747,7 @@ export async function invokeDhdTool(
         return requestBridge({
           type: "execute_action",
           requestId: randomUUID(),
+          ...(parsed.displayRef !== undefined ? { displayRef: parsed.displayRef } : {}),
           action: {
             type: "open_app",
             packageName: parsed.packageName,
@@ -684,9 +758,15 @@ export async function invokeDhdTool(
     case "dhd_execute":
       let executedAction: Record<string, unknown> | undefined;
       return safely(() => {
-        const action = parseInput(schemas.dhdExecuteActionSchema, readRecord(input).action);
+        const parsed = parseInput(schemas.dhdExecuteInputSchema, input);
+        const action = parsed.action;
         executedAction = action as unknown as Record<string, unknown>;
-        return requestBridge({ type: "execute_action", requestId: randomUUID(), action });
+        return requestBridge({
+          type: "execute_action",
+          requestId: randomUUID(),
+          ...(parsed.displayRef !== undefined ? { displayRef: parsed.displayRef } : {}),
+          action,
+        });
       }, () => ({ action: executedAction }), options);
     case "dhd_execute_sequence":
       let sequenceActions: readonly Record<string, unknown>[] | undefined;
@@ -697,14 +777,20 @@ export async function invokeDhdTool(
           type: "execute_sequence",
           requestId: randomUUID(),
           observationId: parsed.observationId,
+          ...(parsed.displayRef !== undefined ? { displayRef: parsed.displayRef } : {}),
           actions: parsed.actions
         });
       }, () => ({ sequenceActions }), options);
     case "dhd_request_attention":
       return safely(() => {
-        const reason = parseInput(z.string().min(1).max(DHD_MAX_TEXT_CHARS), readRecord(input).reason);
+        const parsed = parseInput(schemas.dhdRequestAttentionInputSchema, input);
         return requestBridge(
-          { type: "request_attention", requestId: randomUUID(), reason },
+          {
+            type: "request_attention",
+            requestId: randomUUID(),
+            reason: parsed.reason,
+            ...(parsed.displayRef !== undefined ? { displayRef: parsed.displayRef } : {}),
+          },
           { timeoutMs: BLOCKING_BRIDGE_TIMEOUT_MS },
         );
       });
@@ -746,6 +832,24 @@ export function createDhdMcpServer(
   );
 
   server.registerTool(
+    "dhd_list_displays",
+    {
+      description: dhdToolDescription("dhd_list_displays", enableGuardRegions),
+      inputSchema: schemas.dhdListDisplaysInputSchema.shape,
+    },
+    async (input) => invokeDhdTool("dhd_list_displays", input),
+  );
+
+  server.registerTool(
+    "dhd_close_display",
+    {
+      description: dhdToolDescription("dhd_close_display", enableGuardRegions),
+      inputSchema: schemas.dhdCloseDisplayInputSchema.shape,
+    },
+    async (input) => invokeDhdTool("dhd_close_display", input),
+  );
+
+  server.registerTool(
     "dhd_get_foreground_app",
     {
       description: dhdToolDescription("dhd_get_foreground_app", enableGuardRegions),
@@ -776,7 +880,7 @@ export function createDhdMcpServer(
     "dhd_execute",
     {
       description: dhdToolDescription("dhd_execute", enableGuardRegions),
-      inputSchema: { action: schemas.dhdExecuteActionSchema }
+      inputSchema: schemas.dhdExecuteInputSchema.shape,
     },
     async (input) => invokeDhdTool("dhd_execute", input)
   );
@@ -794,7 +898,7 @@ export function createDhdMcpServer(
     "dhd_request_attention",
     {
       description: dhdToolDescription("dhd_request_attention", enableGuardRegions),
-      inputSchema: { reason: z.string().min(1).max(DHD_MAX_TEXT_CHARS) }
+      inputSchema: schemas.dhdRequestAttentionInputSchema.shape,
     },
     async (input) => invokeDhdTool("dhd_request_attention", input)
   );

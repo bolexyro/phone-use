@@ -6,12 +6,16 @@ import {
   DHD_TOOL_NAMES,
   createDhdToolSchemas,
   dhdBrowseAppInputSchema,
+  dhdCloseDisplayInputSchema,
+  dhdListDisplaysInputSchema,
   dhdGetForegroundAppInputSchema,
   dhdExecuteActionSchema,
+  dhdExecuteInputSchema,
   dhdExecuteSequenceInputSchema,
   dhdListAllowedAppsInputSchema,
   dhdObserveInputSchema,
   dhdOpenAppInputSchema,
+  dhdRequestAttentionInputSchema,
   isGuardRegionsEnabled,
   toMcpResult
 } from "../src/dhd-tools.js";
@@ -79,6 +83,41 @@ describe("DHD phone tool contract", () => {
       ]
     });
     expect(JSON.stringify(dynamicResult.contentItems[0])).not.toContain(pngBase64);
+  });
+
+  it("removes bridge correlation and task owner IDs from model-facing results", () => {
+    const result = toMcpResult({
+      type: "completed",
+      requestId: "bridge-request",
+      taskId: "run@6",
+      taskSessionKey: "run",
+      sessionKey: "run",
+      displayId: 6,
+      observation: {
+        id: "obs-2",
+        displayId: 6,
+        displayRef: "dsp_0123456789abcd",
+        taskId: "run@6",
+        taskSessionKey: "run",
+        sessionKey: "run",
+      },
+      steps: [{ observationId: "obs-2", taskId: "run@6" }],
+    });
+
+    const modelResult = JSON.parse((result.content[0] as { text: string }).text) as Record<string, any>;
+    expect(modelResult).not.toHaveProperty("requestId");
+    expect(modelResult).not.toHaveProperty("taskId");
+    expect(modelResult).not.toHaveProperty("taskSessionKey");
+    expect(modelResult).not.toHaveProperty("sessionKey");
+    expect(modelResult).not.toHaveProperty("displayId");
+    expect(modelResult.observation).toMatchObject({
+      id: "obs-2",
+      displayRef: "dsp_0123456789abcd",
+    });
+    expect(modelResult.observation).not.toHaveProperty("displayId");
+    expect(modelResult.observation).not.toHaveProperty("taskId");
+    expect(modelResult.steps[0]).toEqual({ observationId: "obs-2" });
+    expect(result.structuredContent).toEqual(modelResult);
   });
 
   it("adds a calibration marker and then marks the last successful tap", () => {
@@ -232,10 +271,13 @@ describe("DHD phone tool contract", () => {
     const observeTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_observe"));
     const openAppTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_open_app"));
     const executeTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_execute"));
+    const closeDisplayTool = record(buildDhdDynamicTools().find((tool) => tool.name === "dhd_close_display"));
 
     expect(DHD_TOOL_NAMES).toEqual([
       "dhd_list_allowed_apps",
       "dhd_browse_app",
+      "dhd_list_displays",
+      "dhd_close_display",
       "dhd_get_foreground_app",
       "dhd_observe",
       "dhd_open_app",
@@ -256,7 +298,12 @@ describe("DHD phone tool contract", () => {
     expect(String(browseTool.description)).toContain("package names");
     expect(record(browseTool.inputSchema).properties).toHaveProperty("query");
     expect(String(foregroundTool.description)).toContain("read-only");
-    expect(record(foregroundTool.inputSchema).properties).toEqual({});
+    expect(record(foregroundTool.inputSchema).properties).toHaveProperty("displayRef");
+    expect(record(foregroundTool.inputSchema).properties).not.toHaveProperty("displayId");
+    expect(record(closeDisplayTool.inputSchema).properties).toEqual({
+      displayRef: { type: "string", pattern: "^dsp_[a-f0-9]{14}$" },
+    });
+    expect(record(closeDisplayTool.inputSchema).required).toEqual(["displayRef"]);
     expect(record(observeTool.inputSchema).properties).not.toHaveProperty("guardRegions");
     expect(String(openAppTool.description)).toContain("Full Access");
     expect(String(openAppTool.description)).toContain("without requiring a caller-supplied observation ID");
@@ -267,6 +314,7 @@ describe("DHD phone tool contract", () => {
     expect(String(attentionTool.description)).toContain("Done");
     expect(String(executeTool.description)).toContain("GUARD_REGION_CHANGED");
     expect(String(executeTool.description)).toContain("inputSent is false");
+    expect(record(record(executeTool.inputSchema).properties).action).toBeDefined();
   });
 
   it("keeps app launch separate from typed execution", () => {
@@ -283,6 +331,7 @@ describe("DHD phone tool contract", () => {
     });
 
     expect(record(openApp.inputSchema).properties).toHaveProperty("packageName");
+    expect(record(openApp.inputSchema).properties).toHaveProperty("displayRef");
     const openAppMetadata = record(record(openApp.inputSchema).properties).metadata;
     expect(record(openAppMetadata).properties).not.toHaveProperty("observationId");
     expect(record(openAppMetadata).required).toEqual(["purpose", "targetDescription"]);
@@ -302,6 +351,8 @@ describe("DHD phone tool contract", () => {
     const sequenceVariants = Array.isArray(sequenceItems.oneOf) ? sequenceItems.oneOf : [];
     const sequenceMetadata = record(record(record(sequenceVariants[0]).properties).metadata);
     expect(sequenceSchema.required).toEqual(["observationId", "actions"]);
+    expect(sequenceProperties).toHaveProperty("displayRef");
+    expect(sequenceProperties).not.toHaveProperty("displayId");
     expect(sequenceActions.maxItems).toBe(DHD_MAX_SEQUENCE_ACTIONS);
     expect(sequenceMetadata.properties).not.toHaveProperty("observationId");
     expect(sequenceMetadata.required).toEqual(["purpose", "targetDescription"]);
@@ -331,6 +382,12 @@ describe("DHD phone tool contract", () => {
     expect(dhdBrowseAppInputSchema.safeParse({ query: " " }).success).toBe(false);
     expect(dhdGetForegroundAppInputSchema.parse({})).toEqual({});
     expect(dhdGetForegroundAppInputSchema.safeParse({ unexpected: true }).success).toBe(false);
+    expect(dhdListDisplaysInputSchema.parse({})).toEqual({});
+    expect(dhdCloseDisplayInputSchema.safeParse({ displayRef: "dsp_0123456789abcd" }).success).toBe(true);
+    expect(dhdCloseDisplayInputSchema.safeParse({ displayId: 6, displayRef: "dsp_0123456789abcd" }).success).toBe(false);
+    expect(dhdRequestAttentionInputSchema.safeParse({ reason: "Unlock", displayRef: "dsp_0123456789abcd" }).success).toBe(true);
+    expect(dhdObserveInputSchema.safeParse({ displayId: 6 }).success).toBe(false);
+    expect(dhdExecuteInputSchema.safeParse({ action: { type: "tap", x: 1, y: 2, metadata } }).success).toBe(true);
     expect(dhdObserveInputSchema.safeParse({
       guardRegions: [{ left: 10, top: 20, right: 100, bottom: 120 }]
     }).success).toBe(false);

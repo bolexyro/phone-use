@@ -20,6 +20,7 @@ import com.phonecontrol.assistant.policy.PolicyDecision
 import com.phonecontrol.assistant.policy.PolicyEngine
 import com.phonecontrol.assistant.execution.PhoneActionTransport
 import com.phonecontrol.assistant.execution.TaskDisplayBackend
+import com.phonecontrol.assistant.execution.TaskDisplaySession
 import com.phonecontrol.assistant.execution.TaskDisplayStatus
 import com.phonecontrol.assistant.execution.TransportResult
 import java.util.UUID
@@ -221,7 +222,7 @@ class SessionCoordinator(
         pendingSteers += steer
         _state.value = running.copy(currentPurpose = "Steer queued")
         conversationStore?.setCurrentPurpose(running.sessionId, "Steer queued")
-        taskDisplayBackend?.updatePurpose(running.sessionId, "Steer queued")
+        taskDisplayBackend?.updatePurposeForRun(running.sessionId, "Steer queued")
         conversationStore?.recordSteer(steer.steerId, running.sessionId, safeText)
         appendEvent(
             ActivityEventKind.SYSTEM,
@@ -287,7 +288,7 @@ class SessionCoordinator(
         if (claimedRequestSessionId == running.sessionId) return@synchronized null
         claimedRequestSessionId = running.sessionId
         _state.value = running.copy(currentPurpose = "Codex is planning")
-        taskDisplayBackend?.updatePurpose(running.sessionId, "Codex is planning")
+        taskDisplayBackend?.updatePurposeForRun(running.sessionId, "Codex is planning")
         appendEvent(
             ActivityEventKind.SYSTEM,
             "Desktop Codex companion claimed the request.",
@@ -308,7 +309,7 @@ class SessionCoordinator(
         if (_state.value is SessionState.Running) {
             val running = _state.value as SessionState.Running
             _state.value = running.copy(currentPurpose = "Waiting for desktop Codex bridge")
-            taskDisplayBackend?.updatePurpose(sessionId, "Waiting for desktop Codex bridge")
+            taskDisplayBackend?.updatePurposeForRun(sessionId, "Waiting for desktop Codex bridge")
         }
         appendEvent(
             ActivityEventKind.SYSTEM,
@@ -332,7 +333,7 @@ class SessionCoordinator(
         )
         conversationStore?.setRunStatus(running.sessionId, RunStatus.PAUSED)
         cleanupScope.launch {
-            transport.updateSessionDisplayStatus(running.sessionId, TaskDisplayStatus.PAUSED)
+            transport.updateSessionDisplayStatusForRun(running.sessionId, TaskDisplayStatus.PAUSED)
         }
         appendEvent(ActivityEventKind.SESSION_PAUSED, "Session paused.", running.sessionId)
         true
@@ -352,7 +353,7 @@ class SessionCoordinator(
         )
         conversationStore?.setRunStatus(paused.sessionId, RunStatus.RUNNING)
         cleanupScope.launch {
-            transport.updateSessionDisplayStatus(paused.sessionId, TaskDisplayStatus.RUNNING)
+            transport.updateSessionDisplayStatusForRun(paused.sessionId, TaskDisplayStatus.RUNNING)
         }
         appendEvent(ActivityEventKind.SESSION_RESUMED, "Session resumed.", paused.sessionId)
         true
@@ -370,9 +371,9 @@ class SessionCoordinator(
         completedAttentions.remove(sessionId)
         sessionJob?.cancel()
         sessionJob = null
-        transport.cancelSession(sessionId)
+        transport.cancelSessionForRun(sessionId)
         cleanupScope.launch {
-            transport.retainSession(sessionId, TaskDisplayStatus.STOPPED, reason)
+            transport.retainSessionForRun(sessionId, TaskDisplayStatus.STOPPED, reason)
         }
         claimedRequestSessionId = null
         clearSteers(sessionId)
@@ -396,13 +397,13 @@ class SessionCoordinator(
         completedAttentions.remove(sessionId)
         sessionJob?.cancel()
         sessionJob = null
-        transport.cancelSession(sessionId)
+        transport.cancelSessionForRun(sessionId)
         claimedRequestSessionId = null
         clearSteers(sessionId)
         val safeReason = reason.trim().take(MAX_AGENT_FEEDBACK_CHARS)
             .ifBlank { "The desktop Codex turn failed." }
         cleanupScope.launch {
-            transport.retainSession(sessionId, TaskDisplayStatus.FAILED, safeReason)
+            transport.retainSessionForRun(sessionId, TaskDisplayStatus.FAILED, safeReason)
         }
         val conversationId = _state.value.conversationIdOrNull()
         _state.value = SessionState.Stopped(sessionId, "Failed: $safeReason", conversationId)
@@ -440,9 +441,9 @@ class SessionCoordinator(
         val displayMessage = feedback ?: message.trim().take(MAX_TEXT_CHARS).ifBlank { "Session completed." }
         sessionJob?.cancel()
         sessionJob = null
-        transport.cancelSession(sessionId)
+        transport.cancelSessionForRun(sessionId)
         cleanupScope.launch {
-            transport.retainSession(sessionId, TaskDisplayStatus.COMPLETED)
+            transport.retainSessionForRun(sessionId, TaskDisplayStatus.COMPLETED)
         }
         claimedRequestSessionId = null
         val conversationId = _state.value.conversationIdOrNull()
@@ -515,9 +516,9 @@ class SessionCoordinator(
         }
         _state.value = updated
         conversationStore?.setCurrentPurpose(sessionId, "Needs your attention")
-        taskDisplayBackend?.updatePurpose(sessionId, "Needs your attention")
+        taskDisplayBackend?.updatePurposeForRun(sessionId, "Needs your attention")
         cleanupScope.launch {
-            transport.updateSessionDisplayStatus(sessionId, TaskDisplayStatus.PAUSED)
+            transport.updateSessionDisplayStatusForRun(sessionId, TaskDisplayStatus.PAUSED)
         }
         appendEvent(ActivityEventKind.ATTENTION_REQUIRED, message, sessionId)
         completion
@@ -568,9 +569,9 @@ class SessionCoordinator(
             TaskDisplayStatus.RUNNING
         }
         conversationStore?.setCurrentPurpose(pending.sessionId, resumedPurpose)
-        taskDisplayBackend?.updatePurpose(pending.sessionId, resumedPurpose)
+        taskDisplayBackend?.updatePurposeForRun(pending.sessionId, resumedPurpose)
         cleanupScope.launch {
-            transport.updateSessionDisplayStatus(pending.sessionId, resumedDisplayStatus)
+            transport.updateSessionDisplayStatusForRun(pending.sessionId, resumedDisplayStatus)
         }
         appendEvent(
             ActivityEventKind.SYSTEM,
@@ -599,7 +600,7 @@ class SessionCoordinator(
         }
         _state.value = updated
         current.sessionIdOrNull?.let { conversationStore?.setCurrentPurpose(it, displayPurpose) }
-        current.sessionIdOrNull?.let { taskDisplayBackend?.updatePurpose(it, displayPurpose) }
+        current.sessionIdOrNull?.let { taskDisplayBackend?.updatePurposeForRun(it, displayPurpose) }
         true
     }
 
@@ -627,7 +628,7 @@ class SessionCoordinator(
             else -> current
         }
         conversationStore?.setCurrentPurpose(sessionId, safePurpose)
-        taskDisplayBackend?.updatePurpose(sessionId, safePurpose)
+        taskDisplayBackend?.updatePurposeForRun(sessionId, safePurpose)
         appendEvent(
             ActivityEventKind.SYSTEM,
             safePurpose,
@@ -644,11 +645,14 @@ class SessionCoordinator(
         action: PhoneAction,
         observation: ObservationSnapshot?,
         toolName: String? = null,
+        targetDisplay: TaskDisplaySession? = null,
     ): ActionExecutionResult {
         val running = synchronized(lock) { _state.value as? SessionState.Running }
             ?: return ActionExecutionResult.SessionNotRunning
+        val targetSessionKey = targetDisplay?.sessionKey ?: running.sessionId
         if (taskDisplayRequiredProvider()) {
-            val observationMatchesTask = observation?.taskSessionKey == running.sessionId
+            val observationMatchesTask = observation?.taskSessionKey == targetSessionKey &&
+                (targetDisplay == null || observation.displayId == targetDisplay.displayId)
             if ((observation != null && !observationMatchesTask) ||
                 (observation == null && action !is com.phonecontrol.assistant.domain.OpenAppAction)
             ) {
@@ -660,8 +664,8 @@ class SessionCoordinator(
                         reasons = listOf(
                             com.phonecontrol.assistant.domain.StaleObservationReason(
                                 code = com.phonecontrol.assistant.domain.StaleObservationReasonCode.TASK_SESSION_CHANGED,
-                                approved = observation?.taskId ?: observation?.taskSessionKey,
-                                current = running.sessionId,
+                                approved = observation?.taskSessionKey,
+                                current = targetSessionKey,
                             ),
                         ),
                     ),
@@ -742,7 +746,7 @@ class SessionCoordinator(
             observationId = action.metadata.observationId,
             targetDescription = action.metadata.targetDescription,
         )
-        val result = transport.executeForSession(running.sessionId, action, observation)
+        val result = transport.executeForSession(targetSessionKey, action, observation)
         val stillActive = synchronized(lock) {
             _state.value.sessionIdOrNull == running.sessionId && _state.value.isActive
         }
@@ -832,9 +836,9 @@ class SessionCoordinator(
         sessionJob = null
         val sessionId = synchronized(lock) { _state.value.sessionIdOrNull }
         if (sessionId != null) {
-            transport.cancelSession(sessionId)
+            transport.cancelSessionForRun(sessionId)
             cleanupScope.launch {
-                transport.retainSession(sessionId, TaskDisplayStatus.STOPPED, "Session closed.")
+                transport.retainSessionForRun(sessionId, TaskDisplayStatus.STOPPED, "Session closed.")
             }
         }
         synchronized(lock) {

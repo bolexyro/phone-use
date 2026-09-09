@@ -693,10 +693,10 @@ private fun ConversationTimeline(
     // tool rows can change height while the user is reading older messages;
     // do not reposition the list around that child as it updates.
     val inlinePreviewVisible = state.isActive() &&
-        previewState?.sessionKey?.let { previewSessionKey ->
-            previewSessionKey == state.sessionIdOrNullForUi() &&
-                previewSessionKey != expandedPreviewSessionKey &&
-                groups.any { it.id == previewSessionKey }
+        previewState?.let { preview ->
+            preview.belongsToRun(state.sessionIdOrNullForUi()) &&
+                !preview.isExpanded(expandedPreviewSessionKey) &&
+                groups.any { preview.belongsToGroup(it.id) }
         } == true
     LaunchedEffect(
         groups.lastOrNull()?.id,
@@ -793,9 +793,10 @@ private fun TaskGroupCard(
                 preview
             }
         }
-        if (active && taskPreviewState != null && taskPreviewState.sessionKey == group.id &&
-            taskPreviewState.sessionKey != expandedPreviewSessionKey
-        ) {
+        val previewVisibleForGroup = taskPreviewState?.let { preview ->
+            preview.belongsToGroup(group.id) && !preview.isExpanded(expandedPreviewSessionKey)
+        } == true
+        if (active && previewVisibleForGroup) {
             LiveDisplayPreview(
                 state = taskPreviewState,
                 onSurfaceAvailable = onPreviewSurfaceAvailable,
@@ -2849,7 +2850,10 @@ fun TaskDisplaysScreen(
     // Ended records remain in the backend for lifecycle/history purposes, but
     // the manager is for displays the user can still inspect or retain.
     val visibleRecords = remember(records) {
-        records.filter { it.lifecycle != TaskDisplayLifecycle.ENDED }
+        records.filter {
+            it.lifecycle != TaskDisplayLifecycle.ENDED &&
+                it.lifecycle != TaskDisplayLifecycle.EXPIRED
+        }
     }
     val sortedRecords = remember(visibleRecords) {
         visibleRecords.sortedWith(
@@ -2881,32 +2885,12 @@ fun TaskDisplaysScreen(
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Surface(
-                    shape = CircleShape,
-                    color = colors.composerBackground,
-                    border = BorderStroke(1.dp, colors.borderColor),
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .clickable(onClick = onBack),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_arrow_back),
-                            contentDescription = "Back",
-                            tint = colors.textPrimary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
                 Text(
                     text = "Task displays",
                     color = colors.textPrimary,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 18.sp,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 14.dp),
+                    modifier = Modifier.weight(1f),
                 )
             }
 
@@ -3058,10 +3042,7 @@ private fun TaskDisplayManagerCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = buildString {
-                            append(record.lifecycle.displayLabel())
-                            record.displayId?.let { append(" · Display $it") }
-                        },
+                        text = record.lifecycle.displayLabel(),
                         color = statusColor,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
@@ -3115,9 +3096,6 @@ private fun TaskDisplayManagerCard(
                     fontSize = 11.sp,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = onView, enabled = canView) {
-                    Text("View", color = if (canView) colors.accentBlue else colors.textSecondary)
-                }
                 TextButton(onClick = onEnd, enabled = canEnd) {
                     Text("End", color = if (canEnd) colors.errorRed else colors.textSecondary)
                 }
@@ -3987,6 +3965,16 @@ private fun SettingsSectionFooter(text: String) {
         modifier = Modifier.padding(start = 8.dp, top = 6.dp, end = 8.dp),
     )
 }
+
+private fun LiveDisplayPreviewState.belongsToRun(runSessionKey: String?): Boolean =
+    runSessionKey != null && (sessionKey == runSessionKey || this.runSessionKey == runSessionKey)
+
+private fun LiveDisplayPreviewState.belongsToGroup(groupId: String): Boolean =
+    sessionKey == groupId || runSessionKey == groupId
+
+private fun LiveDisplayPreviewState.isExpanded(expandedSessionKey: String?): Boolean =
+    expandedSessionKey != null &&
+        (sessionKey == expandedSessionKey || runSessionKey == expandedSessionKey)
 
 private fun SessionState.isActive(): Boolean = this is SessionState.Running || this is SessionState.Paused
 

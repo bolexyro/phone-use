@@ -70,12 +70,16 @@ class PhoneControlApplication : Application() {
         previewScope.launch { taskDisplayBackend.retryLiveSurface(sessionKey) }
     }
 
-    /** End one display, stopping its active agent run before releasing native resources. */
-    fun endTaskDisplay(sessionKey: String) {
-        if (sessionCoordinator.activeSessionId() == sessionKey) {
-            sessionCoordinator.stop("Display ended by the user.")
+    /** End one display, stopping its owning agent run before releasing native resources. */
+    fun endTaskDisplay(displayId: Int?, displayRef: String?) {
+        val selectedDisplayId = displayId ?: return
+        previewScope.launch {
+            val activeRunKey = sessionCoordinator.activeSessionId()
+            if (activeRunKey != null && taskDisplayBackend.isDisplayClaimedByRun(selectedDisplayId, activeRunKey)) {
+                sessionCoordinator.stop("Display ended by the user.")
+            }
+            taskDisplayBackend.closeTaskDisplay(selectedDisplayId, displayRef)
         }
-        previewScope.launch { taskDisplayBackend.closeTaskDisplay(sessionKey) }
     }
 
     override fun onCreate() {
@@ -121,6 +125,7 @@ class PhoneControlApplication : Application() {
             allowedPackagesProvider = { appPermissionRepository.enabledPackages() },
             fullAccessProvider = { appPermissionRepository.isFullAccessEnabled() },
             taskDisplayRequiredProvider = { true },
+            taskDisplayBackend = taskDisplayBackend,
         ).also { it.start() }
     }
 }

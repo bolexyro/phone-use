@@ -1062,9 +1062,13 @@ export function buildDhdDynamicTools(
   });
   const action = createActionSchema(metadata);
   const sequenceAction = createActionSchema(sequenceMetadata);
+  const displayTargetProperties: Record<string, unknown> = {
+    displayRef: { type: "string", pattern: "^dsp_[a-f0-9]{14}$" },
+  };
   const observeProperties: Record<string, unknown> = {
     purpose: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
     targetDescription: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+    ...displayTargetProperties,
   };
 
   return [
@@ -1088,9 +1092,30 @@ export function buildDhdDynamicTools(
       },
     ),
     dynamicTool(
+      "dhd_list_displays",
+      dhdToolDescription("dhd_list_displays", enableGuardRegions),
+      emptySchema(),
+    ),
+    dynamicTool(
+      "dhd_close_display",
+      dhdToolDescription("dhd_close_display", enableGuardRegions),
+      {
+        type: "object",
+        properties: {
+          ...displayTargetProperties,
+        },
+        required: ["displayRef"],
+        additionalProperties: false,
+      },
+    ),
+    dynamicTool(
       "dhd_get_foreground_app",
       dhdToolDescription("dhd_get_foreground_app", enableGuardRegions),
-      emptySchema(),
+      {
+        type: "object",
+        properties: displayTargetProperties,
+        additionalProperties: false,
+      },
     ),
     dynamicTool(
       "dhd_observe",
@@ -1107,6 +1132,7 @@ export function buildDhdDynamicTools(
       {
         type: "object",
         properties: {
+          ...displayTargetProperties,
           packageName: { type: "string", minLength: 1 },
           metadata: openAppMetadata,
         },
@@ -1119,7 +1145,7 @@ export function buildDhdDynamicTools(
       dhdToolDescription("dhd_execute", enableGuardRegions),
       {
         type: "object",
-        properties: { action },
+        properties: { ...displayTargetProperties, action },
         required: ["action"],
         additionalProperties: false,
       },
@@ -1130,6 +1156,7 @@ export function buildDhdDynamicTools(
       {
         type: "object",
         properties: {
+          ...displayTargetProperties,
           observationId: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
           actions: {
             type: "array",
@@ -1149,6 +1176,7 @@ export function buildDhdDynamicTools(
         type: "object",
         properties: {
           reason: { type: "string", minLength: 1, maxLength: DHD_MAX_TEXT_CHARS },
+          ...displayTargetProperties,
         },
         required: ["reason"],
         additionalProperties: false,

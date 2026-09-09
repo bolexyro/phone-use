@@ -12,9 +12,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import com.phonecontrol.assistant.developer.TaskPreviewState
 import com.phonecontrol.assistant.execution.TaskDisplayRecord
+import com.phonecontrol.assistant.execution.TaskDisplaySession
 import com.phonecontrol.assistant.execution.TaskDisplayStatus
+import com.phonecontrol.assistant.execution.taskDisplayReference
 import com.phonecontrol.assistant.session.AssistantForegroundService
 import com.phonecontrol.assistant.session.SessionState
 import com.phonecontrol.assistant.ui.PhoneControlApp
@@ -64,6 +67,25 @@ class MainActivity : ComponentActivity() {
                 com.phonecontrol.assistant.session.SessionState.Idle -> null
             }
             val coordinatorSessionKey = sessionState.sessionKeyOrNull()
+            // A new coordinator run can claim a retained display whose native
+            // owner key belongs to the previous run. Resolve that binding for
+            // the inline viewer so the UI follows the selected display rather
+            // than assuming the two keys are identical.
+            val resolvedDisplayForRun by produceState<TaskDisplaySession?>(
+                initialValue = null,
+                key1 = coordinatorSessionKey,
+                key2 = display?.sessionKey,
+                // Selecting a retained display with displayRef publishes its
+                // updated registry record after the initial lookup. Include
+                // the registry in the keys so the suspended lookup retries
+                // once that binding becomes visible to the UI.
+                key3 = backendDisplayRecords,
+            ) {
+                value = coordinatorSessionKey?.let { app.taskDisplayBackend.current(it) }
+            }
+            val displayForRun = resolvedDisplayForRun
+                ?: display?.takeIf { it.sessionKey == coordinatorSessionKey }
+            val activeDisplayOwnerKey = displayForRun?.sessionKey
             val currentToolName = coordinatorSessionKey?.let { sessionKey ->
                 events.asReversed()
                     .firstOrNull { event ->
@@ -71,15 +93,19 @@ class MainActivity : ComponentActivity() {
                     }
                     ?.toolName
             }
-            val preview = display?.takeIf { session ->
-                session.sessionKey == coordinatorSessionKey
-            }?.let { session ->
-                val error = playback as? TaskPreviewState.Error
+            val preview = displayForRun?.let { session ->
+                // The global preview state is retained for the legacy single
+                // viewer. Once a displayRef selects a retained display, use
+                // its per-session state so another display's decoder cannot
+                // make this preview appear stuck in Connecting.
+                val playbackForSession = previewStates[session.sessionKey]
+                    ?: playback.forSession(session.sessionKey)
+                val error = playbackForSession as? TaskPreviewState.Error
                 val appLabel = session.packageName.applicationLabel(appPackageManager)
                 LiveDisplayPreviewState(
                     status = when {
                         error?.sessionKey == session.sessionKey -> LiveDisplayPreviewStatus.ERROR
-                        (playback as? TaskPreviewState.Attached)?.session == session ->
+                        (playbackForSession as? TaskPreviewState.Attached)?.session == session ->
                             LiveDisplayPreviewStatus.LIVE
                         else -> LiveDisplayPreviewStatus.CONNECTING
                     },
@@ -87,7 +113,10 @@ class MainActivity : ComponentActivity() {
                     aspectRatio = session.geometry.width.toFloat() / session.geometry.height,
                     appLabel = appLabel,
                     sessionKey = session.sessionKey,
-                    pointerEvent = pointerEvent?.takeIf { it.sessionId == session.sessionKey },
+                    runSessionKey = coordinatorSessionKey,
+                    pointerEvent = pointerEvent?.takeIf {
+                        it.sessionId == coordinatorSessionKey || it.sessionId == session.sessionKey
+                    },
                     purpose = purpose,
                     currentToolName = currentToolName,
                 )
@@ -96,21 +125,20 @@ class MainActivity : ComponentActivity() {
                 record.toUiRecord(
                     preview = previewStates[record.sessionKey],
                     packageManager = appPackageManager,
-                    currentToolName = currentToolName.takeIf { record.sessionKey == coordinatorSessionKey },
+                    currentToolName = currentToolName.takeIf { record.sessionKey == activeDisplayOwnerKey },
                 )
             }.toMutableList()
             // A newly created session may be visible through activeSession a
             // frame before its durable registry record is published. Keep the
             // manager populated during that small handoff window.
-            display?.takeIf { session ->
-                session.sessionKey == coordinatorSessionKey
-            }?.let { session ->
+            displayForRun?.let { session ->
                 val activeRecord = TaskDisplayUiRecord(
                     sessionKey = session.sessionKey,
                     taskId = session.taskId,
                     packageName = session.packageName,
                     appLabel = session.packageName.applicationLabel(appPackageManager),
                     displayId = session.displayId,
+                    displayRef = taskDisplayReference(session.sessionKey, session.displayId),
                     geometry = session.geometry,
                     lifecycle = sessionState.toUiDisplayLifecycle(),
                     currentPurpose = purpose,
@@ -151,10 +179,10 @@ class MainActivity : ComponentActivity() {
                 previewState = preview,
                 displayRecords = mappedRecords,
                 onPreviewSurfaceAvailable = { surface ->
-                    display?.let { app.attachTaskPreview(it, surface) }
+                    displayForRun?.let { app.attachTaskPreview(it, surface) }
                 },
                 onPreviewSurfaceDestroyed = { surface ->
-                    display?.let { app.detachTaskPreview(it, surface) }
+                    displayForRun?.let { app.detachTaskPreview(it, surface) }
                 },
                 onTaskDisplaySurfaceAvailable = { record, surface ->
                     app.attachTaskPreview(record.sessionKey, surface)
@@ -163,7 +191,7 @@ class MainActivity : ComponentActivity() {
                     app.detachTaskPreview(record.sessionKey, surface)
                 },
                 onEndTaskDisplay = { record ->
-                    app.endTaskDisplay(record.sessionKey)
+                    app.endTaskDisplay(record.displayId, record.displayRef)
                 },
                 onRetryTaskDisplayPreview = { record ->
                     app.retryTaskPreview(record.sessionKey)
@@ -246,6 +274,7 @@ private fun TaskDisplayRecord.toUiRecord(
     packageName = packageName,
     appLabel = packageName.applicationLabel(packageManager),
     displayId = displayId,
+    displayRef = this.displayRef,
     geometry = geometry,
     lifecycle = status.toUiLifecycle(),
     currentPurpose = lastPurpose,
@@ -333,6 +362,13 @@ private fun SessionState.startedAtEpochMsOrZero(): Long = when (this) {
     is SessionState.Running -> startedAtEpochMs
     is SessionState.Paused -> startedAtEpochMs
     else -> 0L
+}
+
+private fun TaskPreviewState.forSession(sessionKey: String): TaskPreviewState? = when (this) {
+    TaskPreviewState.Detached -> null
+    is TaskPreviewState.Connecting -> takeIf { session.sessionKey == sessionKey }
+    is TaskPreviewState.Attached -> takeIf { session.sessionKey == sessionKey }
+    is TaskPreviewState.Error -> takeIf { this.sessionKey == sessionKey }
 }
 
 private fun SessionState.sessionKeyOrNull(): String? = when (this) {

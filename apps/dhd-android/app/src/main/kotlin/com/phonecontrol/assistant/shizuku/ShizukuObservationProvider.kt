@@ -10,6 +10,7 @@ import com.phonecontrol.assistant.domain.GuardRegion
 import com.phonecontrol.assistant.domain.ObservationSnapshot
 import com.phonecontrol.assistant.domain.ScreenProtection
 import com.phonecontrol.assistant.execution.PhoneProcessRunner
+import com.phonecontrol.assistant.execution.TaskDisplayResolution
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.LinkedHashMap
@@ -22,7 +23,10 @@ sealed interface ObservationCaptureResult {
         val screenshot: ByteArray,
     ) : ObservationCaptureResult
 
-    data class Failed(val message: String) : ObservationCaptureResult
+    data class Failed(
+        val message: String,
+        val code: String = "OBSERVATION_FAILED",
+    ) : ObservationCaptureResult
 }
 
 data class ForegroundAppInfo(
@@ -92,18 +96,36 @@ class PhoneObservationProvider(
      * an observation baseline. This is only situational context; callers must
      * still use capture() before sending any physical input.
      */
-    suspend fun getForegroundApp(taskSessionKey: String? = null): ForegroundAppResult {
+    suspend fun getForegroundApp(
+        taskSessionKey: String? = null,
+        displayId: Int? = null,
+        expectedDisplayRef: String? = null,
+    ): ForegroundAppResult {
         if (taskSessionKey != null) {
             val backend = taskDisplayBackend
                 ?: return ForegroundAppResult.Failed(
                     code = "TASK_DISPLAY_UNAVAILABLE",
                     message = "The task display is unavailable.",
                 )
-            val session = backend.current(taskSessionKey)
-                ?: return ForegroundAppResult.Failed(
-                    code = "TASK_DISPLAY_UNAVAILABLE",
-                    message = "The task display is no longer available.",
-                )
+            val session = if (displayId != null) {
+                when (val resolution = backend.resolveDisplay(
+                    displayId = displayId,
+                    claimForSessionKey = taskSessionKey,
+                    expectedDisplayRef = expectedDisplayRef,
+                )) {
+                    is TaskDisplayResolution.Ready -> resolution.target.session
+                    is TaskDisplayResolution.Unavailable -> return ForegroundAppResult.Failed(
+                        code = resolution.code,
+                        message = resolution.message,
+                    )
+                }
+            } else {
+                backend.current(taskSessionKey)
+                    ?: return ForegroundAppResult.Failed(
+                        code = "TASK_DISPLAY_UNAVAILABLE",
+                        message = "The task display is no longer available.",
+                    )
+            }
             return try {
                 val captured = backend.capture(session)
                 val foreground = captured.foreground
@@ -171,9 +193,17 @@ class PhoneObservationProvider(
         expectedPackageName: String? = null,
         guardRegions: List<GuardRegion> = emptyList(),
         taskSessionKey: String? = null,
+        displayId: Int? = null,
+        expectedDisplayRef: String? = null,
     ): ObservationCaptureResult {
         if (taskSessionKey != null) {
-            return captureTaskDisplay(taskSessionKey, expectedPackageName, guardRegions)
+            return captureTaskDisplay(
+                taskSessionKey = taskSessionKey,
+                expectedPackageName = expectedPackageName,
+                guardRegions = guardRegions,
+                displayId = displayId,
+                expectedDisplayRef = expectedDisplayRef,
+            )
         }
         val screenshotResult = processRunner.run(listOf("screencap", "-p"))
         if (screenshotResult.timedOut || screenshotResult.exitCode != 0) {
@@ -239,18 +269,41 @@ class PhoneObservationProvider(
         taskSessionKey: String,
         expectedPackageName: String?,
         guardRegions: List<GuardRegion>,
+        displayId: Int? = null,
+        expectedDisplayRef: String? = null,
     ): ObservationCaptureResult {
         val backend = taskDisplayBackend
-            ?: return ObservationCaptureResult.Failed("The task display is unavailable; refusing to use the physical display.")
-        val session = backend.current(taskSessionKey)
-            ?: return ObservationCaptureResult.Failed("The task display is no longer available; refusing to use the physical display.")
+            ?: return ObservationCaptureResult.Failed(
+                message = "The task display is unavailable; refusing to use the physical display.",
+                code = "TASK_DISPLAY_UNAVAILABLE",
+            )
+        val session = if (displayId != null) {
+            when (val resolution = backend.resolveDisplay(
+                displayId = displayId,
+                claimForSessionKey = taskSessionKey,
+                expectedDisplayRef = expectedDisplayRef,
+            )) {
+                is TaskDisplayResolution.Ready -> resolution.target.session
+                is TaskDisplayResolution.Unavailable -> return ObservationCaptureResult.Failed(
+                    message = resolution.message,
+                    code = resolution.code,
+                )
+            }
+        } else {
+            backend.current(taskSessionKey)
+                ?: return ObservationCaptureResult.Failed(
+                    message = "The task display is no longer available; refusing to use the physical display.",
+                    code = "TASK_DISPLAY_UNAVAILABLE",
+                )
+        }
         val captured = try {
             backend.capture(session)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             return ObservationCaptureResult.Failed(
-                "DHD task display capture failed: ${error.message ?: error::class.java.simpleName}",
+                message = "DHD task display capture failed: ${error.message ?: error::class.java.simpleName}",
+                code = "TASK_DISPLAY_UNAVAILABLE",
             )
         }
         if (captured.taskId != session.taskId) {

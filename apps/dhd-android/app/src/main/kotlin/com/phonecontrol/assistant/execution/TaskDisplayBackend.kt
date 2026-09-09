@@ -101,6 +101,49 @@ data class TaskDisplayRecord(
 
     val geometry: TaskDisplayGeometry
         get() = TaskDisplayGeometry(width, height, densityDpi, rotation)
+
+    /** Opaque generation-aware reference safe to expose to the agent. */
+    val displayRef: String
+        get() = taskDisplayReference(sessionKey, displayId)
+}
+
+/** A display plus its durable lifecycle metadata, resolved by logical ID. */
+data class TaskDisplayTarget(
+    val session: TaskDisplaySession,
+    val record: TaskDisplayRecord,
+) {
+    val displayRef: String
+        get() = record.displayRef
+}
+
+sealed interface TaskDisplayResolution {
+    data class Ready(val target: TaskDisplayTarget) : TaskDisplayResolution
+
+    data class Unavailable(
+        val code: String,
+        val message: String,
+        val record: TaskDisplayRecord? = null,
+    ) : TaskDisplayResolution
+}
+
+sealed interface TaskDisplayCloseResult {
+    data class Closed(val record: TaskDisplayRecord) : TaskDisplayCloseResult
+
+    data class Rejected(
+        val code: String,
+        val message: String,
+        val record: TaskDisplayRecord? = null,
+    ) : TaskDisplayCloseResult
+}
+
+/** Stable within one native display generation; never exposes the owner key. */
+fun taskDisplayReference(sessionKey: String, displayId: Int): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest("$sessionKey@$displayId".toByteArray(Charsets.UTF_8))
+    return buildString(18) {
+        append("dsp_")
+        digest.take(7).forEach { byte -> append("%02x".format(byte.toInt() and 0xff)) }
+    }
 }
 
 /**
@@ -199,6 +242,30 @@ interface TaskDisplayBackend {
     /** Return the current session for a coordinator key, if it still exists. */
     suspend fun current(sessionKey: String): TaskDisplaySession?
 
+    /** Resolve one exact display ID and optionally claim it for a live run. */
+    suspend fun resolveDisplay(
+        displayId: Int,
+        claimForSessionKey: String? = null,
+        expectedDisplayRef: String? = null,
+    ): TaskDisplayResolution = TaskDisplayResolution.Unavailable(
+        code = "TASK_DISPLAY_UNAVAILABLE",
+        message = "The task display backend is unavailable.",
+    )
+
+    /** Resolve the current display, or the only unexpired retained display. */
+    suspend fun resolveDefaultDisplay(
+        claimForSessionKey: String? = null,
+    ): TaskDisplayResolution = TaskDisplayResolution.Unavailable(
+        code = "TASK_DISPLAY_UNAVAILABLE",
+        message = "No task display is available.",
+    )
+
+    /** All native-backed sessions, including retained terminal displays. */
+    suspend fun activeDisplaySessions(): List<TaskDisplaySession> = emptyList()
+
+    /** Whether [displayId] is currently claimed by the supplied coordinator run. */
+    suspend fun isDisplayClaimedByRun(displayId: Int, runSessionKey: String): Boolean = false
+
     /** Capture the exact full-resolution frame and foreground app. */
     suspend fun capture(session: TaskDisplaySession): TaskDisplayCapture
 
@@ -222,12 +289,22 @@ interface TaskDisplayBackend {
     /** Invalidate agent work immediately while leaving the display viewable. */
     fun cancel(sessionKey: String)
 
+    /** Invalidate every display currently claimed by one coordinator run. */
+    fun cancelForRun(sessionKey: String) = cancel(sessionKey)
+
     /** Mark a run terminal while retaining its display for the viewer. */
     suspend fun retain(
         sessionKey: String,
         status: TaskDisplayStatus,
         error: String? = null,
     ) = Unit
+
+    /** Retain every display currently claimed by one coordinator run. */
+    suspend fun retainForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = retain(sessionKey, status, error)
 
     /** Update a non-terminal lifecycle state while the run remains active. */
     suspend fun updateStatus(
@@ -236,8 +313,18 @@ interface TaskDisplayBackend {
         error: String? = null,
     ) = Unit
 
+    /** Update every display currently claimed by one coordinator run. */
+    suspend fun updateStatusForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = updateStatus(sessionKey, status, error)
+
     /** Update the sanitized purpose shown in the live viewer footer. */
     fun updatePurpose(sessionKey: String, purpose: String) = Unit
+
+    /** Update every display currently claimed by one coordinator run. */
+    fun updatePurposeForRun(sessionKey: String, purpose: String) = updatePurpose(sessionKey, purpose)
 
     suspend fun close(session: TaskDisplaySession)
 
@@ -246,6 +333,15 @@ interface TaskDisplayBackend {
 
     /** Explicitly end a display from the task-display manager. */
     suspend fun closeTaskDisplay(sessionKey: String) = close(sessionKey)
+
+    /** Explicitly end one display selected by logical ID and generation ref. */
+    suspend fun closeTaskDisplay(
+        displayId: Int,
+        expectedDisplayRef: String? = null,
+    ): TaskDisplayCloseResult = TaskDisplayCloseResult.Rejected(
+        code = "DISPLAY_UNAVAILABLE",
+        message = "The task display backend is unavailable.",
+    )
 }
 
 val TaskDisplayStatus.isTerminal: Boolean

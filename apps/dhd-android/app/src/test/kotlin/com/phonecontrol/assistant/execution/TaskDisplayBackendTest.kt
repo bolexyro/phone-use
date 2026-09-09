@@ -30,6 +30,17 @@ class TaskDisplayBackendTest {
     }
 
     @Test
+    fun `display references are opaque generation-safe values`() {
+        val first = taskDisplayReference("run-1", 7)
+        val same = taskDisplayReference("run-1", 7)
+        val nextGeneration = taskDisplayReference("run-2", 7)
+
+        assertEquals(first, same)
+        assertTrue(first.matches(Regex("dsp_[a-f0-9]{14}")))
+        assertTrue(first != nextGeneration)
+    }
+
+    @Test
     fun `terminalization starts retention at the first terminal timestamp`() {
         val record = TaskDisplayRecord(
             sessionKey = "run-1",

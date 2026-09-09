@@ -39,6 +39,11 @@ import com.phonecontrol.assistant.execution.ForegroundAppResult
 import com.phonecontrol.assistant.execution.ObservationCaptureResult
 import com.phonecontrol.assistant.execution.PhoneObservationProvider
 import com.phonecontrol.assistant.execution.TransportResult
+import com.phonecontrol.assistant.execution.TaskDisplayBackend
+import com.phonecontrol.assistant.execution.TaskDisplayCloseResult
+import com.phonecontrol.assistant.execution.TaskDisplayResolution
+import com.phonecontrol.assistant.execution.TaskDisplayStatus
+import com.phonecontrol.assistant.execution.taskDisplayReference
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
@@ -93,6 +98,7 @@ class DevBridgeServer(
     private val fullAccessProvider: () -> Boolean = { false },
     /** Production DHD keeps every model observation/action on a task display. */
     private val taskDisplayRequiredProvider: () -> Boolean = { false },
+    private val taskDisplayBackend: TaskDisplayBackend? = null,
 ) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val installedAppsRepository = InstalledAppsRepository(context)
@@ -337,7 +343,9 @@ class DevBridgeServer(
                     "fail_session" -> failSession(requestId, json, writer)
                     "allowed_apps" -> allowedApps(requestId, json, writer)
                     "browse_apps" -> browseApps(requestId, json, writer)
-                    "foreground_app" -> foregroundApp(requestId, writer)
+                    "list_displays" -> listDisplays(requestId, writer)
+                    "close_display" -> closeDisplay(requestId, json, writer)
+                    "foreground_app" -> foregroundApp(requestId, json, writer)
                     "observe" -> observe(requestId, json, writer)
                     "execute_action" -> phoneActionMutex.withLock { executeAction(requestId, json, writer) }
                     "execute_sequence" -> phoneActionMutex.withLock { executeSequence(requestId, json, writer) }
@@ -780,6 +788,21 @@ class DevBridgeServer(
             )
             return
         }
+        val requestedDisplayRef = optionalDisplayRef(json)
+        val target = if (taskDisplayRequiredProvider() || requestedDisplayRef != null) {
+            when (val resolution = resolveDisplayTarget(displayRef = requestedDisplayRef)) {
+                is TaskDisplayResolution.Ready -> resolution.target
+                is TaskDisplayResolution.Unavailable -> {
+                    write(
+                        writer,
+                        errorResponse(requestId, resolution.message).put("code", resolution.code),
+                    )
+                    return
+                }
+            }
+        } else {
+            null
+        }
         val attention = coordinator.requestAttentionWaiter(reason)
         if (attention == null) {
             write(
@@ -811,8 +834,16 @@ class DevBridgeServer(
                     .put("sessionId", sessionId)
                     .put("acknowledged", true)
                     .put("message", "The user confirmed that the attention step is complete. Observe the phone before taking the next action.")
-                when (val captured = captureWithRetry(null, emptyList(), sessionId)) {
-                    is ObservationCaptureResult.Failed -> response.put("observationError", captured.message)
+                when (val captured = captureWithRetry(
+                    expectedPackageName = null,
+                    guardRegions = emptyList(),
+                    taskSessionKey = target?.session?.sessionKey ?: sessionId,
+                    displayId = target?.session?.displayId,
+                    expectedDisplayRef = target?.displayRef,
+                )) {
+                    is ObservationCaptureResult.Failed -> response
+                        .put("observationError", captured.message)
+                        .put("observationErrorCode", captured.code)
                     is ObservationCaptureResult.Succeeded -> {
                         remember(captured.snapshot)
                         response
@@ -903,6 +934,188 @@ class DevBridgeServer(
         )
     }
 
+    private suspend fun listDisplays(
+        requestId: String,
+        writer: BufferedWriter,
+    ) {
+        val backend = taskDisplayBackend
+        if (backend == null) {
+            write(
+                writer,
+                errorResponse(requestId, "The task display registry is unavailable.")
+                    .put("code", "TASK_DISPLAY_UNAVAILABLE"),
+            )
+            return
+        }
+        // Joining the registry's reconciliation job here ensures a freshly
+        // started app does not report stale persisted records before native
+        // sessions have been adopted or marked unavailable.
+        backend.activeDisplaySessions()
+        val now = System.currentTimeMillis()
+        val displays = backend.displayRecords.value
+            .asSequence()
+            .filter { record ->
+                record.status != TaskDisplayStatus.ENDED &&
+                    record.status != TaskDisplayStatus.EXPIRED &&
+                    (record.expiresAtEpochMs == null || record.expiresAtEpochMs > now)
+            }
+            .map(::displayJson)
+            .toList()
+        write(
+            writer,
+            JSONObject()
+                .put("type", "displays")
+                .put("requestId", requestId)
+                .put("ok", true)
+                .put("displays", JSONArray(displays))
+                .put("count", displays.size)
+                .put("message", if (displays.isEmpty()) "No task displays are available." else "Returned active and retained task displays."),
+        )
+    }
+
+    private suspend fun closeDisplay(
+        requestId: String,
+        json: JSONObject,
+        writer: BufferedWriter,
+    ) {
+        val backend = taskDisplayBackend
+        if (backend == null) {
+            write(
+                writer,
+                errorResponse(requestId, "The task display registry is unavailable.")
+                    .put("code", "TASK_DISPLAY_UNAVAILABLE"),
+            )
+            return
+        }
+        val displayRef = try {
+            optionalDisplayRef(json)
+        } catch (error: IllegalArgumentException) {
+            write(writer, errorResponse(requestId, error.message ?: "displayRef is invalid.").put("code", "INVALID_DISPLAY_REF"))
+            return
+        }
+        if (displayRef == null) {
+            write(
+                writer,
+                errorResponse(requestId, "displayRef is required to close a display safely. Call dhd_list_displays first and use the matching displayRef.")
+                    .put("code", "DISPLAY_REFERENCE_REQUIRED"),
+            )
+            return
+        }
+        backend.activeDisplaySessions()
+        val record = backend.displayRecords.value.firstOrNull { it.displayRef == displayRef }
+        if (record == null) {
+            write(
+                writer,
+                errorResponse(requestId, "No task display matches the supplied displayRef. Call dhd_list_displays to see the available displays.")
+                    .put("code", "DISPLAY_NOT_FOUND"),
+            )
+            return
+        }
+        val activeRunKey = coordinator.activeSessionId()
+        if (activeRunKey != null && backend.isDisplayClaimedByRun(record.displayId, activeRunKey)) {
+            write(
+                writer,
+                errorResponse(requestId, "The selected task display is being used by an active DHD run. Stop the active run first, then close the display.")
+                    .put("code", "DISPLAY_IN_USE"),
+            )
+            return
+        }
+        when (val result = backend.closeTaskDisplay(record.displayId, displayRef)) {
+            is TaskDisplayCloseResult.Rejected -> write(
+                writer,
+                errorResponse(requestId, result.message).put("code", result.code),
+            )
+
+            is TaskDisplayCloseResult.Closed -> write(
+                writer,
+                JSONObject()
+                    .put("type", "display_closed")
+                    .put("requestId", requestId)
+                    .put("ok", true)
+                    .put("displayRef", result.record.displayRef)
+                    .put("appLabel", appLabel(result.record.packageName))
+                    .put("status", result.record.status.name.lowercase())
+                    .put("message", "The selected task display was ended."),
+            )
+        }
+    }
+
+    private fun displayJson(record: com.phonecontrol.assistant.execution.TaskDisplayRecord): JSONObject = JSONObject()
+        .put("displayRef", record.displayRef)
+        .put("appLabel", appLabel(record.packageName))
+        .put("packageName", record.packageName)
+        .put("status", record.status.name.lowercase())
+        .put("width", record.width)
+        .put("height", record.height)
+        .put("densityDpi", record.densityDpi)
+        .put("createdAtEpochMs", record.createdAtEpochMs)
+        .put("terminalAtEpochMs", record.terminalAtEpochMs ?: JSONObject.NULL)
+        .put("expiresAtEpochMs", record.expiresAtEpochMs ?: JSONObject.NULL)
+        .put(
+            "remainingRetentionMs",
+            record.expiresAtEpochMs?.let { expiresAt -> (expiresAt - System.currentTimeMillis()).coerceAtLeast(0L) }
+                ?: JSONObject.NULL,
+        )
+        .put("lastPurpose", record.lastPurpose)
+        .put("error", record.error ?: JSONObject.NULL)
+
+    private fun appLabel(packageName: String): String = runCatching {
+        context.packageManager.getApplicationLabel(
+            context.packageManager.getApplicationInfo(packageName, 0),
+        ).toString()
+    }.getOrDefault(packageName)
+
+    private fun optionalDisplayRef(json: JSONObject): String? {
+        val ref = json.optString("displayRef").trim().takeIf(String::isNotEmpty) ?: return null
+        require(DISPLAY_REF_PATTERN.matches(ref)) {
+            "displayRef must match dsp_ followed by 14 lowercase hexadecimal characters."
+        }
+        return ref
+    }
+
+    private suspend fun resolveDisplayTarget(
+        displayRef: String?,
+        fallbackDisplayId: Int? = null,
+        fallbackDisplayRef: String? = null,
+        claimForRun: Boolean = true,
+    ): TaskDisplayResolution {
+        val backend = taskDisplayBackend
+            ?: return TaskDisplayResolution.Unavailable(
+                code = "TASK_DISPLAY_UNAVAILABLE",
+                message = "The task display registry is unavailable; call dhd_open_app to create a task display.",
+            )
+        val runSessionKey = coordinator.activeSessionId()
+        if (claimForRun && taskDisplayRequiredProvider() && runSessionKey == null) {
+            return TaskDisplayResolution.Unavailable(
+                code = "TASK_DISPLAY_UNAVAILABLE",
+                message = "No active task display run is available. Call dhd_open_app from an active DHD task first.",
+            )
+        }
+        val selectedDisplayRef = displayRef ?: fallbackDisplayRef
+        return if (selectedDisplayRef != null) {
+            backend.activeDisplaySessions()
+            val record = backend.displayRecords.value.firstOrNull { it.displayRef == selectedDisplayRef }
+                ?: return TaskDisplayResolution.Unavailable(
+                    code = "DISPLAY_NOT_FOUND",
+                    message = "No task display matches the supplied displayRef. Call dhd_list_displays to see the available displays.",
+                )
+            backend.resolveDisplay(
+                displayId = record.displayId,
+                claimForSessionKey = if (claimForRun) runSessionKey else null,
+                expectedDisplayRef = selectedDisplayRef,
+            )
+        } else if (fallbackDisplayId != null) {
+            backend.resolveDisplay(
+                displayId = fallbackDisplayId,
+                claimForSessionKey = if (claimForRun) runSessionKey else null,
+            )
+        } else {
+            backend.resolveDefaultDisplay(
+                claimForSessionKey = if (claimForRun) runSessionKey else null,
+            )
+        }
+    }
+
     private suspend fun observe(
         requestId: String,
         json: JSONObject,
@@ -915,17 +1128,31 @@ class DevBridgeServer(
             targetDescription = json.optString("targetDescription").trim().take(MAX_TEXT_CHARS).ifBlank { null },
             toolName = DHD_OBSERVE_TOOL,
         )
-        val taskSessionKey = coordinator.activeSessionId()
-        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
-            write(
-                writer,
-                errorResponse(requestId, "No active task display is available; the physical display was not observed.")
-                    .put("code", "TASK_DISPLAY_UNAVAILABLE"),
-            )
-            return
+        val requestedDisplayRef = optionalDisplayRef(json)
+        val target = if (taskDisplayRequiredProvider() || requestedDisplayRef != null) {
+            when (val resolution = resolveDisplayTarget(
+                displayRef = requestedDisplayRef,
+            )) {
+                is TaskDisplayResolution.Ready -> resolution.target
+                is TaskDisplayResolution.Unavailable -> {
+                    write(writer, errorResponse(requestId, resolution.message).put("code", resolution.code))
+                    return
+                }
+            }
+        } else {
+            null
         }
-        when (val captured = captureWithRetry(null, emptyList(), taskSessionKey)) {
-            is ObservationCaptureResult.Failed -> write(writer, errorResponse(requestId, captured.message))
+        when (val captured = captureWithRetry(
+            expectedPackageName = null,
+            guardRegions = emptyList(),
+            taskSessionKey = target?.session?.sessionKey ?: coordinator.activeSessionId(),
+            displayId = target?.session?.displayId,
+            expectedDisplayRef = target?.displayRef,
+        )) {
+            is ObservationCaptureResult.Failed -> write(
+                writer,
+                errorResponse(requestId, captured.message).put("code", captured.code),
+            )
             is ObservationCaptureResult.Succeeded -> {
                 remember(captured.snapshot)
                 writeObservation(writer, requestId, captured.snapshot, captured.screenshot)
@@ -935,22 +1162,32 @@ class DevBridgeServer(
 
     private suspend fun foregroundApp(
         requestId: String,
+        json: JSONObject,
         writer: BufferedWriter,
     ) {
         coordinator.recordPurpose(
             purpose = "Checking foreground app",
             toolName = DHD_FOREGROUND_APP_TOOL,
         )
-        val taskSessionKey = coordinator.activeSessionId()
-        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
-            write(
-                writer,
-                errorResponse(requestId, "No active task display is available; the physical display was not inspected.")
-                    .put("code", "TASK_DISPLAY_UNAVAILABLE"),
-            )
-            return
+        val requestedDisplayRef = optionalDisplayRef(json)
+        val target = if (taskDisplayRequiredProvider() || requestedDisplayRef != null) {
+            when (val resolution = resolveDisplayTarget(
+                displayRef = requestedDisplayRef,
+            )) {
+                is TaskDisplayResolution.Ready -> resolution.target
+                is TaskDisplayResolution.Unavailable -> {
+                    write(writer, errorResponse(requestId, resolution.message).put("code", resolution.code))
+                    return
+                }
+            }
+        } else {
+            null
         }
-        when (val result = observationProvider.getForegroundApp(taskSessionKey)) {
+        when (val result = observationProvider.getForegroundApp(
+            taskSessionKey = target?.session?.sessionKey ?: coordinator.activeSessionId(),
+            displayId = target?.session?.displayId,
+            expectedDisplayRef = target?.displayRef,
+        )) {
             is ForegroundAppResult.Failed -> write(
                 writer,
                 errorResponse(requestId, result.message).put("code", result.code),
@@ -964,7 +1201,6 @@ class DevBridgeServer(
                     .put("ok", true)
                     .put("packageName", result.app.packageName)
                     .put("activityName", result.app.activityName)
-                    .put("displayId", result.app.displayId)
                     .put("rotation", result.app.rotation)
                     .put("width", result.app.width)
                     .put("height", result.app.height)
@@ -976,7 +1212,8 @@ class DevBridgeServer(
                             .put("signals", JSONArray(result.app.screenProtection.signals))
                             .put("reason", result.app.screenProtection.reason ?: JSONObject.NULL),
                     )
-                    .put("message", "The current foreground app is ${result.app.packageName}."),
+                    .put("message", "The current foreground app is ${result.app.packageName}.")
+                    .also { response -> target?.displayRef?.let { response.put("displayRef", it) } },
             )
         }
     }
@@ -993,8 +1230,8 @@ class DevBridgeServer(
         val suppliedObservation = synchronized(observations) {
             observationId.takeIf(String::isNotBlank)?.let { observations[it] }
         }
-        val taskSessionKey = coordinator.activeSessionId()
-        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
+        val runSessionKey = coordinator.activeSessionId()
+        if (taskDisplayRequiredProvider() && runSessionKey == null) {
             write(
                 writer,
                 JSONObject()
@@ -1009,6 +1246,69 @@ class DevBridgeServer(
             )
             return
         }
+        val requestedDisplayRef = optionalDisplayRef(json)
+        val targetResolution = if (requestedDisplayRef != null ||
+            suppliedObservation != null ||
+            parsedAction !is OpenAppAction
+        ) {
+            resolveDisplayTarget(
+                displayRef = requestedDisplayRef,
+                fallbackDisplayId = suppliedObservation?.displayId,
+                fallbackDisplayRef = suppliedObservation?.taskSessionKey?.let { taskSessionKey ->
+                    taskDisplayReference(taskSessionKey, suppliedObservation.displayId)
+                },
+            )
+        } else {
+            null
+        }
+        val target = when (targetResolution) {
+            null -> null
+            is TaskDisplayResolution.Ready -> targetResolution.target
+            is TaskDisplayResolution.Unavailable -> {
+                // If there is no retained display, open_app is allowed to
+                // create a fresh one under the current run. Any other
+                // resolution failure is actionable and must reach the model.
+                if (parsedAction is OpenAppAction &&
+                    requestedDisplayRef == null &&
+                    targetResolution.code == "TASK_DISPLAY_UNAVAILABLE"
+                ) {
+                    null
+                } else {
+                    write(
+                        writer,
+                        JSONObject()
+                            .put("type", "completed")
+                            .put("requestId", requestId)
+                            .put("ok", false)
+                            .put("action", wireActionName(parsedAction))
+                            .put("outcome", "failed")
+                            .put("executed", false)
+                            .put("code", targetResolution.code)
+                            .put("message", targetResolution.message),
+                    )
+                    return
+                }
+            }
+        }
+        if (target != null && suppliedObservation != null &&
+            (suppliedObservation.displayId != target.session.displayId ||
+                suppliedObservation.taskSessionKey != target.session.sessionKey)
+        ) {
+            write(
+                writer,
+                JSONObject()
+                    .put("type", "completed")
+                    .put("requestId", requestId)
+                    .put("ok", false)
+                    .put("action", wireActionName(parsedAction))
+                    .put("outcome", "failed")
+                    .put("executed", false)
+                    .put("code", "DISPLAY_CHANGED")
+                    .put("message", "The supplied observation belongs to a different task display; call dhd_observe with the selected display before retrying."),
+            )
+            return
+        }
+        val taskSessionKey = target?.session?.sessionKey ?: runSessionKey
         val observation = if (suppliedObservation != null) {
             suppliedObservation
         } else if (parsedAction is OpenAppAction && observationId.isBlank()) {
@@ -1076,7 +1376,12 @@ class DevBridgeServer(
         // This bridge endpoint is the public dhd_execute tool. Preserve that
         // identity on the activity event so the live-display footer can use
         // the same green accent as the conversation trace row.
-        val result = coordinator.executeAction(action, observation, DHD_EXECUTE_TOOL)
+        val result = coordinator.executeAction(
+            action = action,
+            observation = observation,
+            toolName = DHD_EXECUTE_TOOL,
+            targetDisplay = target?.session,
+        )
         writeActionResult(writer, requestId, wireActionName(action), result)
         if (!result.isSuccessful()) {
             val response = JSONObject()
@@ -1100,7 +1405,16 @@ class DevBridgeServer(
         // A successful action may intentionally navigate to another activity,
         // system surface, or package. Capture what is actually on screen and
         // let the model decide what the new observation means.
-        when (val captured = captureWithRetry(null, emptyList(), taskSessionKey)) {
+        val postSession = target?.session ?: taskSessionKey?.let { key ->
+            taskDisplayBackend?.current(key)
+        }
+        when (val captured = captureWithRetry(
+            expectedPackageName = null,
+            guardRegions = emptyList(),
+            taskSessionKey = postSession?.sessionKey ?: taskSessionKey,
+            displayId = postSession?.displayId,
+            expectedDisplayRef = postSession?.let { taskDisplayReference(it.sessionKey, it.displayId) },
+        )) {
             is ObservationCaptureResult.Failed -> {
                 write(
                     writer,
@@ -1111,7 +1425,7 @@ class DevBridgeServer(
                         .put("action", wireActionName(action))
                         .put("outcome", "unknown")
                         .put("executed", "unknown")
-                        .put("code", "POST_OBSERVATION_FAILED")
+                        .put("code", if (captured.code == "OBSERVATION_FAILED") "POST_OBSERVATION_FAILED" else captured.code)
                         .put("message", "The action may have run, but the phone could not produce a post-action observation: ${captured.message}"),
                 )
             }
@@ -1173,8 +1487,8 @@ class DevBridgeServer(
             )
             return
         }
-        val taskSessionKey = coordinator.activeSessionId()
-        if (taskDisplayRequiredProvider() && taskSessionKey == null) {
+        val runSessionKey = coordinator.activeSessionId()
+        if (taskDisplayRequiredProvider() && runSessionKey == null) {
             val firstAction = request.actions.first()
             val failure = SequenceStepResult(
                 index = 0,
@@ -1196,9 +1510,44 @@ class DevBridgeServer(
             )
             return
         }
-        if (
-            taskDisplayRequiredProvider() &&
-            observation.taskSessionKey != taskSessionKey
+        val target = if (taskDisplayRequiredProvider() || request.displayRef != null || observation.taskSessionKey != null) {
+            when (val resolution = resolveDisplayTarget(
+                displayRef = request.displayRef,
+                fallbackDisplayId = observation.displayId,
+                fallbackDisplayRef = observation.taskSessionKey?.let { taskSessionKey ->
+                    taskDisplayReference(taskSessionKey, observation.displayId)
+                },
+            )) {
+                is TaskDisplayResolution.Ready -> resolution.target
+                is TaskDisplayResolution.Unavailable -> {
+                    val firstAction = request.actions.first()
+                    val failure = SequenceStepResult(
+                        index = 0,
+                        action = wireActionName(firstAction),
+                        status = SequenceStepResult.Status.FAILED,
+                        message = resolution.message,
+                        code = resolution.code,
+                        outcome = "failed",
+                        executed = false,
+                    )
+                    writeSequenceResult(
+                        writer,
+                        requestId,
+                        SequenceExecutionResult(
+                            requestedSteps = request.actions.size,
+                            steps = listOf(failure),
+                            failure = failure,
+                        ),
+                    )
+                    return
+                }
+            }
+        } else {
+            null
+        }
+        if (target != null &&
+            (observation.taskSessionKey != target.session.sessionKey ||
+                observation.displayId != target.session.displayId)
         ) {
             val firstAction = request.actions.first()
             val failure = SequenceStepResult(
@@ -1206,7 +1555,7 @@ class DevBridgeServer(
                 action = wireActionName(firstAction),
                 status = SequenceStepResult.Status.FAILED,
                 message = "The observation belongs to a different task display; no input was sent.",
-                code = "TASK_DISPLAY_CHANGED",
+                code = "DISPLAY_CHANGED",
                 outcome = "failed",
                 executed = false,
             )
@@ -1224,10 +1573,21 @@ class DevBridgeServer(
 
         val result = SequenceExecutor(
             executeAction = { action, baseline ->
-                coordinator.executeAction(action, baseline, DHD_EXECUTE_SEQUENCE_TOOL)
+                coordinator.executeAction(
+                    action = action,
+                    observation = baseline,
+                    toolName = DHD_EXECUTE_SEQUENCE_TOOL,
+                    targetDisplay = target?.session,
+                )
             },
             captureAfterAction = { guardRegions ->
-                captureWithRetry(null, guardRegions, taskSessionKey)
+                captureWithRetry(
+                    expectedPackageName = null,
+                    guardRegions = guardRegions,
+                    taskSessionKey = target?.session?.sessionKey ?: runSessionKey,
+                    displayId = target?.session?.displayId,
+                    expectedDisplayRef = target?.displayRef,
+                )
             },
             rememberObservation = ::remember,
             settleAfterAction = ::settleAfterAction,
@@ -1313,7 +1673,11 @@ class DevBridgeServer(
                 add(action)
             }
         }
-        return SequenceRequest(observationId = observationId, actions = actions)
+        return SequenceRequest(
+            observationId = observationId,
+            actions = actions,
+            displayRef = optionalDisplayRef(json),
+        )
     }
 
     private fun writeInvalidSequenceResult(
@@ -1588,9 +1952,6 @@ class DevBridgeServer(
         .put("id", snapshot.id)
         .put("packageName", snapshot.packageName)
         .put("activityName", snapshot.activityName ?: JSONObject.NULL)
-        .put("displayId", snapshot.displayId)
-        .put("taskSessionKey", snapshot.taskSessionKey ?: JSONObject.NULL)
-        .put("taskId", snapshot.taskId ?: JSONObject.NULL)
         .put("rotation", snapshot.rotation)
         .put("width", snapshot.width)
         .put("height", snapshot.height)
@@ -1603,6 +1964,11 @@ class DevBridgeServer(
                 .put("signals", JSONArray(snapshot.screenProtection.signals))
                 .put("reason", snapshot.screenProtection.reason ?: JSONObject.NULL),
         )
+        .also { json ->
+            snapshot.taskSessionKey?.let { sessionKey ->
+                json.put("displayRef", taskDisplayReference(sessionKey, snapshot.displayId))
+            }
+        }
 
     private fun stateName(state: SessionState): String = when (state) {
         SessionState.Idle -> "idle"
@@ -1693,10 +2059,13 @@ class DevBridgeServer(
         expectedPackageName: String?,
         guardRegions: List<GuardRegion>,
         taskSessionKey: String? = coordinator.activeSessionId(),
+        displayId: Int? = null,
+        expectedDisplayRef: String? = null,
     ): ObservationCaptureResult {
         if (taskDisplayRequiredProvider() && taskSessionKey == null) {
             return ObservationCaptureResult.Failed(
-                "No active task display is available; refusing to use the physical display.",
+                message = "No active task display is available; refusing to use the physical display.",
+                code = "TASK_DISPLAY_UNAVAILABLE",
             )
         }
         var last: ObservationCaptureResult = ObservationCaptureResult.Failed("No capture attempted.")
@@ -1705,6 +2074,8 @@ class DevBridgeServer(
                 expectedPackageName = expectedPackageName,
                 guardRegions = guardRegions,
                 taskSessionKey = taskSessionKey,
+                displayId = displayId,
+                expectedDisplayRef = expectedDisplayRef,
             )
             if (last is ObservationCaptureResult.Succeeded) return last
             delay(CAPTURE_RETRY_DELAY_MS)
@@ -1858,6 +2229,7 @@ class DevBridgeServer(
     private data class SequenceRequest(
         val observationId: String,
         val actions: List<PhoneAction>,
+        val displayRef: String? = null,
     )
 
     private class InvalidSequencePayloadException(
@@ -1892,6 +2264,7 @@ class DevBridgeServer(
         const val CAPTURE_ATTEMPTS = 5
         const val CAPTURE_RETRY_DELAY_MS = 250L
         val PACKAGE_PATTERN = Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+")
+        val DISPLAY_REF_PATTERN = Regex("dsp_[a-f0-9]{14}")
         val secureRandom = SecureRandom()
     }
 }

@@ -13,7 +13,10 @@ import com.phonecontrol.assistant.execution.TaskDisplayGeometry
 import com.phonecontrol.assistant.execution.TaskDisplaySession
 import com.phonecontrol.assistant.execution.TaskDisplaySpec
 import com.phonecontrol.assistant.execution.TaskDisplayRecord
+import com.phonecontrol.assistant.execution.TaskDisplayCloseResult
+import com.phonecontrol.assistant.execution.TaskDisplayResolution
 import com.phonecontrol.assistant.execution.TaskDisplayStatus
+import com.phonecontrol.assistant.execution.TaskDisplayTarget
 import com.phonecontrol.assistant.execution.isTerminal
 import com.phonecontrol.assistant.execution.terminalized
 import java.io.IOException
@@ -61,6 +64,9 @@ class DhdTaskDisplayBackend(
     private val stateLock = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessions = LinkedHashMap<String, BoundSession>()
+    /** Coordinator run key -> native display owner keys claimed by that run. */
+    private val runBindings = mutableMapOf<String, MutableSet<String>>()
+    private val bindingsLock = Any()
     private val cancelledKeys = ConcurrentHashMap.newKeySet<String>()
     private val operationLocks = ConcurrentHashMap<String, Mutex>()
     private val liveHandles = mutableMapOf<String, LiveHandle>()
@@ -133,6 +139,7 @@ class DhdTaskDisplayBackend(
                     true
                 } else {
                     sessions[sessionKey] = bound
+                    bindRunKey(sessionKey, sessionKey)
                     _activeSession.value = taskSession
                     publishPreviewStateLocked(
                         sessionKey,
@@ -164,7 +171,213 @@ class DhdTaskDisplayBackend(
             // rejects it for agent actions after [cancel] has installed the
             // tombstone.
             sessions[sessionKey]?.taskSession
+                ?: synchronized(bindingsLock) {
+                    // A retained display keeps its native owner key when a
+                    // later coordinator run claims it. Resolve the logical
+                    // run key back to that owner so subsequent observe,
+                    // execute, and foreground calls stay on the same display.
+                    runBindings[sessionKey]
+                        .orEmpty()
+                        .asSequence()
+                        .mapNotNull { ownerKey -> sessions[ownerKey]?.taskSession }
+                        .lastOrNull()
+                }
         }
+    }
+
+    override suspend fun activeDisplaySessions(): List<TaskDisplaySession> {
+        reconciliationJob.join()
+        return stateLock.withLock { sessions.values.map { it.taskSession } }
+    }
+
+    override suspend fun isDisplayClaimedByRun(displayId: Int, runSessionKey: String): Boolean {
+        if (displayId <= 0 || runSessionKey.isBlank()) return false
+        reconciliationJob.join()
+        val ownerKey = stateLock.withLock {
+            sessions.values
+                .firstOrNull { it.taskSession.displayId == displayId }
+                ?.taskSession
+                ?.sessionKey
+        } ?: return false
+        return synchronized(bindingsLock) {
+            runBindings[runSessionKey]?.contains(ownerKey) == true
+        }
+    }
+
+    override suspend fun resolveDisplay(
+        displayId: Int,
+        claimForSessionKey: String?,
+        expectedDisplayRef: String?,
+    ): TaskDisplayResolution {
+        if (displayId <= 0) {
+            return TaskDisplayResolution.Unavailable(
+                code = "INVALID_DISPLAY_ID",
+                message = "The selected task display reference is invalid; the physical display is never controlled by DHD.",
+            )
+        }
+        reconciliationJob.join()
+        val bound = stateLock.withLock {
+            sessions.values.firstOrNull { it.taskSession.displayId == displayId }
+        }
+        val record = findRecordByDisplayId(displayId)
+        if (bound == null) {
+            return unavailableForRecord(displayId, record)
+        }
+        val target = TaskDisplayTarget(bound.taskSession, record ?: bound.taskSession.toRecord(
+            status = TaskDisplayStatus.RUNNING,
+            createdAtEpochMs = nowEpochMs(),
+        ))
+        if (expectedDisplayRef != null && expectedDisplayRef != target.displayRef) {
+            return TaskDisplayResolution.Unavailable(
+                code = "DISPLAY_REFERENCE_CHANGED",
+                message = "The selected task display no longer matches the supplied displayRef. Call dhd_list_displays or dhd_observe again and use the current display.",
+                record = record,
+            )
+        }
+        if (claimForSessionKey == null || claimForSessionKey == bound.taskSession.sessionKey) {
+            return TaskDisplayResolution.Ready(target)
+        }
+        return claimDisplayForRun(target, claimForSessionKey)
+    }
+
+    override suspend fun resolveDefaultDisplay(
+        claimForSessionKey: String?,
+    ): TaskDisplayResolution {
+        reconciliationJob.join()
+        if (claimForSessionKey != null) {
+            current(claimForSessionKey)?.let { currentSession ->
+                return resolveDisplay(currentSession.displayId, claimForSessionKey)
+            }
+        }
+        val now = nowEpochMs()
+        val candidates = stateLock.withLock {
+            sessions.values.mapNotNull { bound ->
+                val record = findRecordByDisplayId(bound.taskSession.displayId)
+                val eligible = record == null ||
+                    (record.status.isTerminal &&
+                        record.status != TaskDisplayStatus.ENDED &&
+                        record.status != TaskDisplayStatus.EXPIRED &&
+                        (record.expiresAtEpochMs == null || record.expiresAtEpochMs > now))
+                if (eligible) TaskDisplayTarget(
+                    bound.taskSession,
+                    record ?: bound.taskSession.toRecord(
+                        status = TaskDisplayStatus.RUNNING,
+                        createdAtEpochMs = now,
+                    ),
+                ) else null
+            }
+        }
+        if (candidates.isEmpty()) {
+            return TaskDisplayResolution.Unavailable(
+                code = "TASK_DISPLAY_UNAVAILABLE",
+                message = "No active or retained task display is available. Call dhd_open_app to create one.",
+            )
+        }
+        if (candidates.size > 1) {
+            return TaskDisplayResolution.Unavailable(
+                code = "DISPLAY_SELECTION_REQUIRED",
+                message = "More than one task display is available. Call dhd_list_displays, choose a displayRef, then retry the tool with that displayRef.",
+            )
+        }
+        val candidate = candidates.single()
+        return if (claimForSessionKey == null) {
+            TaskDisplayResolution.Ready(candidate)
+        } else {
+            claimDisplayForRun(candidate, claimForSessionKey)
+        }
+    }
+
+    private suspend fun claimDisplayForRun(
+        target: TaskDisplayTarget,
+        runSessionKey: String,
+    ): TaskDisplayResolution {
+        val ownerKey = target.session.sessionKey
+        val operationLock = operationLocks.getOrPut(ownerKey) { Mutex() }
+        return operationLock.withLock {
+            val currentRecord = findRecord(ownerKey) ?: target.record
+            if (currentRecord.status == TaskDisplayStatus.ENDED ||
+                currentRecord.status == TaskDisplayStatus.EXPIRED
+            ) {
+                return@withLock unavailableForRecord(target.session.displayId, currentRecord)
+            }
+            if (currentRecord.expiresAtEpochMs != null && currentRecord.expiresAtEpochMs <= nowEpochMs()) {
+                return@withLock TaskDisplayResolution.Unavailable(
+                    code = "DISPLAY_EXPIRED",
+                    message = "The selected task display expired after its retention period. Call dhd_open_app with the app package to create a new display.",
+                    record = currentRecord,
+                )
+            }
+            val alreadyBoundToRun = synchronized(bindingsLock) {
+                runBindings[runSessionKey]?.contains(ownerKey) == true
+            }
+            val isOwnedByAnotherRun = (currentRecord.status == TaskDisplayStatus.RUNNING ||
+                currentRecord.status == TaskDisplayStatus.PAUSED) &&
+                !alreadyBoundToRun
+            if (isOwnedByAnotherRun && ownerKey != runSessionKey) {
+                return@withLock TaskDisplayResolution.Unavailable(
+                    code = "DISPLAY_IN_USE",
+                    message = "The selected task display is being used by another active DHD run. Wait for it to finish or stop that run before selecting this display.",
+                    record = currentRecord,
+                )
+            }
+            cancelledKeys.remove(ownerKey)
+            bindRunKey(runSessionKey, ownerKey)
+            if (currentRecord.status.isTerminal) {
+                expiryJobs.remove(ownerKey)?.cancel()
+                publishRecord(
+                    currentRecord.copy(
+                        status = TaskDisplayStatus.RUNNING,
+                        terminalAtEpochMs = null,
+                        expiresAtEpochMs = null,
+                        lastPurpose = DEFAULT_PURPOSE,
+                        error = null,
+                    ),
+                )
+            }
+            TaskDisplayResolution.Ready(
+                TaskDisplayTarget(
+                    target.session,
+                    findRecord(ownerKey) ?: currentRecord.copy(status = TaskDisplayStatus.RUNNING),
+                ),
+            )
+        }
+    }
+
+    private fun unavailableForRecord(
+        displayId: Int,
+        record: TaskDisplayRecord?,
+    ): TaskDisplayResolution.Unavailable {
+        if (record == null) {
+            return TaskDisplayResolution.Unavailable(
+                code = "DISPLAY_NOT_FOUND",
+                message = "No DHD task display matches the selected displayRef. Call dhd_list_displays to see the available displays.",
+            )
+        }
+        return when {
+            record.status == TaskDisplayStatus.EXPIRED ||
+                (record.expiresAtEpochMs != null && record.expiresAtEpochMs <= nowEpochMs()) ->
+                TaskDisplayResolution.Unavailable(
+                    code = "DISPLAY_EXPIRED",
+                    message = "The selected task display expired after its retention period. Call dhd_open_app with the app package to create a new display.",
+                    record = record,
+                )
+            record.status == TaskDisplayStatus.ENDED ->
+                TaskDisplayResolution.Unavailable(
+                    code = "DISPLAY_ENDED",
+                    message = "The selected task display was explicitly ended. Call dhd_open_app with the app package to create a new display.",
+                    record = record,
+                )
+            else ->
+                TaskDisplayResolution.Unavailable(
+                    code = "DISPLAY_UNAVAILABLE",
+                    message = "The selected task display is no longer backed by a native DHD session. Call dhd_open_app with the app package to create a new display.",
+                    record = record,
+                )
+        }
+    }
+
+    private fun findRecordByDisplayId(displayId: Int): TaskDisplayRecord? = synchronized(recordsLock) {
+        _displayRecords.value.firstOrNull { it.displayId == displayId }
     }
 
     override suspend fun capture(session: TaskDisplaySession): TaskDisplayCapture {
@@ -184,7 +397,7 @@ class DhdTaskDisplayBackend(
             }
             val foreground = resolveForeground(session)
                 ?: throw TaskDisplayException(
-                    "The foreground app on display ${session.displayId} could not be identified.",
+                    "The foreground app on the selected task display could not be identified.",
                 )
             val geometry = session.geometry.copy(
                 width = capture.session.width,
@@ -326,6 +539,14 @@ class DhdTaskDisplayBackend(
         nativeManager.cancel(sessionKey)
     }
 
+    override fun cancelForRun(sessionKey: String) {
+        // A retained display can be claimed by a later coordinator run while
+        // keeping its original native owner key. Invalidate every owner bound
+        // to this run so an in-flight action cannot outlive the run that
+        // authorized it.
+        ownerKeysForRun(sessionKey).forEach(::cancel)
+    }
+
     override suspend fun retain(
         sessionKey: String,
         status: TaskDisplayStatus,
@@ -351,6 +572,16 @@ class DhdTaskDisplayBackend(
         scheduleExpiry(retained)
     }
 
+    override suspend fun retainForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String?,
+    ) {
+        boundOwnerKeysForRun(sessionKey).forEach { ownerKey ->
+            retain(ownerKey, status, error)
+        }
+    }
+
     override suspend fun updateStatus(
         sessionKey: String,
         status: TaskDisplayStatus,
@@ -366,10 +597,26 @@ class DhdTaskDisplayBackend(
         )
     }
 
+    override suspend fun updateStatusForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String?,
+    ) {
+        boundOwnerKeysForRun(sessionKey).forEach { ownerKey ->
+            updateStatus(ownerKey, status, error)
+        }
+    }
+
     override fun updatePurpose(sessionKey: String, purpose: String) {
         val safePurpose = purpose.trim().take(MAX_RECORD_PURPOSE_CHARS).ifBlank { return }
         val existing = findRecord(sessionKey) ?: return
         publishRecord(existing.copy(lastPurpose = safePurpose))
+    }
+
+    override fun updatePurposeForRun(sessionKey: String, purpose: String) {
+        boundOwnerKeysForRun(sessionKey).forEach { ownerKey ->
+            updatePurpose(ownerKey, purpose)
+        }
     }
 
     override suspend fun close(session: TaskDisplaySession) {
@@ -381,7 +628,6 @@ class DhdTaskDisplayBackend(
     }
 
     private suspend fun close(sessionKey: String, expected: TaskDisplaySession?) {
-        cancelledKeys += sessionKey
         val operationLock = operationLocks.getOrPut(sessionKey) { Mutex() }
         operationLock.withLock {
             val shouldClose = stateLock.withLock {
@@ -407,6 +653,7 @@ class DhdTaskDisplayBackend(
                 runCatching { nativeManager.close(sessionKey) }
             }
             if (!shouldClose && expected != null) return@withLock
+            unbindOwner(sessionKey)
             expiryJobs.remove(sessionKey)?.cancel()
             val existing = findRecord(sessionKey)
             if (existing != null) {
@@ -420,6 +667,61 @@ class DhdTaskDisplayBackend(
                 )
             }
         }
+    }
+
+    override suspend fun closeTaskDisplay(
+        displayId: Int,
+        expectedDisplayRef: String?,
+    ): TaskDisplayCloseResult {
+        if (displayId <= 0) {
+            return TaskDisplayCloseResult.Rejected(
+                code = "INVALID_DISPLAY_ID",
+                message = "The selected task display reference is invalid; the physical display is never controlled by DHD.",
+            )
+        }
+        reconciliationJob.join()
+        val record = findRecordByDisplayId(displayId)
+            ?: return TaskDisplayCloseResult.Rejected(
+                code = "DISPLAY_NOT_FOUND",
+                message = "No DHD task display matches the selected displayRef. Call dhd_list_displays to see the available displays.",
+            )
+        if (expectedDisplayRef != null && expectedDisplayRef != record.displayRef) {
+            return TaskDisplayCloseResult.Rejected(
+                code = "DISPLAY_REFERENCE_CHANGED",
+                message = "The selected task display no longer matches the supplied displayRef. Call dhd_list_displays and retry with the current display.",
+                record = record,
+            )
+        }
+        if (record.status == TaskDisplayStatus.ENDED) {
+            return TaskDisplayCloseResult.Rejected(
+                code = "DISPLAY_ENDED",
+                message = "The selected task display has already been ended.",
+                record = record,
+            )
+        }
+        if (record.status == TaskDisplayStatus.EXPIRED) {
+            return TaskDisplayCloseResult.Rejected(
+                code = "DISPLAY_EXPIRED",
+                message = "The selected task display has already expired and cannot be closed again.",
+                record = record,
+            )
+        }
+        val bound = stateLock.withLock {
+            sessions.values.firstOrNull { it.taskSession.displayId == displayId }
+        }
+        if (bound != null) {
+            close(bound.taskSession)
+        } else {
+            // The persisted record can outlive a native session. Closing by
+            // its exact owner key is still safe and never targets display 0.
+            close(record.sessionKey)
+        }
+        val closed = findRecord(record.sessionKey) ?: record.copy(
+            status = TaskDisplayStatus.ENDED,
+            terminalAtEpochMs = record.terminalAtEpochMs ?: nowEpochMs(),
+            expiresAtEpochMs = nowEpochMs(),
+        )
+        return TaskDisplayCloseResult.Closed(closed)
     }
 
     /** Serialize preview attach/detach without applying the action tombstone. */
@@ -540,6 +842,7 @@ class DhdTaskDisplayBackend(
 
             stateLock.withLock {
                 sessions[record.sessionKey] = BoundSession(nativeSession, taskSession)
+                bindRunKey(record.sessionKey, record.sessionKey)
                 // Keep the terminal action tombstone, but allow an unexpired
                 // running/attention display to be used by the coordinator
                 // after an Activity/process restart.
@@ -607,13 +910,33 @@ class DhdTaskDisplayBackend(
             record.expiresAtEpochMs != expectedExpiry ||
             expectedExpiry > nowEpochMs()
         ) return
-        closeInternal(sessionKey, finalStatus = TaskDisplayStatus.EXPIRED)
+        closeInternal(
+            sessionKey,
+            finalStatus = TaskDisplayStatus.EXPIRED,
+            expectedExpiry = expectedExpiry,
+        )
     }
 
-    private suspend fun closeInternal(sessionKey: String, finalStatus: TaskDisplayStatus) {
-        cancelledKeys += sessionKey
+    private suspend fun closeInternal(
+        sessionKey: String,
+        finalStatus: TaskDisplayStatus,
+        expectedExpiry: Long? = null,
+    ) {
         val operationLock = operationLocks.getOrPut(sessionKey) { Mutex() }
         operationLock.withLock {
+            if (expectedExpiry != null) {
+                val current = findRecord(sessionKey)
+                if (current == null ||
+                    current.expiresAtEpochMs != expectedExpiry ||
+                    !current.status.isTerminal ||
+                    current.status == TaskDisplayStatus.ENDED ||
+                    current.status == TaskDisplayStatus.EXPIRED ||
+                    expectedExpiry > nowEpochMs()
+                ) {
+                    return@withLock
+                }
+            }
+            cancelledKeys += sessionKey
             stateLock.withLock {
                 sessions.remove(sessionKey)
                 previewStateJobs.remove(sessionKey)?.cancel()
@@ -625,6 +948,7 @@ class DhdTaskDisplayBackend(
                     publishPreviewStateLocked(sessionKey, TaskPreviewState.Detached)
                 }
             }
+            unbindOwner(sessionKey)
             runCatching { nativeManager.close(sessionKey) }
             expiryJobs.remove(sessionKey)?.cancel()
             findRecord(sessionKey)?.let { existing ->
@@ -650,6 +974,48 @@ class DhdTaskDisplayBackend(
 
     private fun findRecord(sessionKey: String): TaskDisplayRecord? = synchronized(recordsLock) {
         _displayRecords.value.firstOrNull { it.sessionKey == sessionKey }
+    }
+
+    /** Keep one native owner associated with at most one logical run. */
+    private fun bindRunKey(runKey: String, ownerKey: String) {
+        synchronized(bindingsLock) {
+            runBindings.forEach { (boundRunKey, owners) ->
+                if (boundRunKey != runKey) owners.remove(ownerKey)
+            }
+            runBindings.values.removeAll { it.isEmpty() }
+            runBindings.getOrPut(runKey) { linkedSetOf() }.add(ownerKey)
+        }
+    }
+
+    private fun ownerKeysForRun(runKey: String): List<String> = synchronized(bindingsLock) {
+        val owners = runBindings[runKey].orEmpty()
+        if (owners.isNotEmpty()) {
+            owners.toList()
+        } else if (runBindings.any { (otherRunKey, boundOwners) ->
+                otherRunKey != runKey && runKey in boundOwners
+            }
+        ) {
+            // This key is the native owner of a display that has already been
+            // claimed by another run. A late stop from the old run must not
+            // cancel the new run's display.
+            emptyList()
+        } else {
+            // Preserve the create-before-bind cancellation race: a run that
+            // has not published a display still needs a tombstone by its own
+            // key so a late native create is closed safely.
+            listOf(runKey)
+        }
+    }
+
+    private fun boundOwnerKeysForRun(runKey: String): List<String> = synchronized(bindingsLock) {
+        runBindings[runKey]?.toList().orEmpty()
+    }
+
+    private fun unbindOwner(ownerKey: String) {
+        synchronized(bindingsLock) {
+            runBindings.values.forEach { it.remove(ownerKey) }
+            runBindings.values.removeAll { it.isEmpty() }
+        }
     }
 
     private fun sortRecords(records: List<TaskDisplayRecord>): List<TaskDisplayRecord> =

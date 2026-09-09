@@ -45,6 +45,7 @@ sealed interface TransportResult {
 enum class RejectionCode {
     DEVELOPER_MODE_UNAVAILABLE,
     TASK_DISPLAY_UNAVAILABLE,
+    DISPLAY_LIMIT_REACHED,
     OBSERVATION_MISSING,
     OBSERVATION_FAILED,
     STALE_OBSERVATION,
@@ -67,6 +68,9 @@ interface PhoneActionTransport {
     /** Invalidate queued/in-flight work before a task display is released. */
     fun cancelSession(sessionKey: String) = Unit
 
+    /** Invalidate every display currently claimed by one coordinator run. */
+    fun cancelSessionForRun(sessionKey: String) = cancelSession(sessionKey)
+
     /** Release resources associated with a completed task display. */
     suspend fun closeSession(sessionKey: String) = Unit
 
@@ -77,12 +81,26 @@ interface PhoneActionTransport {
         error: String? = null,
     ) = Unit
 
+    /** Retain every display currently claimed by one coordinator run. */
+    suspend fun retainSessionForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = retainSession(sessionKey, status, error)
+
     /** Update a live display's lifecycle status without ending its run. */
     suspend fun updateSessionDisplayStatus(
         sessionKey: String,
         status: TaskDisplayStatus,
         error: String? = null,
     ) = Unit
+
+    /** Update every display currently claimed by one coordinator run. */
+    suspend fun updateSessionDisplayStatusForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String? = null,
+    ) = updateSessionDisplayStatus(sessionKey, status, error)
 }
 
 /** Executor for the typed v0 action set over DHD's selected phone bridge. */
@@ -122,6 +140,10 @@ class TypedPhoneActionTransport(
         taskDisplayBackend?.cancel(sessionKey)
     }
 
+    override fun cancelSessionForRun(sessionKey: String) {
+        taskDisplayBackend?.cancelForRun(sessionKey)
+    }
+
     override suspend fun closeSession(sessionKey: String) {
         taskDisplayBackend?.close(sessionKey)
     }
@@ -134,12 +156,28 @@ class TypedPhoneActionTransport(
         taskDisplayBackend?.retain(sessionKey, status, error)
     }
 
+    override suspend fun retainSessionForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String?,
+    ) {
+        taskDisplayBackend?.retainForRun(sessionKey, status, error)
+    }
+
     override suspend fun updateSessionDisplayStatus(
         sessionKey: String,
         status: TaskDisplayStatus,
         error: String?,
     ) {
         taskDisplayBackend?.updateStatus(sessionKey, status, error)
+    }
+
+    override suspend fun updateSessionDisplayStatusForRun(
+        sessionKey: String,
+        status: TaskDisplayStatus,
+        error: String?,
+    ) {
+        taskDisplayBackend?.updateStatusForRun(sessionKey, status, error)
     }
 
     private suspend fun executeInternal(
@@ -254,9 +292,14 @@ class TypedPhoneActionTransport(
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                val message = "The task display could not open ${action.packageName}: ${error.message ?: error::class.java.simpleName}"
                 TransportResult.Rejected(
-                    RejectionCode.TASK_DISPLAY_UNAVAILABLE,
-                    "The task display could not open ${action.packageName}: ${error.message ?: error::class.java.simpleName}",
+                    code = if (message.contains("limit reached", ignoreCase = true)) {
+                        RejectionCode.DISPLAY_LIMIT_REACHED
+                    } else {
+                        RejectionCode.TASK_DISPLAY_UNAVAILABLE
+                    },
+                    message = message,
                 )
             }
         }
