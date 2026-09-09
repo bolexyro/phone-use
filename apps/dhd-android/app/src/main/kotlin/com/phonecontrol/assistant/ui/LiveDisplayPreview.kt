@@ -54,8 +54,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -205,6 +207,7 @@ const val DEFAULT_LIVE_DISPLAY_PREVIEW_ASPECT_RATIO = 9f / 16f
 
 private const val FULLSCREEN_DISPLAY_SCALE = 0.90f
 private const val FULLSCREEN_DISPLAY_CORNER_RADIUS_DP = 12
+private val FULLSCREEN_PURPOSE_SLOT_HEIGHT = 48.dp
 
 /**
  * Renders the agent's virtual display continuously into a read-only surface.
@@ -249,7 +252,7 @@ fun LiveDisplayPreview(
 
     val previewAspectRatio = state.aspectRatio.takeIf { it.isFinite() && it > 0f }
         ?: DEFAULT_LIVE_DISPLAY_PREVIEW_ASPECT_RATIO
-    val shape = RoundedCornerShape(18.dp)
+    val shape = RoundedCornerShape(FULLSCREEN_DISPLAY_CORNER_RADIUS_DP.dp)
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
@@ -305,10 +308,15 @@ fun LiveDisplayPreview(
         MaterialSurface(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(10.dp)
-                .size(40.dp)
+                .padding(6.dp)
+                .size(48.dp)
+                .zIndex(2f)
                 .clip(RoundedCornerShape(999.dp))
-                .clickable(onClick = onExpand),
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = "Open full-screen viewer",
+                    onClick = onExpand,
+                ),
             shape = RoundedCornerShape(999.dp),
             color = colors.composerBackground.copy(alpha = 0.92f),
         ) {
@@ -317,7 +325,7 @@ fun LiveDisplayPreview(
                     painter = painterResource(R.drawable.ic_fullscreen),
                     contentDescription = "Open full-screen viewer",
                     tint = colors.textPrimary,
-                    modifier = Modifier.size(19.dp),
+                    modifier = Modifier.size(21.dp),
                 )
             }
         }
@@ -456,23 +464,33 @@ fun FullScreenLiveDisplayViewer(
                     Column(
                         modifier = Modifier.padding(start = 18.dp, top = 8.dp, end = 18.dp, bottom = 20.dp),
                     ) {
-                        if (!isCompleted) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.Center,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_connected_nodes),
-                                    contentDescription = "MCP activity",
-                                    tint = purposeIconColor,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                AnimatedPurposeText(
-                                    text = purpose.withTrailingEllipsis(),
-                                    maxLines = 2,
-                                    modifier = Modifier.padding(start = 8.dp),
-                                )
+                        // Keep a fixed purpose slot so a one-line to two-line
+                        // update changes only the text, never the available
+                        // height of the phone surface above it.
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(FULLSCREEN_PURPOSE_SLOT_HEIGHT),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (!isCompleted) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_connected_nodes),
+                                        contentDescription = "MCP activity",
+                                        tint = purposeIconColor,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    AnimatedPurposeText(
+                                        text = purpose.withTrailingEllipsis(),
+                                        maxLines = 2,
+                                        modifier = Modifier.padding(start = 8.dp),
+                                    )
+                                }
                             }
                         }
                         if (showAttentionActions) {
